@@ -1,6 +1,6 @@
 # keepass-core
 
-Reference implementation of the [KeePass](https://keepass.info/) (KDBX) password database format in pure Rust.
+A pure Rust implementation of the [KeePass](https://keepass.info/) (KDBX) password database format.
 
 Full lossless round-trip read/write for KDBX3 and KDBX4, preserving unknown XML elements for forward compatibility. Interop-tested against KeePass2, KeePassXC, KeeWeb, Strongbox, KeePassium, and MacPass.
 
