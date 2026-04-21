@@ -236,7 +236,10 @@ mod tests {
         let sig = FileSignature::read(&fake_header(99, 0)).expect("parses");
         assert!(matches!(
             sig.version(),
-            Err(FormatError::UnsupportedVersion { major: 99, minor: 0 })
+            Err(FormatError::UnsupportedVersion {
+                major: 99,
+                minor: 0
+            })
         ));
     }
 
