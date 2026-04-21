@@ -129,7 +129,9 @@ def verify_malformed(sidecar_path: Path, errors: list[str]) -> None:
 def main() -> int:
     errors: list[str] = []
     for sidecar in sorted(HERE.rglob("*.json")):
-        if sidecar.name == "dependabot.yml":
+        # Skip the Node generator's package metadata — it lives under .node/
+        # which also holds node_modules/ with many unrelated .json files.
+        if "/.node/" in str(sidecar) or "/node_modules/" in str(sidecar):
             continue
         if "/malformed/" in str(sidecar):
             verify_malformed(sidecar, errors)

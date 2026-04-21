@@ -1,0 +1,50 @@
+{
+  "attachments": [
+    {
+      "entry": "Larger Binary",
+      "filename": "100kib.bin",
+      "size": 102400,
+      "sha256": "1a5d6a2122f7006ce9ea23e5b20e279f1064f6bee3e64a6d640697b5b72b7a38"
+    },
+    {
+      "entry": "Medium Binary",
+      "filename": "10kib.bin",
+      "size": 10240,
+      "sha256": "e541f58b78c1d384f7a8aeef7578957d3302f1e0d6386e8c213cfb1201674bbc"
+    },
+    {
+      "entry": "Small Image",
+      "filename": "1x1.png",
+      "size": 68,
+      "sha256": "43739c566e26fd7cb88f69d3864ea34740372f5ee99acac169e090beffbce5c6"
+    },
+    {
+      "entry": "Empty",
+      "filename": "empty.dat",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "entry": "Small Text",
+      "filename": "hello.txt",
+      "size": 13,
+      "sha256": "37980c33951de6b0e450c3701b219bfeee930544705f637cd1158b63827bb390"
+    },
+    {
+      "entry": "Non-ASCII Filename",
+      "filename": "unicode-café.txt",
+      "size": 37,
+      "sha256": "914a2e695842fc29475e8c1688399400f032e355cd57b8b0ff7df57cb7c47984"
+    }
+  ],
+  "database_name": "kdbxweb Attachments Fixture",
+  "description": "KDBX4 with varied attachments (text, PNG, binary, empty, non-ASCII filename). Written by kdbxweb.",
+  "entry_count": 6,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/.node/gen-kdbxweb.js",
+  "generator": "KdbxWeb",
+  "group_count": 2,
+  "key_file": null,
+  "master_password": "test-keeweb-202",
+  "source": "kdbxweb (node)"
+}

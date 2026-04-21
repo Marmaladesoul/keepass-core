@@ -41,6 +41,13 @@ tests/fixtures/
 ├── malformed/            Deliberately-broken files for negative tests
 │                         (truncation, bad magic, HMAC corruption). Derived
 │                         from keepassxc/kdbx3-minimal.kdbx.
+├── kdbxweb/              KDBX4 fixtures created via kdbxweb (Node.js) —
+│                         the same library KeeWeb.app wraps internally, so
+│                         these files match the shape KeeWeb would produce.
+│                         Generator metadata is hardcoded to "KdbxWeb" by
+│                         the library.
+├── .node/                Throwaway npm project (gitignored node_modules/)
+│                         for the kdbxweb generator. See gen-kdbxweb.js.
 ├── generate.py           Corpus generator (reproducibility entry point).
 ├── verify.py             Sidecar consistency checker (run before commit).
 └── README.md             This file.
@@ -140,7 +147,7 @@ All fixtures in `attachments/` are generated deterministically by `generate.py`.
   such a file. Uncommon in practice; can be added later by hand-editing a
   header if needed.
 
-- **KeeWeb fixtures** are not yet present. KeeWeb (the app) is built on the open-source `kdbxweb` JS library. `kdbxweb` requires an externally-supplied Argon2 implementation (it has no built-in one because Argon2 is heavy). `hash-wasm`'s Argon2 rejects hash lengths below 4 bytes, but `kdbxweb`'s self-test invokes `argon2(length=1, parallelism=32, memory=1 KiB)` to verify the implementation before it'll run. Satisfying that self-test requires either `argon2-browser` (WASM) with careful wiring, or a pure-JS Argon2 implementation. Since keepassxc-cli and pykeepass already cover KDBX4 byte-level diversity — a KeeWeb fixture would differ primarily in its `<Generator>` metadata string — this is deferred.
+- **Native KeeWeb.app fixtures** (generated via the desktop app's GUI, as opposed to the `kdbxweb` library the app bundles) are not yet present. The `kdbxweb/` corpus above covers the same on-disk format since KeeWeb is a thin wrapper around kdbxweb; the only likely difference is the `<Generator>` metadata string (`KdbxWeb` here vs possibly a different string when saved through the app). KeeWeb (the app) is built on the open-source `kdbxweb` JS library. `kdbxweb` requires an externally-supplied Argon2 implementation (it has no built-in one because Argon2 is heavy). `hash-wasm`'s Argon2 rejects hash lengths below 4 bytes, but `kdbxweb`'s self-test invokes `argon2(length=1, parallelism=32, memory=1 KiB)` to verify the implementation before it'll run. Satisfying that self-test requires either `argon2-browser` (WASM) with careful wiring, or a pure-JS Argon2 implementation. Since keepassxc-cli and pykeepass already cover KDBX4 byte-level diversity — a KeeWeb fixture would differ primarily in its `<Generator>` metadata string — this is deferred.
 
 - **Strongbox, MacPass, KeePassium fixtures** will be added manually in a future pass to cover cross-client interop.
 

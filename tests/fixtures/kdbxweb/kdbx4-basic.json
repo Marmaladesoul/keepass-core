@@ -1,0 +1,54 @@
+{
+  "database_name": "kdbxweb Basic Fixture",
+  "description": "KDBX4 vault written by kdbxweb (the library KeeWeb.app bundles). Generator metadata is \"KdbxWeb\" (kdbxweb hardcodes this during save).",
+  "entries": [
+    {
+      "title": "Acme Banking",
+      "username": "charlie@example.net",
+      "url": "https://bank.acme.example",
+      "tags": [
+        "banking",
+        "personal"
+      ]
+    },
+    {
+      "title": "Contoso Mail",
+      "username": "alice@example.com",
+      "url": "https://mail.contoso.example",
+      "tags": [
+        "email",
+        "work"
+      ]
+    },
+    {
+      "title": "Fabrikam VPN",
+      "username": "bob@example.org",
+      "url": "https://vpn.fabrikam.example",
+      "tags": [
+        "vpn",
+        "work"
+      ]
+    },
+    {
+      "title": "Tailspin Toys",
+      "username": "dave@example.com",
+      "url": "https://toys.tailspin.example",
+      "tags": [
+        "personal"
+      ]
+    }
+  ],
+  "entry_count": 4,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/.node/gen-kdbxweb.js",
+  "generator": "KdbxWeb",
+  "group_count": 4,
+  "group_paths": [
+    "/Personal",
+    "/Recycle Bin",
+    "/Work"
+  ],
+  "key_file": null,
+  "master_password": "test-keeweb-201",
+  "source": "kdbxweb (node)"
+}
