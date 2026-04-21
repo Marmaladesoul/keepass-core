@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/keepass-core",
+    "crates/keepass-merge",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Marmalade Soul"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Marmaladesoul/keepass-core"
+homepage = "https://github.com/Marmaladesoul/keepass-core"
+readme = "README.md"
+keywords = ["keepass", "kdbx", "password-manager", "crypto"]
+categories = ["cryptography", "parser-implementations", "data-structures"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+cargo    = { level = "warn", priority = -1 }
+
+# The pedantic/cargo groups include several lints that are not worth the
+# noise they generate in a documentation-heavy crypto library. Each opt-out
+# is justified inline.
+module_name_repetitions = "allow"   # pedantic default; clashes with domain names
+must_use_candidate      = "allow"   # pedantic; noisy during stub phase
+missing_errors_doc      = "allow"   # re-enable once APIs are fleshed out
+doc_markdown            = "allow"   # flags every "KeePass", "KDBX", etc. in prose
+multiple_crate_versions = "allow"   # transitive conflicts we cannot fix

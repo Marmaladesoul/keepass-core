@@ -1,0 +1,19 @@
+[package]
+name = "keepass-merge"
+description = "Three-way merge logic for KeePass (KDBX) databases. Companion to the keepass-core crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+keepass-core = { path = "../keepass-core", version = "0.0.0" }

@@ -1,0 +1,74 @@
+[package]
+name = "keepass-core"
+description = "Reference implementation of the KeePass (KDBX) password database format in pure Rust. Lossless round-trip read/write for KDBX3 and KDBX4."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Error handling.
+thiserror = "2"
+
+# Secret hygiene — zeroise memory on drop; prevent accidental Debug / print.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+secrecy = "0.10"
+subtle = "2"                       # constant-time comparison
+
+# Identifiers.
+uuid = { version = "1", features = ["v4"] }
+
+# Crypto primitives — RustCrypto family, no unsafe.
+# Wired in as implementations land.
+# aes         = "0.8"
+# cbc         = "0.1"
+# chacha20    = "0.9"
+# salsa20     = "0.10"
+# sha2        = "0.10"
+# hmac        = "0.12"
+# argon2      = "0.5"
+# blake2      = "0.10"
+
+# Compression.
+# flate2 = "1"
+
+# Parsing.
+# quick-xml  = { version = "0.36", features = ["serialize"] }  # inner XML
+# winnow     = "0.6"                                           # binary header
+
+# Timestamps.
+# chrono = { version = "0.4", features = ["serde"] }
+
+# Randomness.
+# getrandom = "0.2"
+
+[dev-dependencies]
+# Snapshot testing for XML round-trips.
+# insta = { version = "1", features = ["yaml"] }
+
+# Property-based testing for round-trip invariants.
+# proptest = "1"
+
+# Benchmarking.
+# criterion = { version = "0.5", features = ["html_reports"] }
+
+[features]
+default = []
+
+# Serde derives on model types. Off by default: exposing layout via Serialize
+# is an API commitment that not every consumer needs.
+serde = []
+
+# Build-metadata docs.rs integration.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

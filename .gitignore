@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+*.rs.bk
+
+# Fuzz artefacts
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Temp
+*.swp
+*.swo
+*~
