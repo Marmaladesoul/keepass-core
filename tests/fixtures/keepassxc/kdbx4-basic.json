@@ -1,0 +1,90 @@
+{
+  "database_name": "Passwords",
+  "description": "Typical small vault: six entries across Work and Personal groups. Covers basic field types, tags, and notes.",
+  "entries": [
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Personal",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Acme Banking",
+      "url": "https://bank.acme.example",
+      "username": "dave@example.net"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Personal",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Acme Cloud",
+      "url": "https://cloud.acme.example",
+      "username": "eve@example.net"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Personal",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Tailspin Toys",
+      "url": "https://toys.tailspin.example",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Work",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Adventure Works",
+      "url": "https://adventure-works.example",
+      "username": "charlie@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Work",
+      "notes": "Primary work email.",
+      "password_length": 12,
+      "tags": [],
+      "title": "Contoso Mail",
+      "url": "https://mail.contoso.example",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Work",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Fabrikam VPN",
+      "url": "https://vpn.fabrikam.example",
+      "username": "bob@example.org"
+    }
+  ],
+  "entry_count": 6,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "generator": "KeePassXC",
+  "group_count": 3,
+  "group_paths": [
+    "Personal",
+    "Work"
+  ],
+  "key_file": null,
+  "master_password": "test-basic-002",
+  "source": "keepassxc-cli"
+}

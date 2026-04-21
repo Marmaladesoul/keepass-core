@@ -1,0 +1,14 @@
+{
+  "description": "Populated recycle bin with one entry and one group (containing its own entry).",
+  "entry_count": 3,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "group_count": 3,
+  "key_file": null,
+  "master_password": "test-recycle-102",
+  "recycle_bin_entries": [
+    "Standalone Entry"
+  ],
+  "recycle_bin_present": true,
+  "source": "pykeepass"
+}

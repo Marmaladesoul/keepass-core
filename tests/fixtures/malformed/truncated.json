@@ -1,0 +1,8 @@
+{
+  "description": "Truncated at 64 bytes — past the magic, mid-header-TLV.",
+  "expected_error": "truncated_or_malformed_header",
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "source": "synthetic",
+  "source_fixture": "keepassxc/kdbx4-minimal.kdbx"
+}

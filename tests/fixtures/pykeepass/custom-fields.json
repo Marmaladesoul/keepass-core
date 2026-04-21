@@ -1,0 +1,31 @@
+{
+  "custom_fields": [
+    {
+      "key": "API Key ID",
+      "protected": false,
+      "value_length": 18
+    },
+    {
+      "key": "API Secret",
+      "protected": true,
+      "value_length": 28
+    },
+    {
+      "key": "PIN",
+      "protected": true,
+      "value_length": 4
+    },
+    {
+      "key": "Recovery Code",
+      "protected": false,
+      "value_length": 17
+    }
+  ],
+  "description": "Entry with mix of protected and unprotected custom fields.",
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "key_file": null,
+  "master_password": "test-custom-104",
+  "source": "pykeepass"
+}

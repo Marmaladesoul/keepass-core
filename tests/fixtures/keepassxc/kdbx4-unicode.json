@@ -1,0 +1,67 @@
+{
+  "database_name": "Passwords",
+  "description": "Unicode throughout: Cyrillic, Japanese, Greek, emoji (4-byte UTF-8). Tests encoding correctness in every XML position.",
+  "entries": [
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "Includes 4-byte UTF-8 and emoji 🎉.",
+      "password_length": 9,
+      "tags": [],
+      "title": "Emoji Test 🔐",
+      "url": "https://🌐.example",
+      "username": "🔑@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Café",
+      "notes": "Ελληνικά σημείωση.",
+      "password_length": 10,
+      "tags": [],
+      "title": "Ωmega Service",
+      "url": "https://ωmega.example",
+      "username": "βeta@example.net"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Работа",
+      "notes": "Кириллица в заметках.",
+      "password_length": 9,
+      "tags": [],
+      "title": "Электронная почта",
+      "url": "https://почта.example",
+      "username": "алиса@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/個人用",
+      "notes": "日本語のノート。",
+      "password_length": 8,
+      "tags": [],
+      "title": "銀行",
+      "url": "https://銀行.example",
+      "username": "テスト@example.org"
+    }
+  ],
+  "entry_count": 4,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "generator": "KeePassXC",
+  "group_count": 4,
+  "group_paths": [
+    "Café",
+    "Работа",
+    "個人用"
+  ],
+  "key_file": null,
+  "master_password": "tëst-üni-005",
+  "source": "keepassxc-cli"
+}
