@@ -24,3 +24,9 @@ Cargo.lock.bak
 
 # Python venv for fixture generation
 .venv/
+
+# Node deps for kdbxweb fixture generator (on a separate branch in the
+# public repo as well — kept in .gitignore here so accidental runs of
+# `npm install` from this tree never commit into feature branches)
+/tests/fixtures/.node/node_modules/
+/tests/fixtures/.node/package-lock.json

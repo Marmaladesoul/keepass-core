@@ -7,8 +7,11 @@
 //! The [`Version`] enum enumerates supported major versions. Per-version
 //! code lives in the `v3` and `v4` submodules.
 
+pub mod tlv;
 pub mod v3;
 pub mod v4;
+
+pub use tlv::{LengthWidth, TlvField, read_header_fields};
 
 // ---------------------------------------------------------------------------
 // Magic bytes
@@ -53,6 +56,16 @@ impl Version {
             3 => Some(Self::V3),
             4 => Some(Self::V4),
             _ => None,
+        }
+    }
+
+    /// The width of the length prefix used in this version's outer-header
+    /// TLV records.
+    #[must_use]
+    pub const fn header_length_width(self) -> LengthWidth {
+        match self {
+            Self::V3 => LengthWidth::U16,
+            Self::V4 => LengthWidth::U32,
         }
     }
 }
