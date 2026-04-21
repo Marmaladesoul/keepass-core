@@ -1,0 +1,27 @@
+{
+  "database_name": "Passwords",
+  "description": "Smallest KDBX4 fixture — one entry, default root group.",
+  "entries": [
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "",
+      "password_length": 19,
+      "tags": [],
+      "title": "Contoso Mail",
+      "url": "https://mail.contoso.example",
+      "username": "alice@example.com"
+    }
+  ],
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "generator": "KeePassXC",
+  "group_count": 1,
+  "group_paths": [],
+  "key_file": null,
+  "master_password": "test-minimal-001",
+  "source": "keepassxc-cli"
+}

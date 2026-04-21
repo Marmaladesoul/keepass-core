@@ -1,0 +1,107 @@
+{
+  "database_name": "Passwords",
+  "description": "Attachments of varying sizes including 0-byte, tiny, medium, 1 MiB (crosses KDBX4 HMAC block boundary), and non-ASCII filename.",
+  "entries": [
+    {
+      "attachment_count": 1,
+      "attachments": [
+        {
+          "filename": "mock-key.pem",
+          "sha256": "75c2ff133a0dae2ebb79647553ca6d512f1842eeda3fc9d290e18940c4195218",
+          "size": 163
+        }
+      ],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "",
+      "password_length": 8,
+      "tags": [],
+      "title": "Key Attachment",
+      "url": "https://example.com",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 1,
+      "attachments": [
+        {
+          "filename": "1mib.bin",
+          "sha256": "e770bf56c6ca89c6d57c9449542609beaa2ffc99713080a559a2e90c41076f34",
+          "size": 1048576
+        }
+      ],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "",
+      "password_length": 8,
+      "tags": [],
+      "title": "Large Attachment",
+      "url": "https://example.com",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 2,
+      "attachments": [
+        {
+          "filename": "100kib.bin",
+          "sha256": "1a5d6a2122f7006ce9ea23e5b20e279f1064f6bee3e64a6d640697b5b72b7a38",
+          "size": 102400
+        },
+        {
+          "filename": "10kib.bin",
+          "sha256": "e541f58b78c1d384f7a8aeef7578957d3302f1e0d6386e8c213cfb1201674bbc",
+          "size": 10240
+        }
+      ],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "",
+      "password_length": 8,
+      "tags": [],
+      "title": "Medium Attachment",
+      "url": "https://example.com",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 4,
+      "attachments": [
+        {
+          "filename": "1x1.png",
+          "sha256": "43739c566e26fd7cb88f69d3864ea34740372f5ee99acac169e090beffbce5c6",
+          "size": 68
+        },
+        {
+          "filename": "empty.dat",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0
+        },
+        {
+          "filename": "hello.txt",
+          "sha256": "37980c33951de6b0e450c3701b219bfeee930544705f637cd1158b63827bb390",
+          "size": 13
+        },
+        {
+          "filename": "unicode-café.txt",
+          "sha256": "914a2e695842fc29475e8c1688399400f032e355cd57b8b0ff7df57cb7c47984",
+          "size": 37
+        }
+      ],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "",
+      "password_length": 8,
+      "tags": [],
+      "title": "Small Attachments",
+      "url": "https://example.com",
+      "username": "alice@example.com"
+    }
+  ],
+  "entry_count": 4,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "generator": "KeePassXC",
+  "group_count": 1,
+  "group_paths": [],
+  "key_file": null,
+  "master_password": "test-att-004",
+  "source": "keepassxc-cli"
+}

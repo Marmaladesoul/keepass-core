@@ -1,0 +1,19 @@
+{
+  "description": "Single entry with three historical versions (total revisions: 4).",
+  "entries": [
+    {
+      "group": "",
+      "history_count": 3,
+      "password_length": 18,
+      "title": "Contoso Mail",
+      "url": "https://mail.contoso.example",
+      "username": "alice@example.com"
+    }
+  ],
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "key_file": null,
+  "master_password": "test-hist-101",
+  "source": "pykeepass"
+}
