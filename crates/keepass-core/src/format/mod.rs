@@ -8,6 +8,7 @@
 //! code lives in the `v3` and `v4` submodules.
 
 pub mod header;
+pub mod kdf_params;
 pub mod tlv;
 pub mod v3;
 pub mod v4;
@@ -17,6 +18,7 @@ pub use header::{
     CipherId, CompressionFlags, EncryptionIv, HeaderError, InnerStreamAlgorithm, KnownCipher,
     MasterSeed, OuterHeader, ProtectedStreamKey, StreamStartBytes, TransformSeed,
 };
+pub use kdf_params::{Argon2Variant, Argon2Version, KdfId, KdfParams, KdfParamsError, KnownKdf};
 pub use tlv::{LengthWidth, TlvField, read_header_fields};
 pub use var_dictionary::{Value as VarValue, VarDictionary, VarDictionaryError};
 
