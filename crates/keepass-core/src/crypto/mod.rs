@@ -10,8 +10,10 @@
 //! [`RustCrypto`]: https://github.com/RustCrypto
 
 pub mod kdf;
+pub mod master_keys;
 
 pub use kdf::{KdfError, derive_transformed_key};
+pub use master_keys::{derive_cipher_key, derive_hmac_base_key, per_block_hmac_key};
 
 /// Error type for cryptographic operations.
 #[derive(thiserror::Error, Debug)]
