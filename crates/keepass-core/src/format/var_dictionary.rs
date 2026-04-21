@@ -281,16 +281,16 @@ fn parse_dictionary(input: &mut &[u8]) -> Result<VarDictionary, VarDictionaryErr
 
 fn parse_entry(ty: u8, input: &mut &[u8]) -> Result<(String, Value), VarDictionaryError> {
     let key_len_i = parse_i32_le(input)?;
-    let key_len = usize::try_from(key_len_i)
-        .map_err(|_| VarDictionaryError::InvalidLength(key_len_i))?;
+    let key_len =
+        usize::try_from(key_len_i).map_err(|_| VarDictionaryError::InvalidLength(key_len_i))?;
     let key_bytes = parse_take(input, key_len)?;
     let key = std::str::from_utf8(key_bytes)
         .map_err(|_| VarDictionaryError::InvalidUtf8 { field: "key" })?
         .to_owned();
 
     let value_len_i = parse_i32_le(input)?;
-    let value_len = usize::try_from(value_len_i)
-        .map_err(|_| VarDictionaryError::InvalidLength(value_len_i))?;
+    let value_len =
+        usize::try_from(value_len_i).map_err(|_| VarDictionaryError::InvalidLength(value_len_i))?;
     let value_bytes = parse_take(input, value_len)?;
 
     let value = decode_value(ty, &key, value_bytes)?;

@@ -99,30 +99,30 @@ fn every_kdbx4_fixture_has_a_well_formed_kdf_parameters_dictionary() {
         }
 
         // I: iterations, > 0
-        let iterations = dict.get_u64("I").unwrap_or_else(|| {
-            panic!("{path:?}: iterations (I) missing or wrong type")
-        });
+        let iterations = dict
+            .get_u64("I")
+            .unwrap_or_else(|| panic!("{path:?}: iterations (I) missing or wrong type"));
         assert!(iterations > 0, "{path:?}: iterations must be > 0");
 
         // M: memory in bytes, ≥ 8 KiB
-        let memory = dict.get_u64("M").unwrap_or_else(|| {
-            panic!("{path:?}: memory (M) missing or wrong type")
-        });
+        let memory = dict
+            .get_u64("M")
+            .unwrap_or_else(|| panic!("{path:?}: memory (M) missing or wrong type"));
         assert!(
             memory >= 8 * 1024,
             "{path:?}: memory {memory} bytes is below Argon2 minimum 8 KiB"
         );
 
         // P: parallelism, > 0
-        let parallelism = dict.get_u32("P").unwrap_or_else(|| {
-            panic!("{path:?}: parallelism (P) missing or wrong type")
-        });
+        let parallelism = dict
+            .get_u32("P")
+            .unwrap_or_else(|| panic!("{path:?}: parallelism (P) missing or wrong type"));
         assert!(parallelism > 0, "{path:?}: parallelism must be > 0");
 
         // V: Argon2 version, either 0x10 or 0x13
-        let version = dict.get_u32("V").unwrap_or_else(|| {
-            panic!("{path:?}: argon2 version (V) missing or wrong type")
-        });
+        let version = dict
+            .get_u32("V")
+            .unwrap_or_else(|| panic!("{path:?}: argon2 version (V) missing or wrong type"));
         assert!(
             version == 0x10 || version == 0x13,
             "{path:?}: unexpected Argon2 version 0x{version:x}"
