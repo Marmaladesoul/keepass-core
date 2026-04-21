@@ -99,13 +99,20 @@ fn every_kdbx4_fixture_decodes_as_argon2() {
             } => {
                 // Both variants acceptable; pykeepass & kdbxweb both default
                 // to Argon2d but either would be valid.
-                assert!(matches!(variant, Argon2Variant::Argon2d | Argon2Variant::Argon2id));
+                assert!(matches!(
+                    variant,
+                    Argon2Variant::Argon2d | Argon2Variant::Argon2id
+                ));
                 assert!(salt.len() >= 8, "{path:?}: salt too short");
                 assert!(iterations > 0);
                 assert!(memory_bytes >= 8 * 1024);
                 assert!(parallelism > 0);
                 // In practice every fixture we produce uses v1.3.
-                assert_eq!(version, Argon2Version::V13, "{path:?}: unexpected Argon2 version");
+                assert_eq!(
+                    version,
+                    Argon2Version::V13,
+                    "{path:?}: unexpected Argon2 version"
+                );
             }
             other => panic!("{path:?}: expected Argon2, got {other:?}"),
         }

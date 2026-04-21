@@ -195,16 +195,23 @@ impl KdfParams {
     pub fn from_var_dictionary(dict: &VarDictionary) -> Result<Self, KdfParamsError> {
         let uuid_bytes = match dict.get("$UUID") {
             Some(VarValue::Bytes(b)) => b,
-            Some(_) => return Err(KdfParamsError::InvalidValue { key: "$UUID", expected: "bytes" }),
+            Some(_) => {
+                return Err(KdfParamsError::InvalidValue {
+                    key: "$UUID",
+                    expected: "bytes",
+                });
+            }
             None => return Err(KdfParamsError::Missing("$UUID")),
         };
-        let uuid_array: [u8; 16] = uuid_bytes.as_slice().try_into().map_err(|_| {
-            KdfParamsError::InvalidLength {
-                key: "$UUID",
-                expected: 16,
-                got: uuid_bytes.len(),
-            }
-        })?;
+        let uuid_array: [u8; 16] =
+            uuid_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| KdfParamsError::InvalidLength {
+                    key: "$UUID",
+                    expected: 16,
+                    got: uuid_bytes.len(),
+                })?;
         let kdf_id = KdfId(Uuid::from_bytes(uuid_array));
         match kdf_id.well_known() {
             Some(KnownKdf::AesKdf) => decode_aes_kdf(dict),
@@ -219,26 +226,30 @@ impl KdfParams {
     pub fn family(&self) -> KnownKdf {
         match self {
             Self::AesKdf { .. } => KnownKdf::AesKdf,
-            Self::Argon2 { variant: Argon2Variant::Argon2d, .. } => KnownKdf::Argon2d,
-            Self::Argon2 { variant: Argon2Variant::Argon2id, .. } => KnownKdf::Argon2id,
+            Self::Argon2 {
+                variant: Argon2Variant::Argon2d,
+                ..
+            } => KnownKdf::Argon2d,
+            Self::Argon2 {
+                variant: Argon2Variant::Argon2id,
+                ..
+            } => KnownKdf::Argon2id,
         }
     }
 }
 
 fn decode_aes_kdf(dict: &VarDictionary) -> Result<KdfParams, KdfParamsError> {
     // S = seed (32 bytes)
-    let seed_bytes = dict
-        .get_bytes("S")
-        .ok_or(KdfParamsError::Missing("S"))?;
-    let seed: [u8; 32] = seed_bytes.try_into().map_err(|_| KdfParamsError::InvalidLength {
-        key: "S",
-        expected: 32,
-        got: seed_bytes.len(),
-    })?;
+    let seed_bytes = dict.get_bytes("S").ok_or(KdfParamsError::Missing("S"))?;
+    let seed: [u8; 32] = seed_bytes
+        .try_into()
+        .map_err(|_| KdfParamsError::InvalidLength {
+            key: "S",
+            expected: 32,
+            got: seed_bytes.len(),
+        })?;
     // R = rounds (u64)
-    let rounds = dict
-        .get_u64("R")
-        .ok_or(KdfParamsError::Missing("R"))?;
+    let rounds = dict.get_u64("R").ok_or(KdfParamsError::Missing("R"))?;
     Ok(KdfParams::AesKdf { seed, rounds })
 }
 
@@ -247,9 +258,7 @@ fn decode_argon2(
     variant: Argon2Variant,
 ) -> Result<KdfParams, KdfParamsError> {
     // S = salt (bytes, any length ≥ 8 per the Argon2 spec)
-    let salt_bytes = dict
-        .get_bytes("S")
-        .ok_or(KdfParamsError::Missing("S"))?;
+    let salt_bytes = dict.get_bytes("S").ok_or(KdfParamsError::Missing("S"))?;
     if salt_bytes.len() < 8 {
         return Err(KdfParamsError::InvalidLength {
             key: "S",
@@ -404,18 +413,12 @@ mod tests {
             KdfId(Uuid::from_bytes(*KdfId::ARGON2ID.as_bytes())).well_known(),
             Some(KnownKdf::Argon2id)
         );
-        assert_eq!(
-            KdfId(Uuid::from_bytes([0xAAu8; 16])).well_known(),
-            None
-        );
+        assert_eq!(KdfId(Uuid::from_bytes([0xAAu8; 16])).well_known(), None);
     }
 
     #[test]
     fn kdf_id_debug_is_classifier_style() {
-        let s = format!(
-            "{:?}",
-            KdfId(Uuid::from_bytes(*KdfId::ARGON2ID.as_bytes()))
-        );
+        let s = format!("{:?}", KdfId(Uuid::from_bytes(*KdfId::ARGON2ID.as_bytes())));
         assert!(s.contains("Argon2id"), "expected classifier in Debug: {s}");
     }
 
@@ -462,7 +465,10 @@ mod tests {
         assert_eq!(params.family(), KnownKdf::Argon2id);
         assert!(matches!(
             params,
-            KdfParams::Argon2 { variant: Argon2Variant::Argon2id, .. }
+            KdfParams::Argon2 {
+                variant: Argon2Variant::Argon2id,
+                ..
+            }
         ));
     }
 
@@ -477,7 +483,10 @@ mod tests {
         ]);
         let params = KdfParams::from_var_dictionary(&dict).unwrap();
         match params {
-            KdfParams::AesKdf { seed, rounds: 6_000_000 } => {
+            KdfParams::AesKdf {
+                seed,
+                rounds: 6_000_000,
+            } => {
                 assert_eq!(seed.len(), 32);
                 assert!(seed.iter().all(|&b| b == 0xCD));
             }
@@ -510,7 +519,11 @@ mod tests {
         let dict = dict_from([("$UUID", VarValue::Bytes(vec![0x00; 8]))]);
         assert!(matches!(
             KdfParams::from_var_dictionary(&dict).unwrap_err(),
-            KdfParamsError::InvalidLength { key: "$UUID", expected: 16, got: 8 }
+            KdfParamsError::InvalidLength {
+                key: "$UUID",
+                expected: 16,
+                got: 8
+            }
         ));
     }
 
@@ -549,7 +562,11 @@ mod tests {
         let err = KdfParams::from_var_dictionary(&dict).unwrap_err();
         assert!(matches!(
             err,
-            KdfParamsError::InvalidLength { key: "S", expected: 8, got: 4 }
+            KdfParamsError::InvalidLength {
+                key: "S",
+                expected: 8,
+                got: 4
+            }
         ));
     }
 
@@ -638,7 +655,11 @@ mod tests {
         ]);
         assert!(matches!(
             KdfParams::from_var_dictionary(&dict).unwrap_err(),
-            KdfParamsError::InvalidLength { key: "S", expected: 32, got: 16 }
+            KdfParamsError::InvalidLength {
+                key: "S",
+                expected: 32,
+                got: 16
+            }
         ));
     }
 
@@ -651,7 +672,11 @@ mod tests {
     #[test]
     fn family_classifier() {
         assert_eq!(
-            KdfParams::AesKdf { seed: [0; 32], rounds: 1 }.family(),
+            KdfParams::AesKdf {
+                seed: [0; 32],
+                rounds: 1
+            }
+            .family(),
             KnownKdf::AesKdf
         );
         assert_eq!(

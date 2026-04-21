@@ -440,9 +440,9 @@ impl OuterHeader {
     /// [`VarDictionary`][super::var_dictionary::VarDictionary] then extracts
     /// a typed [`KdfParams`][super::kdf_params::KdfParams].
     ///
-    /// For KDBX3 headers, constructs [`KdfParams::AesKdf`] directly from the
-    /// `TransformSeed` / `TransformRounds` outer-header fields — KDBX3 does
-    /// not use a VarDictionary for KDF parameters.
+    /// For KDBX3 headers, constructs [`super::kdf_params::KdfParams::AesKdf`]
+    /// directly from the `TransformSeed` / `TransformRounds` outer-header
+    /// fields — KDBX3 does not use a VarDictionary for KDF parameters.
     ///
     /// # Errors
     ///
