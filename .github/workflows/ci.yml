@@ -1,10 +1,8 @@
 # CI for the public keepass-core workspace.
 #
-# While the repo is private, this runs Linux-only to stay well inside the
-# 2,000 minute/month GitHub Actions free-plan budget. When the repo flips
-# to public, Linux minutes become unlimited — expand the `os` matrix below
-# to include `macos-latest` and `windows-latest` for cross-platform coverage
-# at that point (one-line change).
+# Public repo → unlimited GitHub Actions minutes on all runners. We run the
+# test job on a Linux/macOS/Windows matrix because this library is intended
+# to work identically across all three platforms.
 
 name: CI
 
@@ -50,11 +48,12 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: cargo test
-    # When public, change to:
-    #   strategy: { matrix: { os: [ubuntu-latest, macos-latest, windows-latest] } }
-    #   runs-on: ${{ matrix.os }}
-    runs-on: ubuntu-latest
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
