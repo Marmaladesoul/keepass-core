@@ -1,0 +1,63 @@
+# Nightly fuzzing smoke run.
+#
+# cargo-fuzz requires the nightly toolchain. This workflow runs each fuzz
+# target for a bounded time budget and fails the build if a new crash is
+# discovered. Crashes are uploaded as artefacts for triage.
+#
+# Deliberately on a schedule rather than on every PR — fuzzing is expensive
+# and doesn't need to gate ordinary code changes. New findings here feed
+# into regression tests in tests/.
+
+name: Fuzz
+
+on:
+  schedule:
+    # Every day at 02:30 UTC (12:30 AEST). Adjust if we start seeing
+    # overlap with peak runner contention.
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: "Seconds to run each fuzz target"
+        required: false
+        default: "300"
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    # Placeholder — this job will be enabled once fuzz targets exist in
+    # fuzz/fuzz_targets/. Until then the step below is a no-op.
+    if: false
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep this list in sync with fuzz/fuzz_targets/*.rs
+        target:
+          - header_parser
+          - xml_parser
+          - block_reader
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run fuzz target
+        run: |
+          cargo fuzz run ${{ matrix.target }} \
+            -- -max_total_time=${{ github.event.inputs.duration_seconds || '300' }}
+      - name: Upload crash artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-crashes
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

@@ -1,0 +1,39 @@
+# Automated dependency updates.
+#
+# - Grouped by ecosystem so we don't get one PR per crate on a big bump day.
+# - Weekly cadence — daily is too noisy for a small team.
+# - Cargo + GitHub Actions both covered.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      rustcrypto:
+        patterns:
+          - "aes*"
+          - "cbc"
+          - "ctr"
+          - "chacha20"
+          - "salsa20"
+          - "hmac"
+          - "sha2"
+          - "blake2"
+          - "argon2"
+          - "cipher"
+      secret-hygiene:
+        patterns:
+          - "zeroize"
+          - "secrecy"
+          - "subtle"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
