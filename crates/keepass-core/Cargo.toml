@@ -43,7 +43,7 @@ uuid = { version = "1", features = ["v4"] }
 
 # Parsing.
 # quick-xml  = { version = "0.36", features = ["serialize"] }  # inner XML
-# winnow     = "0.6"                                           # binary header
+winnow = "0.6"                                                 # binary header TLVs
 
 # Timestamps.
 # chrono = { version = "0.4", features = ["serde"] }

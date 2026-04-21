@@ -114,6 +114,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "uuid",
+ "winnow",
  "zeroize",
 ]
 
@@ -406,6 +407,15 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
+]
+
+[[package]]
+name = "winnow"
+version = "0.6.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e90edd2ac1aa278a5c4599b1d89cf03074b610800f866d4026dc199d7929a28"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
