@@ -40,7 +40,7 @@
     }
   ],
   "entry_count": 3,
-  "format": "KDBX4",
+  "format": "KDBX3",
   "generated_by": "tests/fixtures/generate.py",
   "generator": "KeePassXC",
   "group_count": 9,

@@ -28,12 +28,12 @@
     }
   ],
   "entry_count": 2,
-  "format": "KDBX4",
+  "format": "KDBX3",
   "generated_by": "tests/fixtures/generate.py",
   "generator": "KeePassXC",
   "group_count": 1,
   "group_paths": [],
-  "key_file": "kdbx4-keyfile.key",
+  "key_file": "kdbx3-keyfile.key",
   "master_password": "test-keyfile-003",
   "source": "keepassxc-cli"
 }

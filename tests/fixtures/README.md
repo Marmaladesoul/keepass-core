@@ -30,16 +30,26 @@ python3 tests/fixtures/generate.py --only attachments
 tests/fixtures/
 ├── attachments/          Source files attached by fixtures below.
 │                         Deterministic content, checked in.
-├── keepassxc/            KDBX4 fixtures created via `keepassxc-cli`
-│                         (/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli)
-├── pykeepass/            KDBX4 fixtures created via the `pykeepass` Python
-│                         library for edge cases the CLI cannot produce
-│                         (history, recycle bin, protected custom fields).
+├── keepassxc/            KDBX3 fixtures (AES-KDF, Salsa20 inner stream)
+│                         created via `keepassxc-cli`. The CLI defaults to
+│                         KDBX 3.1 as of KeePassXC 2.7.7.
+├── pykeepass/            KDBX4 fixtures (Argon2 KDF, ChaCha20 inner stream)
+│                         created via the `pykeepass` Python library. Covers
+│                         edge cases the CLI cannot produce (history, recycle
+│                         bin, protected custom fields) plus a 1000-entry
+│                         scaling fixture.
 ├── malformed/            Deliberately-broken files for negative tests
-│                         (truncation, bad magic, HMAC corruption).
+│                         (truncation, bad magic, HMAC corruption). Derived
+│                         from keepassxc/kdbx3-minimal.kdbx.
 ├── generate.py           Corpus generator (reproducibility entry point).
+├── verify.py             Sidecar consistency checker (run before commit).
 └── README.md             This file.
 ```
+
+This gives both KDBX3 **and** KDBX4 coverage from day one: keepassxc-cli's
+CLI defaults produce KDBX3.1 (AES-KDF), while pykeepass 4.x produces KDBX4.
+Between them the corpus exercises both families of KDF, inner-stream cipher,
+and outer framing that the parser needs to handle.
 
 ## Sidecar format
 
@@ -124,12 +134,15 @@ All fixtures in `attachments/` are generated deterministically by `generate.py`.
 
 ## Known gaps
 
-- **KDBX3 fixtures** are not yet present. Neither `keepassxc-cli` (KDBX4-only output) nor `pykeepass` 4.x can write KDBX3. They will be added using one of:
-  - KeePass 2.x native via Mono or a Windows VM
-  - `kdbxweb` (Node.js) which supports both formats
-  - A hand-crafted generator using `construct`
-  Until then the corpus is KDBX4-only. KDBX3 reader implementation will need fixtures added before it lands.
-- **KeeWeb, Strongbox, MacPass, KeePassium fixtures** are not yet present. These will be added manually in a future pass to cover cross-client interop.
+- **Argon2-KDF KDBX3 fixtures.** KDBX 3.1 supports Argon2 as an alternative
+  KDF via a header extension, but neither `keepassxc-cli` (AES-KDF default)
+  nor `pykeepass` 4.x (writes KDBX4 when asked for Argon2) will produce
+  such a file. Uncommon in practice; can be added later by hand-editing a
+  header if needed.
+
+- **KeeWeb fixtures** are not yet present. KeeWeb (the app) is built on the open-source `kdbxweb` JS library. `kdbxweb` requires an externally-supplied Argon2 implementation (it has no built-in one because Argon2 is heavy). `hash-wasm`'s Argon2 rejects hash lengths below 4 bytes, but `kdbxweb`'s self-test invokes `argon2(length=1, parallelism=32, memory=1 KiB)` to verify the implementation before it'll run. Satisfying that self-test requires either `argon2-browser` (WASM) with careful wiring, or a pure-JS Argon2 implementation. Since keepassxc-cli and pykeepass already cover KDBX4 byte-level diversity — a KeeWeb fixture would differ primarily in its `<Generator>` metadata string — this is deferred.
+
+- **Strongbox, MacPass, KeePassium fixtures** will be added manually in a future pass to cover cross-client interop.
 
 ## Licensing note
 
