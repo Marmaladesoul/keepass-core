@@ -17,12 +17,19 @@ Categories:
     malformed   — deliberately-broken files for negative tests
     attachments — regenerate the source attachments (rarely needed)
 
+    kdbxweb     — KDBX4 fixtures produced by the kdbxweb Node library (the
+                  library KeeWeb.app wraps internally). Generated separately
+                  by `tests/fixtures/.node/gen-kdbxweb.js` — this script does
+                  not invoke Node itself.
+
 Requirements:
     - KeePassXC installed (for keepassxc-cli): https://keepassxc.org/
     - A Python venv with `pykeepass` installed:
         python3 -m venv .venv
         source .venv/bin/activate
         pip install pykeepass
+    - For the kdbxweb corpus (run separately, not by this script):
+        cd tests/fixtures/.node && npm install && node gen-kdbxweb.js
 
 Output: each fixture lives in its category subdirectory alongside a JSON
 sidecar describing the expected content. Rust tests in
