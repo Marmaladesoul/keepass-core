@@ -21,30 +21,32 @@
 //! ## Module map
 //!
 //! - [`error`] — top-level [`Error`] and per-module error enums.
-//! - [`secret`] — [`MasterKey`] and related types with `Drop`-based zeroing.
-//! - [`crypto`] — [`Cipher`] trait and implementations (AES-256-CBC,
-//!   ChaCha20, Salsa20), KDFs (Argon2, legacy AES-KDF), HMAC, hashing.
+//! - [`secret`] — master-key and related secret types with `Drop`-based
+//!   zeroing. (Types pending implementation.)
+//! - [`crypto`] — cipher trait and implementations (AES-256-CBC, ChaCha20,
+//!   Salsa20), KDFs (Argon2, legacy AES-KDF), HMAC, hashing.
 //! - [`xml`] — XML reading/writing helpers built on `quick-xml`, including the
 //!   unknown-element preservation machinery.
 //! - [`model`] — format-agnostic vault types ([`model::Entry`],
 //!   [`model::Group`], [`model::Vault`]).
-//! - [`format`] — version-specific framing: [`format::v3`] and
+//! - [`format`](mod@format) — version-specific framing: [`format::v3`] and
 //!   [`format::v4`].
 //! - [`kdbx`] — the [`kdbx::Kdbx`] typestate machine that ties everything
 //!   together.
 //!
 //! ## Quick example
 //!
-//! ```no_run
+//! ```text
 //! // API sketch — pending implementation.
-//! // use keepass_core::{Kdbx, MasterKey};
-//! //
-//! // let master = MasterKey::from_password("correct horse battery staple");
-//! // let vault = Kdbx::open("vault.kdbx")?.unlock(&master)?;
-//! // for entry in vault.entries() {
-//! //     println!("{}", entry.title());
-//! // }
-//! // # Ok::<(), keepass_core::Error>(())
+//! use keepass_core::Kdbx;
+//!
+//! let vault = Kdbx::open("vault.kdbx")?
+//!     .read_header()?
+//!     .unlock(&master_key)?;
+//!
+//! for entry in vault.entries() {
+//!     println!("{}", entry.title());
+//! }
 //! ```
 
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
