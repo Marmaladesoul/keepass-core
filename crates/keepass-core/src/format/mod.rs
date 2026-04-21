@@ -11,12 +11,14 @@ pub mod header;
 pub mod tlv;
 pub mod v3;
 pub mod v4;
+pub mod var_dictionary;
 
 pub use header::{
     CipherId, CompressionFlags, EncryptionIv, HeaderError, InnerStreamAlgorithm, KnownCipher,
     MasterSeed, OuterHeader, ProtectedStreamKey, StreamStartBytes, TransformSeed,
 };
 pub use tlv::{LengthWidth, TlvField, read_header_fields};
+pub use var_dictionary::{Value as VarValue, VarDictionary, VarDictionaryError};
 
 // ---------------------------------------------------------------------------
 // Magic bytes
