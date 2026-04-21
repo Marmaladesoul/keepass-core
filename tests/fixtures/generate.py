@@ -248,9 +248,9 @@ def _kpxc_attach(db: Path, password: str, entry_path: str, name: str, src: Path,
     run_cli(*args, stdin=f"{password}\n")
 
 
-def gen_keepassxc_minimal() -> None:
+def gen_keepassxc_kdbx3_minimal() -> None:
     """One entry, one group, no attachments. Smallest possible KDBX4."""
-    name = "kdbx4-minimal"
+    name = "kdbx3-minimal"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
     pw = "test-minimal-001"
     KEEPASSXC_DIR.mkdir(parents=True, exist_ok=True)
@@ -266,13 +266,13 @@ def gen_keepassxc_minimal() -> None:
     for e in entries:
         _kpxc_add_entry(db, pw, e)
 
-    _write_sidecar_for_kpxc(db, name, pw, entries, [], "Smallest KDBX4 fixture — one entry, default root group.")
+    _write_sidecar_for_kpxc(db, name, pw, entries, [], "Smallest KDBX3 fixture — one entry, default root group.")
     log(f"wrote {name}")
 
 
-def gen_keepassxc_basic() -> None:
+def gen_keepassxc_kdbx3_basic() -> None:
     """Typical small vault: a few entries across two groups."""
-    name = "kdbx4-basic"
+    name = "kdbx3-basic"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
     pw = "test-basic-002"
 
@@ -297,9 +297,9 @@ def gen_keepassxc_basic() -> None:
     log(f"wrote {name}")
 
 
-def gen_keepassxc_keyfile() -> None:
+def gen_keepassxc_kdbx3_keyfile() -> None:
     """Password + keyfile combo. Keyfile is a 128-byte random blob (deterministic)."""
-    name = "kdbx4-keyfile"
+    name = "kdbx3-keyfile"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
     keyfile = KEEPASSXC_DIR / f"{name}.key"
     pw = "test-keyfile-003"
@@ -325,9 +325,9 @@ def gen_keepassxc_keyfile() -> None:
     log(f"wrote {name}")
 
 
-def gen_keepassxc_attachments() -> None:
+def gen_keepassxc_kdbx3_attachments() -> None:
     """Attachments of various sizes — covers binary pool edge cases."""
-    name = "kdbx4-attachments"
+    name = "kdbx3-attachments"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
     pw = "test-att-004"
 
@@ -368,9 +368,9 @@ def gen_keepassxc_attachments() -> None:
     log(f"wrote {name}")
 
 
-def gen_keepassxc_unicode() -> None:
+def gen_keepassxc_kdbx3_unicode() -> None:
     """Unicode throughout: titles, usernames, notes, group names, tags."""
-    name = "kdbx4-unicode"
+    name = "kdbx3-unicode"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
     pw = "tëst-üni-005"
 
@@ -417,9 +417,9 @@ def gen_keepassxc_unicode() -> None:
     log(f"wrote {name}")
 
 
-def gen_keepassxc_deep_groups() -> None:
+def gen_keepassxc_kdbx3_deep_groups() -> None:
     """Deeply nested group hierarchy."""
-    name = "kdbx4-deep-groups"
+    name = "kdbx3-deep-groups"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
     pw = "test-deep-006"
 
@@ -494,7 +494,7 @@ def _write_sidecar_for_kpxc(db: Path, name: str, password: str,
     gen_el = kp.tree.find(".//Generator")
     sidecar = {
         "description": description,
-        "format": "KDBX4",
+        "format": "KDBX3",
         "source": "keepassxc-cli",
         "generated_by": "tests/fixtures/generate.py",
         "master_password": password,
@@ -614,27 +614,6 @@ def gen_pykeepass_recycle() -> None:
     log(f"wrote pykeepass/{name}")
 
 
-def gen_pykeepass_kdbx3() -> None:
-    """KDBX3-format fixtures — currently unavailable.
-
-    Neither ``keepassxc-cli`` (KDBX4-only on output) nor ``pykeepass`` 4.x
-    (same limitation) can write KDBX3 files. Producing KDBX3 fixtures
-    requires one of:
-
-    - KeePass 2.x (native Windows, or via Mono on Mac/Linux) driven through
-      its CLI or GUI.
-    - ``kdbxweb`` (Node.js) which supports both formats.
-    - Hand-crafting the framing with ``construct`` or similar.
-    - Dropping ``pykeepass`` to version 3.x (conflicts with the 4.x we use
-      for everything else).
-
-    Until we add one of those, the corpus is KDBX4-only. That is sufficient
-    to begin KDBX4 reader implementation; KDBX3 reader verification will
-    need fixtures added before that work lands.
-    """
-    log("skipping pykeepass/kdbx3-basic — see generator docstring")
-
-
 def gen_pykeepass_custom_fields() -> None:
     """Protected + unprotected custom fields."""
     from pykeepass import create_database, PyKeePass
@@ -720,7 +699,7 @@ def gen_pykeepass_large() -> None:
 def gen_malformed_truncated() -> None:
     """A valid KDBX4 file truncated partway through the header."""
     MALFORMED_DIR.mkdir(parents=True, exist_ok=True)
-    source = KEEPASSXC_DIR / "kdbx4-minimal.kdbx"
+    source = KEEPASSXC_DIR / "kdbx3-minimal.kdbx"
     if not source.exists():
         log("skipping truncated — minimal fixture not generated yet")
         return
@@ -733,7 +712,7 @@ def gen_malformed_truncated() -> None:
         "source": "synthetic",
         "generated_by": "tests/fixtures/generate.py",
         "expected_error": "truncated_or_malformed_header",
-        "source_fixture": "keepassxc/kdbx4-minimal.kdbx",
+        "source_fixture": "keepassxc/kdbx3-minimal.kdbx",
     })
     log("wrote malformed/truncated")
 
@@ -741,7 +720,7 @@ def gen_malformed_truncated() -> None:
 def gen_malformed_bad_magic() -> None:
     """First four bytes munged — should fail the magic check."""
     MALFORMED_DIR.mkdir(parents=True, exist_ok=True)
-    source = KEEPASSXC_DIR / "kdbx4-minimal.kdbx"
+    source = KEEPASSXC_DIR / "kdbx3-minimal.kdbx"
     if not source.exists():
         log("skipping bad-magic — minimal fixture not generated yet")
         return
@@ -754,7 +733,7 @@ def gen_malformed_bad_magic() -> None:
         "source": "synthetic",
         "generated_by": "tests/fixtures/generate.py",
         "expected_error": "bad_magic",
-        "source_fixture": "keepassxc/kdbx4-minimal.kdbx",
+        "source_fixture": "keepassxc/kdbx3-minimal.kdbx",
     })
     log("wrote malformed/bad-magic")
 
@@ -762,7 +741,7 @@ def gen_malformed_bad_magic() -> None:
 def gen_malformed_hmac_fail() -> None:
     """Last byte of the file flipped — HMAC on final block must fail."""
     MALFORMED_DIR.mkdir(parents=True, exist_ok=True)
-    source = KEEPASSXC_DIR / "kdbx4-minimal.kdbx"
+    source = KEEPASSXC_DIR / "kdbx3-minimal.kdbx"
     if not source.exists():
         log("skipping hmac-fail — minimal fixture not generated yet")
         return
@@ -775,7 +754,7 @@ def gen_malformed_hmac_fail() -> None:
         "source": "synthetic",
         "generated_by": "tests/fixtures/generate.py",
         "expected_error": "hmac_mismatch",
-        "source_fixture": "keepassxc/kdbx4-minimal.kdbx",
+        "source_fixture": "keepassxc/kdbx3-minimal.kdbx",
     })
     log("wrote malformed/hmac-fail")
 
@@ -787,17 +766,16 @@ def gen_malformed_hmac_fail() -> None:
 GENERATORS: dict[str, list[Callable[[], None]]] = {
     "attachments": [generate_attachments],
     "keepassxc": [
-        gen_keepassxc_minimal,
-        gen_keepassxc_basic,
-        gen_keepassxc_keyfile,
-        gen_keepassxc_attachments,
-        gen_keepassxc_unicode,
-        gen_keepassxc_deep_groups,
+        gen_keepassxc_kdbx3_minimal,
+        gen_keepassxc_kdbx3_basic,
+        gen_keepassxc_kdbx3_keyfile,
+        gen_keepassxc_kdbx3_attachments,
+        gen_keepassxc_kdbx3_unicode,
+        gen_keepassxc_kdbx3_deep_groups,
     ],
     "pykeepass": [
         gen_pykeepass_history,
         gen_pykeepass_recycle,
-        gen_pykeepass_kdbx3,
         gen_pykeepass_custom_fields,
         gen_pykeepass_large,
     ],
