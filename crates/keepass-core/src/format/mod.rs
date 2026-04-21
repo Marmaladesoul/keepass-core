@@ -7,10 +7,15 @@
 //! The [`Version`] enum enumerates supported major versions. Per-version
 //! code lives in the `v3` and `v4` submodules.
 
+pub mod header;
 pub mod tlv;
 pub mod v3;
 pub mod v4;
 
+pub use header::{
+    CipherId, CompressionFlags, EncryptionIv, HeaderError, InnerStreamAlgorithm, KnownCipher,
+    MasterSeed, OuterHeader, ProtectedStreamKey, StreamStartBytes, TransformSeed,
+};
 pub use tlv::{LengthWidth, TlvField, read_header_fields};
 
 // ---------------------------------------------------------------------------
