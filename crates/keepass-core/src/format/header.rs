@@ -256,8 +256,8 @@ pub struct OuterHeader {
     pub inner_stream_algorithm: Option<InnerStreamAlgorithm>,
 
     // --- KDBX4-only fields -----------------------------------------------
-    /// KDF parameters as a VarDictionary (raw bytes — parsing is a future
-    /// concern). Populated on KDBX4 only.
+    /// Raw KDF-parameter bytes (an encoded VarDictionary). Populated on
+    /// KDBX4 only. Use [`Self::decode_kdf_params`] for the typed form.
     pub kdf_parameters: Option<Vec<u8>>,
     /// Optional public custom data as a VarDictionary (raw bytes). May appear
     /// on KDBX4 but is rarely present.
@@ -433,6 +433,75 @@ impl OuterHeader {
             public_custom_data,
         })
     }
+
+    /// Decode the KDF parameters into their typed form.
+    ///
+    /// For KDBX4 headers, parses the raw [`Self::kdf_parameters`] blob as a
+    /// [`VarDictionary`][super::var_dictionary::VarDictionary] then extracts
+    /// a typed [`KdfParams`][super::kdf_params::KdfParams].
+    ///
+    /// For KDBX3 headers, constructs [`KdfParams::AesKdf`] directly from the
+    /// `TransformSeed` / `TransformRounds` outer-header fields — KDBX3 does
+    /// not use a VarDictionary for KDF parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KdfDecodeError`] with a wrapped inner error describing
+    /// which stage failed (VarDictionary parse, typed-params parse, or a
+    /// missing-v3-field problem).
+    pub fn decode_kdf_params(&self) -> Result<super::kdf_params::KdfParams, KdfDecodeError> {
+        match self.version {
+            Version::V3 => {
+                // KDBX3: assemble from the fields we already parsed.
+                let seed = self
+                    .transform_seed
+                    .as_ref()
+                    .ok_or(KdfDecodeError::MissingV3Field("TransformSeed"))?;
+                let rounds = self
+                    .transform_rounds
+                    .ok_or(KdfDecodeError::MissingV3Field("TransformRounds"))?;
+                Ok(super::kdf_params::KdfParams::AesKdf {
+                    seed: seed.0,
+                    rounds,
+                })
+            }
+            Version::V4 => {
+                // KDBX4: decode the VarDictionary blob, then the typed params.
+                let blob = self
+                    .kdf_parameters
+                    .as_ref()
+                    .ok_or(KdfDecodeError::MissingV4KdfParameters)?;
+                let dict = super::var_dictionary::VarDictionary::parse(blob)?;
+                let params = super::kdf_params::KdfParams::from_var_dictionary(&dict)?;
+                Ok(params)
+            }
+        }
+    }
+}
+
+/// Error type for [`OuterHeader::decode_kdf_params`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum KdfDecodeError {
+    /// KDBX3 header was missing one of the AES-KDF fields
+    /// (TransformSeed / TransformRounds). Shouldn't happen after a
+    /// successful [`OuterHeader::parse`]; indicates the header was built
+    /// manually and incompletely.
+    #[error("KDBX3 header is missing {0}")]
+    MissingV3Field(&'static str),
+
+    /// KDBX4 header had no KdfParameters blob. Shouldn't happen after a
+    /// successful [`OuterHeader::parse`] either.
+    #[error("KDBX4 header is missing KdfParameters")]
+    MissingV4KdfParameters,
+
+    /// Error propagated from the VarDictionary decoder.
+    #[error(transparent)]
+    VarDictionary(#[from] super::var_dictionary::VarDictionaryError),
+
+    /// Error propagated from the typed KDF-parameter decoder.
+    #[error(transparent)]
+    KdfParams(#[from] super::kdf_params::KdfParamsError),
 }
 
 // ---------------------------------------------------------------------------
