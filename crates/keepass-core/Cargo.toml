@@ -29,11 +29,11 @@ uuid = { version = "1", features = ["v4"] }
 
 # Crypto primitives — RustCrypto family, no unsafe.
 # Wired in as implementations land.
+sha2 = "0.10"                       # SHA-256, SHA-512 (used for composite-key derivation)
 # aes         = "0.8"
 # cbc         = "0.1"
 # chacha20    = "0.9"
 # salsa20     = "0.10"
-# sha2        = "0.10"
 # hmac        = "0.12"
 # argon2      = "0.5"
 # blake2      = "0.10"
