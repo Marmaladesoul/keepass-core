@@ -9,6 +9,10 @@
 //!
 //! [`RustCrypto`]: https://github.com/RustCrypto
 
+pub mod kdf;
+
+pub use kdf::{KdfError, derive_transformed_key};
+
 /// Error type for cryptographic operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]

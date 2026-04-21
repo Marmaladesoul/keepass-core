@@ -112,6 +112,48 @@ impl fmt::Debug for CompositeKey {
 }
 
 // ---------------------------------------------------------------------------
+// TransformedKey — output of the KDF stage
+// ---------------------------------------------------------------------------
+
+/// The 32-byte transformed key — output of the KDF applied to a
+/// [`CompositeKey`].
+///
+/// For KDBX3: AES-KDF of the composite key under `TransformSeed` for
+/// `TransformRounds` rounds, then SHA-256 of the result.
+///
+/// For KDBX4: Argon2d / Argon2id of the composite key with the declared
+/// parameters, direct 32-byte output.
+///
+/// This is the distinct-type reinforcement of §4.8.3's "newtype for every
+/// semantic quantity" — a [`CompositeKey`] cannot be substituted for a
+/// `TransformedKey` (or vice versa) even though they happen to share a
+/// 32-byte width today.
+#[derive(Clone, Zeroize, ZeroizeOnDrop, PartialEq, Eq)]
+pub struct TransformedKey(Box<[u8; 32]>);
+
+impl TransformedKey {
+    /// Construct a transformed key from raw bytes. Intended for KDF
+    /// implementations to emit their output; callers doing their own
+    /// research may also use it.
+    #[must_use]
+    pub fn from_raw_bytes(bytes: [u8; 32]) -> Self {
+        Self(Box::new(bytes))
+    }
+
+    /// Borrow the 32-byte transformed key.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for TransformedKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransformedKey").field("len", &32).finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
