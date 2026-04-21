@@ -21,8 +21,8 @@
 //! ## Module map
 //!
 //! - [`error`] — top-level [`Error`] and per-module error enums.
-//! - [`secret`] — master-key and related secret types with `Drop`-based
-//!   zeroing. (Types pending implementation.)
+//! - [`secret`] — secret-bearing types ([`secret::CompositeKey`] and friends)
+//!   with `Drop`-based memory zeroing and redacted `Debug`.
 //! - [`crypto`] — cipher trait and implementations (AES-256-CBC, ChaCha20,
 //!   Salsa20), KDFs (Argon2, legacy AES-KDF), HMAC, hashing.
 //! - [`xml`] — XML reading/writing helpers built on `quick-xml`, including the
@@ -62,6 +62,8 @@ pub mod secret;
 pub mod xml;
 
 // Re-export the headline types so consumers can write
-// `use keepass_core::{Kdbx, MasterKey, Error};` without walking the module tree.
+// `use keepass_core::{CompositeKey, Error};` without walking the module tree.
 #[doc(inline)]
 pub use crate::error::Error;
+#[doc(inline)]
+pub use crate::secret::CompositeKey;
