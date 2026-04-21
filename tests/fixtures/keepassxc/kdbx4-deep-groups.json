@@ -1,0 +1,60 @@
+{
+  "database_name": "Passwords",
+  "description": "Deeply-nested groups (5 levels) plus parallel branches. Tests group-tree traversal and path resolution.",
+  "entries": [
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Root Entry",
+      "url": "https://root.example",
+      "username": "charlie@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Level1/Level2/Level3/Level4/Level5",
+      "notes": "Entry at depth 5.",
+      "password_length": 12,
+      "tags": [],
+      "title": "Deep Entry",
+      "url": "https://deep.example",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Parallel/ChildA",
+      "notes": "",
+      "password_length": 15,
+      "tags": [],
+      "title": "Sibling Entry",
+      "url": "https://parallel.example",
+      "username": "bob@example.com"
+    }
+  ],
+  "entry_count": 3,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "generator": "KeePassXC",
+  "group_count": 9,
+  "group_paths": [
+    "/Level1",
+    "/Level1/Level2",
+    "/Level1/Level2/Level3",
+    "/Level1/Level2/Level3/Level4",
+    "/Level1/Level2/Level3/Level4/Level5",
+    "/Parallel",
+    "/Parallel/ChildA",
+    "/Parallel/ChildB"
+  ],
+  "key_file": null,
+  "master_password": "test-deep-006",
+  "source": "keepassxc-cli"
+}

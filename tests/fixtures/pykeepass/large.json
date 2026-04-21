@@ -1,0 +1,10 @@
+{
+  "description": "1,000 entries — scaling / parse-time regression guard.",
+  "entry_count": 1000,
+  "expected_entry_count": 1000,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "key_file": null,
+  "master_password": "test-large-105",
+  "source": "pykeepass"
+}

@@ -21,3 +21,6 @@ Cargo.lock.bak
 *.swp
 *.swo
 *~
+
+# Python venv for fixture generation
+.venv/

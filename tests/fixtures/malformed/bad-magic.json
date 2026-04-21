@@ -1,0 +1,8 @@
+{
+  "description": "First 4 bytes zeroed — magic-bytes check must reject.",
+  "expected_error": "bad_magic",
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "source": "synthetic",
+  "source_fixture": "keepassxc/kdbx4-minimal.kdbx"
+}

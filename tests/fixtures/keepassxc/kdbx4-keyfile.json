@@ -1,0 +1,39 @@
+{
+  "database_name": "Passwords",
+  "description": "KDBX4 secured with password + keyfile. Tests composite-key derivation.",
+  "entries": [
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "",
+      "password_length": 10,
+      "tags": [],
+      "title": "Contoso Mail",
+      "url": "https://mail.contoso.example",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/",
+      "notes": "",
+      "password_length": 10,
+      "tags": [],
+      "title": "Fabrikam VPN",
+      "url": "https://vpn.fabrikam.example",
+      "username": "bob@example.org"
+    }
+  ],
+  "entry_count": 2,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "generator": "KeePassXC",
+  "group_count": 1,
+  "group_paths": [],
+  "key_file": "kdbx4-keyfile.key",
+  "master_password": "test-keyfile-003",
+  "source": "keepassxc-cli"
+}
