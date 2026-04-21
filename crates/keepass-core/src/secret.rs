@@ -154,6 +154,83 @@ impl fmt::Debug for TransformedKey {
 }
 
 // ---------------------------------------------------------------------------
+// CipherKey — key handed to the outer AES-256 / ChaCha20 cipher
+// ---------------------------------------------------------------------------
+
+/// The 32-byte key handed to the outer payload cipher.
+///
+/// Derived as `SHA-256(master_seed || transformed_key)`. Used as-is by
+/// AES-256-CBC (KDBX3 and KDBX4) and ChaCha20 (KDBX4 only).
+///
+/// Distinct type from [`TransformedKey`] even though both are 32 bytes:
+/// substituting one for the other is a correctness bug, so the type
+/// system prevents it.
+#[derive(Clone, Zeroize, ZeroizeOnDrop, PartialEq, Eq)]
+pub struct CipherKey(Box<[u8; 32]>);
+
+impl CipherKey {
+    /// Construct a cipher key from raw bytes. Intended for the derivation
+    /// function to emit; prefer
+    /// [`crate::crypto::derive_cipher_key`] for the standard path.
+    #[must_use]
+    pub fn from_raw_bytes(bytes: [u8; 32]) -> Self {
+        Self(Box::new(bytes))
+    }
+
+    /// Borrow the 32-byte cipher key.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CipherKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CipherKey").field("len", &32).finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HmacKey — 64-byte base key for KDBX4 block HMAC verification
+// ---------------------------------------------------------------------------
+
+/// The 64-byte base key used to derive per-block HMAC keys in KDBX4.
+///
+/// Derived as `SHA-512(master_seed || transformed_key || 0x01)`. The
+/// trailing 0x01 byte is KeePass's domain-separation marker.
+///
+/// Per-block HMAC keys are then computed as
+/// `SHA-512(block_index_u64_le || base_key)` for each `u64` block
+/// index. This module stores only the base; per-block derivation lives
+/// with the block-verification logic.
+///
+/// KDBX3 has no HMAC step; this type is KDBX4-only.
+#[derive(Clone, Zeroize, ZeroizeOnDrop, PartialEq, Eq)]
+pub struct HmacBaseKey(Box<[u8; 64]>);
+
+impl HmacBaseKey {
+    /// Construct an HMAC base key from raw bytes. Intended for the
+    /// derivation function; prefer [`crate::crypto::derive_hmac_base_key`]
+    /// for the standard path.
+    #[must_use]
+    pub fn from_raw_bytes(bytes: [u8; 64]) -> Self {
+        Self(Box::new(bytes))
+    }
+
+    /// Borrow the 64-byte base key.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 64] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for HmacBaseKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HmacBaseKey").field("len", &64).finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

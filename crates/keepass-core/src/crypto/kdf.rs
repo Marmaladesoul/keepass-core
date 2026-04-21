@@ -279,16 +279,10 @@ mod tests {
     #[test]
     fn argon2d_and_argon2id_produce_different_outputs() {
         let composite = CompositeKey::from_password(b"hello");
-        let d = derive_transformed_key(
-            &composite,
-            &fast_argon2_params(Argon2Variant::Argon2d),
-        )
-        .unwrap();
-        let id = derive_transformed_key(
-            &composite,
-            &fast_argon2_params(Argon2Variant::Argon2id),
-        )
-        .unwrap();
+        let d = derive_transformed_key(&composite, &fast_argon2_params(Argon2Variant::Argon2d))
+            .unwrap();
+        let id = derive_transformed_key(&composite, &fast_argon2_params(Argon2Variant::Argon2id))
+            .unwrap();
         assert_ne!(d.as_bytes(), id.as_bytes());
     }
 
@@ -367,11 +361,8 @@ mod tests {
         // KDF should take the composite key by reference and not mutate it.
         let composite = CompositeKey::from_password(b"immutable");
         let before = *composite.as_bytes();
-        let _ = derive_transformed_key(
-            &composite,
-            &fast_argon2_params(Argon2Variant::Argon2id),
-        )
-        .unwrap();
+        let _ = derive_transformed_key(&composite, &fast_argon2_params(Argon2Variant::Argon2id))
+            .unwrap();
         assert_eq!(composite.as_bytes(), &before);
     }
 }

@@ -59,13 +59,13 @@ fn find_kdbxs(dir: &Path) -> Vec<PathBuf> {
 /// hand-rolled tiny parser (avoids a JSON dep in the test crate).
 fn sidecar_password(kdbx: &Path) -> String {
     let sidecar = kdbx.with_extension("json");
-    let text = fs::read_to_string(&sidecar)
-        .unwrap_or_else(|e| panic!("{sidecar:?}: {e}"));
+    let text = fs::read_to_string(&sidecar).unwrap_or_else(|e| panic!("{sidecar:?}: {e}"));
     // Sidecars have "master_password": "..." with sorted keys.
     let needle = "\"master_password\":";
-    let i = text.find(needle).unwrap_or_else(|| {
-        panic!("{sidecar:?}: missing master_password key")
-    }) + needle.len();
+    let i = text
+        .find(needle)
+        .unwrap_or_else(|| panic!("{sidecar:?}: missing master_password key"))
+        + needle.len();
     let after = &text[i..];
     // null is allowed (no password) but our corpus doesn't use it.
     let open = after.find('"').expect("open quote");
@@ -147,9 +147,7 @@ fn kdf_runs_end_to_end_against_every_fixture() {
 #[test]
 fn aes_kdf_code_path_runs_on_kdbx3_shape() {
     use keepass_core::format::KdfParams;
-    let path = fixtures_root()
-        .join("keepassxc")
-        .join("kdbx3-minimal.kdbx");
+    let path = fixtures_root().join("keepassxc").join("kdbx3-minimal.kdbx");
     if !path.exists() {
         return; // corpus not present in this build
     }
