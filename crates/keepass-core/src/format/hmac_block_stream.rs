@@ -92,18 +92,15 @@ pub fn read_hmac_block_stream(
 
         // Derive the per-block key and verify.
         let key = per_block_hmac_key(hmac_base, block_index);
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&key)
-            .expect("HMAC-SHA-256 accepts any key length");
+        let mut mac =
+            <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
         mac.update(&block_index.to_le_bytes());
         mac.update(&size.to_le_bytes());
         mac.update(data);
         let computed = mac.finalize().into_bytes();
 
         if computed.as_slice().ct_eq(declared_tag).unwrap_u8() == 0 {
-            return Err(HmacBlockError::HmacMismatch {
-                block_index,
-                size,
-            });
+            return Err(HmacBlockError::HmacMismatch { block_index, size });
         }
 
         if size == 0 {
@@ -303,7 +300,10 @@ mod tests {
         // Should fail at index 1 (the end marker's index).
         assert!(matches!(
             err,
-            HmacBlockError::HmacMismatch { block_index: 1, size: 0 }
+            HmacBlockError::HmacMismatch {
+                block_index: 1,
+                size: 0
+            }
         ));
     }
 
