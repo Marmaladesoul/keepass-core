@@ -149,9 +149,61 @@ pub struct Entry {
     /// saves. `None` when the entry has never been moved (or the
     /// field wasn't written).
     pub previous_parent_group: Option<GroupId>,
+    /// `<AutoType>` — auto-type configuration. Absent blocks
+    /// deserialise to [`AutoType::default`] (enabled, no
+    /// obfuscation, empty sequence, no per-window associations).
+    pub auto_type: AutoType,
     /// `<Times>` block — creation, modification, expiry, etc. Absent
     /// blocks deserialise to [`Timestamps::default`].
     pub times: Timestamps,
+}
+
+/// Auto-type configuration on an [`Entry`] — the macro framework
+/// KeePass uses to type credentials into a target window.
+///
+/// The top-level `enabled` flag gates all auto-type for this entry.
+/// `default_sequence` is the fallback macro used when no
+/// [`AutoTypeAssociation`] matches the current foreground window;
+/// associations override it per-window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AutoType {
+    /// `<Enabled>` — defaults to `true` when the block is absent or
+    /// empty, matching KeePass's permissive convention.
+    pub enabled: bool,
+    /// `<DataTransferObfuscation>` — delivery method. `0` is
+    /// "straight keystroke stream"; non-zero values are KeePass-
+    /// specific obfuscation strategies (clipboard hops, randomised
+    /// timing, etc.).
+    pub data_transfer_obfuscation: u32,
+    /// `<DefaultSequence>` — fallback macro when no association
+    /// matches. Empty means "inherit from the group's
+    /// [`Group::default_auto_type_sequence`]".
+    pub default_sequence: String,
+    /// `<Association>` — per-window override macros, in source order.
+    pub associations: Vec<AutoTypeAssociation>,
+}
+
+impl Default for AutoType {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            data_transfer_obfuscation: 0,
+            default_sequence: String::new(),
+            associations: Vec::new(),
+        }
+    }
+}
+
+/// One `<Association>` inside an [`AutoType`] block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AutoTypeAssociation {
+    /// `<Window>` — glob pattern matched against the foreground
+    /// window's title (e.g. `"Firefox - *"`).
+    pub window: String,
+    /// `<KeystrokeSequence>` — macro to play for this window match.
+    pub keystroke_sequence: String,
 }
 
 /// Reference from an [`Entry`] to a binary in [`Vault::binaries`].
@@ -576,6 +628,7 @@ mod tests {
             custom_data: Vec::new(),
             quality_check: true,
             previous_parent_group: None,
+            auto_type: AutoType::default(),
             times: Timestamps::default(),
         }
     }
