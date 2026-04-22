@@ -24,7 +24,7 @@
 
 use aes::Aes256;
 use aes::cipher::block_padding::Pkcs7;
-use aes::cipher::{BlockDecryptMut, KeyIvInit};
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use chacha20::ChaCha20;
 use chacha20::cipher::StreamCipher as _;
 use thiserror::Error;
@@ -32,8 +32,9 @@ use thiserror::Error;
 use crate::format::EncryptionIv;
 use crate::secret::CipherKey;
 
-// Type alias makes the `cbc::Decryptor<Aes256>` spelling readable.
+// Type aliases make the `cbc::Decryptor<Aes256>` spelling readable.
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
+type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 
 // ---------------------------------------------------------------------------
 // AES-256-CBC decrypt
@@ -79,6 +80,51 @@ pub fn aes_256_cbc_decrypt(
     let n = dec
         .decrypt_padded_b2b_mut::<Pkcs7>(ciphertext, &mut out)
         .map_err(|_| CipherError::InvalidPadding)?
+        .len();
+    out.truncate(n);
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// AES-256-CBC encrypt
+// ---------------------------------------------------------------------------
+
+/// Encrypt a KDBX outer payload with AES-256-CBC + PKCS7 padding — the
+/// inverse of [`aes_256_cbc_decrypt`].
+///
+/// Accepts plaintext of any length; PKCS7 always pads to at least the
+/// next full 16-byte block (adding a whole extra block for plaintexts
+/// that are already a multiple of 16).
+///
+/// # Errors
+///
+/// Returns [`CipherError::IvWrongLength`] if `iv` is not 16 bytes.
+///
+/// # Panics
+///
+/// Does not panic. The internal `encrypt_padded_b2b_mut` call is given
+/// a buffer large enough for `plaintext.len() + 16`, which always
+/// accommodates PKCS7 output (≤ 1 extra block).
+pub fn aes_256_cbc_encrypt(
+    key: &CipherKey,
+    iv: &EncryptionIv,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CipherError> {
+    if iv.0.len() != 16 {
+        return Err(CipherError::IvWrongLength {
+            expected: 16,
+            got: iv.0.len(),
+        });
+    }
+
+    let enc = Aes256CbcEnc::new_from_slices(key.as_bytes(), &iv.0)
+        .map_err(|_| CipherError::InvalidPadding)?;
+
+    // Output buffer: plaintext length plus up to one full padding block.
+    let mut out = vec![0u8; plaintext.len() + 16];
+    let n = enc
+        .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut out)
+        .expect("output buffer sized for plaintext + 16")
         .len();
     out.truncate(n);
     Ok(out)
@@ -165,23 +211,60 @@ pub enum CipherError {
 mod tests {
     use super::*;
 
-    use aes::cipher::BlockEncryptMut;
-
-    // Encrypt-then-decrypt helper — we build a reference ciphertext using
-    // the encryption half of the cbc crate so the decrypt path is tested
-    // against known-good input.
-    type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+    // Encrypt-then-decrypt helper. Uses the public `aes_256_cbc_encrypt`
+    // so both halves exercise the same code path.
     fn encrypt_aes_cbc(key: &[u8; 32], iv: &[u8; 16], plaintext: &[u8]) -> Vec<u8> {
-        let enc = Aes256CbcEnc::new_from_slices(key, iv).unwrap();
-        // Allocate an output buffer sized for plaintext + up to one full
-        // padding block (PKCS7 always adds ≥ 1 byte, ≤ 16 bytes).
-        let mut out = vec![0u8; plaintext.len() + 16];
-        let n = enc
-            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut out)
-            .unwrap()
-            .len();
-        out.truncate(n);
-        out
+        aes_256_cbc_encrypt(
+            &CipherKey::from_raw_bytes(*key),
+            &EncryptionIv(iv.to_vec()),
+            plaintext,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn encrypt_then_decrypt_round_trips_full_message() {
+        let key = CipherKey::from_raw_bytes([0x77u8; 32]);
+        let iv = EncryptionIv(vec![0x88u8; 16]);
+        let plaintext = b"unit test for aes_256_cbc_encrypt".to_vec();
+        let ciphertext = aes_256_cbc_encrypt(&key, &iv, &plaintext).unwrap();
+        assert_ne!(ciphertext, plaintext, "encrypt should not be identity");
+        // PKCS7 pads to ≥ 1 block past the original length.
+        assert!(ciphertext.len() > plaintext.len());
+        assert_eq!(ciphertext.len() % 16, 0);
+        let decrypted = aes_256_cbc_decrypt(&key, &iv, &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_rejects_iv_of_wrong_length() {
+        let key = CipherKey::from_raw_bytes([0u8; 32]);
+        let iv = EncryptionIv(vec![0u8; 12]);
+        let err = aes_256_cbc_encrypt(&key, &iv, b"x").unwrap_err();
+        assert!(matches!(
+            err,
+            CipherError::IvWrongLength {
+                expected: 16,
+                got: 12
+            }
+        ));
+    }
+
+    #[test]
+    fn encrypt_pads_empty_plaintext_to_one_block() {
+        let key = CipherKey::from_raw_bytes([0u8; 32]);
+        let iv = EncryptionIv(vec![0u8; 16]);
+        let ciphertext = aes_256_cbc_encrypt(&key, &iv, b"").unwrap();
+        assert_eq!(ciphertext.len(), 16, "PKCS7 always adds at least one block");
+    }
+
+    #[test]
+    fn encrypt_adds_full_padding_block_for_aligned_input() {
+        let key = CipherKey::from_raw_bytes([0u8; 32]);
+        let iv = EncryptionIv(vec![0u8; 16]);
+        // 32 bytes (2 full blocks) → PKCS7 adds a whole 16-byte extra block.
+        let ciphertext = aes_256_cbc_encrypt(&key, &iv, &[0xABu8; 32]).unwrap();
+        assert_eq!(ciphertext.len(), 48);
     }
 
     #[test]
