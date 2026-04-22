@@ -9,8 +9,9 @@
 //!
 //! - Entry history (`<History>`)
 //! - Deleted objects (`<DeletedObjects>`)
-//! - `<Meta>` fields beyond `<Generator>` (database name, memory
-//!   protection flags, recycle-bin config, custom icons, custom data)
+//! - `<Meta>` fields beyond the basic name/description/generator set
+//!   (memory protection flags, recycle-bin config, custom icons,
+//!   custom data, header hash, history settings)
 //! - Binary references (`<Value Ref="N"/>`)
 //!
 //! ## Protected values
@@ -41,7 +42,7 @@ use uuid::Uuid;
 
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
-use crate::model::{CustomField, Entry, EntryId, Group, GroupId, Timestamps, Vault};
+use crate::model::{CustomField, Entry, EntryId, Group, GroupId, Meta, Timestamps, Vault};
 
 /// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
 /// `1970-01-01T00:00:00Z` (the Unix epoch). Used to convert KDBX4
@@ -103,10 +104,8 @@ pub fn decode_vault_with_cipher(
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
 
-    let mut state = DecoderState {
-        generator: String::new(),
-        root: None,
-    };
+    let mut meta = Meta::default();
+    let mut root: Option<Group> = None;
 
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
@@ -118,14 +117,14 @@ pub fn decode_vault_with_cipher(
                 let name = tag_name(&e)?;
                 stack.push(name.clone());
 
-                // The root group sits at KeePassFile/Root/Group. When we
-                // see that Start event, hand control to read_group, which
-                // consumes through the matching </Group>. Pop the stack
-                // frame we pushed for it so our own End handling stays
-                // balanced.
-                if stack == ["KeePassFile", "Root", "Group"] && state.root.is_none() {
-                    let root = read_group(&mut reader, &mut buf, cipher)?;
-                    state.root = Some(root);
+                // Dispatch top-level children of KeePassFile:
+                //   KeePassFile/Meta → read_meta (consumes through </Meta>)
+                //   KeePassFile/Root/Group → read_group (consumes through </Group>)
+                if stack == ["KeePassFile", "Meta"] {
+                    meta = read_meta(&mut reader, &mut buf)?;
+                    stack.pop();
+                } else if stack == ["KeePassFile", "Root", "Group"] && root.is_none() {
+                    root = Some(read_group(&mut reader, &mut buf, cipher)?);
                     stack.pop();
                 }
             }
@@ -134,15 +133,7 @@ pub fn decode_vault_with_cipher(
             }
             Ok(Event::Empty(e)) => {
                 let _ = tag_name(&e)?;
-                // Empty elements at top-level (rare) contribute nothing
-                // to our state.
-            }
-            // Collect <Generator> text when we're at the right depth.
-            Ok(Event::Text(t)) if stack == ["KeePassFile", "Meta", "Generator"] => {
-                let decoded = t
-                    .unescape()
-                    .map_err(|e| XmlError::Malformed(e.to_string()))?;
-                state.generator.push_str(&decoded);
+                // Empty elements at top-level (rare) contribute nothing.
             }
             Ok(Event::Eof) => break,
             _ => {}
@@ -150,18 +141,8 @@ pub fn decode_vault_with_cipher(
         buf.clear();
     }
 
-    let root = state
-        .root
-        .ok_or(XmlError::MissingElement("KeePassFile/Root/Group"))?;
-    Ok(Vault {
-        root,
-        generator: state.generator,
-    })
-}
-
-struct DecoderState {
-    generator: String,
-    root: Option<Group>,
+    let root = root.ok_or(XmlError::MissingElement("KeePassFile/Root/Group"))?;
+    Ok(Vault { root, meta })
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +460,68 @@ fn has_protected_attribute(e: &BytesStart<'_>) -> Result<bool, XmlError> {
     Ok(false)
 }
 
+/// Read a `<Meta>` block into a [`Meta`]. Assumes the opening `<Meta>`
+/// tag has just been consumed; reads up to and including the matching
+/// `</Meta>`.
+///
+/// Unknown children are skipped silently — KeePass writers emit a wide
+/// and version-dependent set of Meta children; we surface only the
+/// fields we currently model.
+fn read_meta<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Meta, XmlError> {
+    let mut meta = Meta::default();
+    let mut depth: i32 = 0;
+
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 {
+                    let text = read_text(reader, buf)?;
+                    assign_meta_field(&mut meta, &name, text)?;
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(meta);
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <Meta>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn assign_meta_field(meta: &mut Meta, field: &str, text: String) -> Result<(), XmlError> {
+    match field {
+        "Generator" => meta.generator = text,
+        "DatabaseName" => meta.database_name = text,
+        "DatabaseDescription" => meta.database_description = text,
+        "DatabaseNameChanged" => {
+            meta.database_name_changed = Some(parse_timestamp(&text, "DatabaseNameChanged")?);
+        }
+        "DatabaseDescriptionChanged" => {
+            meta.database_description_changed =
+                Some(parse_timestamp(&text, "DatabaseDescriptionChanged")?);
+        }
+        "DefaultUserName" => meta.default_username = text,
+        "DefaultUserNameChanged" => {
+            meta.default_username_changed = Some(parse_timestamp(&text, "DefaultUserNameChanged")?);
+        }
+        _ => { /* unknown Meta child — ignore for now */ }
+    }
+    Ok(())
+}
+
 /// Read a `<Times>` block into a [`Timestamps`]. Assumes the opening
 /// `<Times>` tag has just been consumed; reads up to and including the
 /// matching `</Times>`.
@@ -680,7 +723,7 @@ mod tests {
     #[test]
     fn decodes_generator_and_root_name() {
         let vault = decode_vault(sample_xml()).unwrap();
-        assert_eq!(vault.generator, "KeePassXC");
+        assert_eq!(vault.meta.generator, "KeePassXC");
         assert_eq!(vault.root.name, "Passwords");
         assert_eq!(vault.root.notes, "root group notes");
     }
@@ -783,7 +826,7 @@ mod tests {
   </Root>
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
-        assert_eq!(vault.generator, "");
+        assert_eq!(vault.meta.generator, "");
         assert_eq!(vault.root.name, "Only");
     }
 
@@ -1208,5 +1251,114 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // <Meta> block
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_meta_string_fields() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>KeePassXC</Generator>
+    <DatabaseName>My Vault</DatabaseName>
+    <DatabaseDescription>Shared household passwords</DatabaseDescription>
+    <DefaultUserName>alice</DefaultUserName>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.meta.generator, "KeePassXC");
+        assert_eq!(vault.meta.database_name, "My Vault");
+        assert_eq!(
+            vault.meta.database_description,
+            "Shared household passwords"
+        );
+        assert_eq!(vault.meta.default_username, "alice");
+    }
+
+    #[test]
+    fn parses_meta_changed_timestamps() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <DatabaseName>N</DatabaseName>
+    <DatabaseNameChanged>2026-04-22T11:22:33Z</DatabaseNameChanged>
+    <DatabaseDescription>D</DatabaseDescription>
+    <DatabaseDescriptionChanged>2026-04-22T11:22:34Z</DatabaseDescriptionChanged>
+    <DefaultUserName>U</DefaultUserName>
+    <DefaultUserNameChanged>2026-04-22T11:22:35Z</DefaultUserNameChanged>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(
+            vault.meta.database_name_changed,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 11, 22, 33).unwrap())
+        );
+        assert_eq!(
+            vault.meta.database_description_changed,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 11, 22, 34).unwrap())
+        );
+        assert_eq!(
+            vault.meta.default_username_changed,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 11, 22, 35).unwrap())
+        );
+    }
+
+    #[test]
+    fn unknown_meta_children_are_skipped() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <DatabaseName>N</DatabaseName>
+    <MemoryProtection>
+      <ProtectPassword>True</ProtectPassword>
+    </MemoryProtection>
+    <HeaderHash>Zm9vYmFy</HeaderHash>
+    <CustomData>
+      <Item><Key>x</Key><Value>y</Value></Item>
+    </CustomData>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.meta.generator, "G");
+        assert_eq!(vault.meta.database_name, "N");
+        // Unknown Meta children parsed silently, no state bleeds into
+        // modelled fields.
+        assert_eq!(vault.meta.database_description, "");
+        assert_eq!(vault.meta.default_username, "");
+    }
+
+    #[test]
+    fn empty_meta_gives_default() {
+        let xml = br"<KeePassFile>
+  <Meta/>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.meta, Meta::default());
     }
 }
