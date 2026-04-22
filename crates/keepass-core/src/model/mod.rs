@@ -171,6 +171,22 @@ pub struct Group {
     /// Entries directly inside this group, in the order they appeared in
     /// the XML.
     pub entries: Vec<Entry>,
+    /// `<IsExpanded>` — whether the group is shown expanded in the
+    /// host client's tree view. UI state, preserved for round-trip.
+    /// Missing elements default to `true` (KeePass 2.x convention).
+    pub is_expanded: bool,
+    /// `<DefaultAutoTypeSequence>` — client-specific auto-type macro
+    /// inherited by entries in this group. Empty when the group uses
+    /// the vault-wide default.
+    pub default_auto_type_sequence: String,
+    /// `<EnableAutoType>` — tri-state flag: `Some(true)` / `Some(false)`
+    /// explicitly enables or disables auto-type for this group, `None`
+    /// inherits from the parent.
+    pub enable_auto_type: Option<bool>,
+    /// `<EnableSearching>` — tri-state flag: `Some(true)` / `Some(false)`
+    /// explicitly includes or excludes this group from searches, `None`
+    /// inherits from the parent.
+    pub enable_searching: Option<bool>,
     /// `<Times>` block for the group itself.
     pub times: Timestamps,
 }
@@ -404,6 +420,10 @@ mod tests {
             notes: String::new(),
             groups: Vec::new(),
             entries: Vec::new(),
+            is_expanded: true,
+            default_auto_type_sequence: String::new(),
+            enable_auto_type: None,
+            enable_searching: None,
             times: Timestamps::default(),
         }
     }
