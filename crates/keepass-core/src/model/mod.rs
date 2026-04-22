@@ -179,16 +179,46 @@ impl Group {
 
 /// The root vault type (format-agnostic).
 ///
-/// A vault has a single root [`Group`] containing everything. The
-/// `<Meta>` section is not yet modelled; for now we carry just the
-/// [`Self::generator`] string that every KeePass XML document provides.
+/// A vault has a single root [`Group`] containing everything and a
+/// [`Meta`] block with database-level metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Vault {
     /// The root group of the vault tree. Contains all groups and entries.
     pub root: Group,
-    /// Value of `<Meta><Generator>`. Diagnostic only.
+    /// `<Meta>` block — database-level metadata.
+    pub meta: Meta,
+}
+
+/// Contents of the KeePass `<Meta>` element.
+///
+/// Only fields present in the on-disk XML populate here; every field
+/// is either a string (possibly empty) or an `Option`, so a minimal
+/// document with just `<Generator>` round-trips cleanly.
+///
+/// Fields beyond this minimum — memory-protection flags, recycle-bin
+/// config, custom icons, custom data, header hash, history settings —
+/// land in follow-up PRs.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Meta {
+    /// `<Generator>` — identifies the writer (e.g. `"KeePassXC"`,
+    /// `"KdbxWeb"`). Diagnostic only.
     pub generator: String,
+    /// `<DatabaseName>` — user-visible vault name.
+    pub database_name: String,
+    /// `<DatabaseDescription>` — user-visible free-text description.
+    pub database_description: String,
+    /// `<DatabaseNameChanged>` — last time the name was edited.
+    pub database_name_changed: Option<chrono::DateTime<Utc>>,
+    /// `<DatabaseDescriptionChanged>` — last time the description was
+    /// edited.
+    pub database_description_changed: Option<chrono::DateTime<Utc>>,
+    /// `<DefaultUserName>` — default username for new entries.
+    pub default_username: String,
+    /// `<DefaultUserNameChanged>` — last time the default username
+    /// was edited.
+    pub default_username_changed: Option<chrono::DateTime<Utc>>,
 }
 
 impl Vault {
