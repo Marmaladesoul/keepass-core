@@ -171,6 +171,10 @@ pub fn decode_vault_with_cipher(
 /// Read one `<Group>` and its contents. Assumes the opening `<Group>`
 /// tag has just been consumed by the caller; reads up to and including
 /// the matching `</Group>`.
+///
+/// Linear per-child dispatch, same shape as `read_entry` — breaking up
+/// by category would scatter the logic without meaningful clarity gain.
+#[allow(clippy::too_many_lines)]
 fn read_group<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
@@ -187,6 +191,8 @@ fn read_group<R: std::io::BufRead>(
         enable_auto_type: None,
         enable_searching: None,
         custom_data: Vec::new(),
+        previous_parent_group: None,
+        last_top_visible_entry: None,
         times: Timestamps::default(),
     };
 
@@ -253,6 +259,16 @@ fn read_group<R: std::io::BufRead>(
                             group.custom_data = read_custom_data(reader, buf)?;
                             continue;
                         }
+                        "PreviousParentGroup" => {
+                            let text = read_text(reader, buf)?;
+                            group.previous_parent_group = parse_optional_group_id(&text)?;
+                            continue;
+                        }
+                        "LastTopVisibleEntry" => {
+                            let text = read_text(reader, buf)?;
+                            group.last_top_visible_entry = parse_optional_entry_id(&text)?;
+                            continue;
+                        }
                         _ => {
                             // Unknown child of <Group>. Skip silently for
                             // now; future work adds full preservation.
@@ -308,6 +324,8 @@ fn read_entry<R: std::io::BufRead>(
         override_url: String::new(),
         custom_icon_uuid: None,
         custom_data: Vec::new(),
+        quality_check: true,
+        previous_parent_group: None,
         times: Timestamps::default(),
     };
 
@@ -372,6 +390,16 @@ fn read_entry<R: std::io::BufRead>(
                         }
                         "CustomData" => {
                             entry.custom_data = read_custom_data(reader, buf)?;
+                            continue;
+                        }
+                        "QualityCheck" => {
+                            let text = read_text(reader, buf)?;
+                            entry.quality_check = parse_bool(&text, "QualityCheck")?;
+                            continue;
+                        }
+                        "PreviousParentGroup" => {
+                            let text = read_text(reader, buf)?;
+                            entry.previous_parent_group = parse_optional_group_id(&text)?;
                             continue;
                         }
                         "History" => {
@@ -1305,6 +1333,37 @@ fn parse_tags(raw: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+/// Parse a `<PreviousParentGroup>` payload into an `Option<GroupId>`.
+/// Empty string or nil UUID both map to `None`, matching the KeePass
+/// convention that "no previous parent" is written as either.
+fn parse_optional_group_id(text: &str) -> Result<Option<GroupId>, XmlError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let uuid = parse_uuid(trimmed)?;
+    Ok(if uuid.is_nil() {
+        None
+    } else {
+        Some(GroupId(uuid))
+    })
+}
+
+/// Parse a `<LastTopVisibleEntry>` payload into an `Option<EntryId>`.
+/// Mirrors [`parse_optional_group_id`] but wraps into [`EntryId`].
+fn parse_optional_entry_id(text: &str) -> Result<Option<EntryId>, XmlError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let uuid = parse_uuid(trimmed)?;
+    Ok(if uuid.is_nil() {
+        None
+    } else {
+        Some(EntryId(uuid))
+    })
 }
 
 /// Parse a KeePass UUID. KeePass always stores UUIDs as base64-encoded
@@ -2851,5 +2910,91 @@ mod tests {
         assert!(vault.root.custom_data.is_empty());
         let e = vault.iter_entries().next().unwrap();
         assert!(e.custom_data.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // QualityCheck + PreviousParentGroup + LastTopVisibleEntry
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_entry_quality_check_and_previous_parent() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <QualityCheck>False</QualityCheck>
+        <PreviousParentGroup>AAAAAAAAAAAAAAAAAAAAAg==</PreviousParentGroup>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(!e.quality_check);
+        let mut expected = [0u8; 16];
+        expected[15] = 2;
+        assert_eq!(
+            e.previous_parent_group,
+            Some(GroupId(Uuid::from_bytes(expected)))
+        );
+    }
+
+    #[test]
+    fn missing_quality_check_defaults_to_true() {
+        let vault = decode_vault(sample_xml()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(e.quality_check);
+        assert_eq!(e.previous_parent_group, None);
+    }
+
+    #[test]
+    fn parses_group_previous_parent_and_last_top_visible_entry() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <PreviousParentGroup>AAAAAAAAAAAAAAAAAAAAAw==</PreviousParentGroup>
+      <LastTopVisibleEntry>AAAAAAAAAAAAAAAAAAAABA==</LastTopVisibleEntry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let mut expected_parent = [0u8; 16];
+        expected_parent[15] = 3;
+        assert_eq!(
+            vault.root.previous_parent_group,
+            Some(GroupId(Uuid::from_bytes(expected_parent)))
+        );
+        let mut expected_entry = [0u8; 16];
+        expected_entry[15] = 4;
+        assert_eq!(
+            vault.root.last_top_visible_entry,
+            Some(EntryId(Uuid::from_bytes(expected_entry)))
+        );
+    }
+
+    #[test]
+    fn nil_previous_parent_and_last_top_visible_are_none() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <PreviousParentGroup>AAAAAAAAAAAAAAAAAAAAAA==</PreviousParentGroup>
+      <LastTopVisibleEntry></LastTopVisibleEntry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.root.previous_parent_group, None);
+        assert_eq!(vault.root.last_top_visible_entry, None);
     }
 }
