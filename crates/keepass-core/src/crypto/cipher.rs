@@ -170,6 +170,30 @@ pub fn chacha20_decrypt(
     Ok(out)
 }
 
+/// Encrypt a KDBX outer payload with ChaCha20 — the inverse of
+/// [`chacha20_decrypt`].
+///
+/// ChaCha20 is a stream cipher: encrypt and decrypt are the same XOR
+/// against the keystream. This function exists for API symmetry with
+/// [`aes_256_cbc_encrypt`] / [`aes_256_cbc_decrypt`] and is literally
+/// a delegation to [`chacha20_decrypt`] — so round-tripping is free
+/// and there is no new cryptographic primitive to review.
+///
+/// # Errors
+///
+/// Returns [`CipherError::IvWrongLength`] if `iv` is not 12 bytes.
+///
+/// # Panics
+///
+/// Does not panic under any input — see [`chacha20_decrypt`].
+pub fn chacha20_encrypt(
+    key: &CipherKey,
+    iv: &EncryptionIv,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CipherError> {
+    chacha20_decrypt(key, iv, plaintext)
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
