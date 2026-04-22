@@ -330,6 +330,29 @@ pub struct Meta {
     /// Semantic hint only; entry-level `Protected` XML attributes are
     /// what actually matter on disk.
     pub memory_protection: MemoryProtection,
+    /// `<CustomData>` — free-form key/value entries used by plugins
+    /// and client-specific settings. Preserved verbatim for round-trip
+    /// so writers that don't know a particular key don't drop it.
+    pub custom_data: Vec<CustomDataItem>,
+}
+
+/// One item in a `<CustomData>` collection.
+///
+/// KeePass stores plugin-specific and client-specific settings as
+/// arbitrary string key/value pairs here. The decoder preserves them
+/// verbatim for round-trip — we don't know what downstream plugins
+/// care about, so we don't filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CustomDataItem {
+    /// Opaque identifier — usually a reverse-DNS-ish plugin namespace
+    /// (e.g. `KPXC_DECRYPTION_TIME_PREFERENCE`).
+    pub key: String,
+    /// Opaque string value.
+    pub value: String,
+    /// `<LastModificationTime>` — when the item was last edited.
+    /// KDBX4 writers set this; KDBX3 writers typically don't.
+    pub last_modified: Option<DateTime<Utc>>,
 }
 
 /// `<MemoryProtection>` flags — whether a given canonical entry
