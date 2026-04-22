@@ -268,7 +268,10 @@ mod tests {
         buf.extend_from_slice(b"EXTRA XML PAYLOAD");
 
         let header = InnerHeader::parse(&buf).unwrap();
-        assert_eq!(header.inner_stream_algorithm, InnerStreamAlgorithm::ChaCha20);
+        assert_eq!(
+            header.inner_stream_algorithm,
+            InnerStreamAlgorithm::ChaCha20
+        );
         assert_eq!(header.inner_stream_key.len(), 64);
         assert!(header.binaries.is_empty());
         // Consumed should equal everything up to (and including) the end record.
@@ -316,7 +319,10 @@ mod tests {
         buf.extend_from_slice(&tlv(tag::INNER_RANDOM_STREAM_ID, &3u32.to_le_bytes()));
         buf.extend_from_slice(&end_record());
         let err = InnerHeader::parse(&buf).unwrap_err();
-        assert!(matches!(err, InnerHeaderError::Missing(tag::INNER_STREAM_KEY)));
+        assert!(matches!(
+            err,
+            InnerHeaderError::Missing(tag::INNER_STREAM_KEY)
+        ));
     }
 
     #[test]
@@ -351,7 +357,10 @@ mod tests {
         buf.extend_from_slice(&tlv(tag::INNER_STREAM_KEY, &[0u8; 32]));
         buf.extend_from_slice(&end_record());
         let err = InnerHeader::parse(&buf).unwrap_err();
-        assert!(matches!(err, InnerHeaderError::UnknownInnerStreamAlgorithm(42)));
+        assert!(matches!(
+            err,
+            InnerHeaderError::UnknownInnerStreamAlgorithm(42)
+        ));
     }
 
     #[test]
