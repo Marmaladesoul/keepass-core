@@ -112,6 +112,101 @@ impl fmt::Debug for CompositeKey {
 }
 
 // ---------------------------------------------------------------------------
+// Keyfile hashing
+// ---------------------------------------------------------------------------
+
+/// Reduce raw KeePass keyfile bytes to the 32-byte hash that feeds into the
+/// composite key derivation.
+///
+/// KeePass recognises several keyfile formats; the rule is **strictly
+/// length-first, then content-sniffed**, per the reference implementation:
+///
+/// 1. **Exactly 32 bytes** — used verbatim as the keyfile hash. This is
+///    the canonical "raw 32-byte keyfile" format.
+/// 2. **Exactly 64 bytes, all ASCII hex digits** — parsed as 32 bytes of
+///    hex-encoded key material.
+/// 3. **XML keyfile** (v1 or v2) — not yet supported. Returns
+///    [`KeyFileError::XmlKeyFileNotSupported`] so that callers get a
+///    clean error rather than silently falling through to the
+///    SHA-256-of-the-whole-file case, which would produce a wrong hash
+///    and a useless "wrong password" error downstream.
+/// 4. **Any other byte sequence** — SHA-256 of the whole file.
+///
+/// # Errors
+///
+/// Returns [`KeyFileError::XmlKeyFileNotSupported`] if the bytes look
+/// like an XML keyfile (start with `<?xml` or `<KeyFile`). Never fails
+/// on raw binary input.
+pub fn keyfile_hash(bytes: &[u8]) -> Result<[u8; 32], KeyFileError> {
+    // Case 1: exactly 32 bytes → use directly.
+    if bytes.len() == 32 {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(bytes);
+        return Ok(out);
+    }
+
+    // Case 2: exactly 64 bytes, all hex digits.
+    if bytes.len() == 64 && bytes.iter().all(u8::is_ascii_hexdigit) {
+        let mut out = [0u8; 32];
+        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+            let hi = hex_digit_value(pair[0]);
+            let lo = hex_digit_value(pair[1]);
+            out[i] = (hi << 4) | lo;
+        }
+        return Ok(out);
+    }
+
+    // Case 3: XML keyfile — detect and refuse cleanly.
+    if looks_like_xml_keyfile(bytes) {
+        return Err(KeyFileError::XmlKeyFileNotSupported);
+    }
+
+    // Case 4: arbitrary bytes → SHA-256 of the whole file.
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    Ok(out)
+}
+
+fn hex_digit_value(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => unreachable!("caller verified ASCII hex"),
+    }
+}
+
+fn looks_like_xml_keyfile(bytes: &[u8]) -> bool {
+    // Strip a UTF-8 BOM if present, then ASCII-skip whitespace, and look
+    // for either `<?xml` or `<KeyFile`. A real XML parser would be
+    // overkill — this heuristic exists only to give a clean error for a
+    // format we haven't wired up yet.
+    let start = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        3
+    } else {
+        0
+    };
+    let trimmed = bytes[start..]
+        .iter()
+        .position(|&b| !b.is_ascii_whitespace())
+        .map_or(&[] as &[u8], |i| &bytes[start + i..]);
+    trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<KeyFile")
+}
+
+/// Error type for keyfile hashing.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum KeyFileError {
+    /// The keyfile looks like an XML keyfile (v1 or v2). Parsing XML
+    /// keyfiles lands in a follow-up PR; for now we reject cleanly so
+    /// callers don't silently derive the wrong hash and hit an opaque
+    /// "wrong password" error.
+    #[error("XML keyfiles (v1 / v2) are not yet supported")]
+    XmlKeyFileNotSupported,
+}
+
+// ---------------------------------------------------------------------------
 // TransformedKey — output of the KDF stage
 // ---------------------------------------------------------------------------
 
@@ -339,6 +434,67 @@ mod tests {
         let k = CompositeKey::from_password(b"clone me");
         let k2 = k.clone();
         assert_eq!(k.as_bytes(), k2.as_bytes());
+    }
+
+    // -----------------------------------------------------------------
+    // keyfile_hash
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn keyfile_hash_uses_exact_32_bytes_verbatim() {
+        let raw = [0xABu8; 32];
+        assert_eq!(keyfile_hash(&raw).unwrap(), raw);
+    }
+
+    #[test]
+    fn keyfile_hash_decodes_64_hex_chars() {
+        let hex = b"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let got = keyfile_hash(hex).unwrap();
+        let expected: [u8; 32] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+            0xcc, 0xdd, 0xee, 0xff,
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn keyfile_hash_hex_accepts_uppercase() {
+        let hex = b"ABCDEFabcdef0123456789ABCDEFabcdef0123456789ABCDEFabcdef01234567";
+        assert!(keyfile_hash(hex).is_ok());
+    }
+
+    #[test]
+    fn keyfile_hash_rejects_64_non_hex_bytes_as_sha_of_file() {
+        // 64 bytes that aren't hex → falls through to SHA-256(file).
+        let mut bytes = [0u8; 64];
+        bytes[0] = b'Z'; // non-hex byte
+        let got = keyfile_hash(&bytes).unwrap();
+        assert_eq!(got, sha256(&bytes));
+    }
+
+    #[test]
+    fn keyfile_hash_falls_back_to_sha256_for_arbitrary_length() {
+        for len in [0, 1, 31, 33, 63, 65, 128, 4096] {
+            let bytes = vec![0x55u8; len];
+            let got = keyfile_hash(&bytes).unwrap();
+            assert_eq!(got, sha256(&bytes));
+        }
+    }
+
+    #[test]
+    fn keyfile_hash_rejects_xml_keyfile_cleanly() {
+        let xml = b"<?xml version=\"1.0\"?><KeyFile><Key><Data>abc</Data></Key></KeyFile>";
+        let err = keyfile_hash(xml).unwrap_err();
+        assert!(matches!(err, KeyFileError::XmlKeyFileNotSupported));
+    }
+
+    #[test]
+    fn keyfile_hash_rejects_xml_keyfile_with_utf8_bom_and_whitespace() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"   \n<KeyFile/>");
+        let err = keyfile_hash(&bytes).unwrap_err();
+        assert!(matches!(err, KeyFileError::XmlKeyFileNotSupported));
     }
 
     /// Reference vector — single-SHA of the empty string, for sanity.

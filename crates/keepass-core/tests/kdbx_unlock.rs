@@ -1,16 +1,18 @@
 //! End-to-end integration tests for [`Kdbx::<HeaderRead>::unlock`].
 //!
-//! For each password-only fixture, opens the file, reads its header,
-//! derives the composite key from the JSON sidecar's master password, and
-//! asserts the full pipeline (KDF → cipher → block-stream → compression →
-//! inner header → XML) produces a vault whose entry count and generator
-//! match the sidecar.
+//! For each fixture with a JSON sidecar, opens the file, reads its
+//! header, derives the composite key from the sidecar's master password
+//! (optionally combined with the referenced keyfile), and asserts the
+//! full pipeline (KDF → cipher → block-stream → compression → inner
+//! header → XML) produces a vault whose entry count and generator match
+//! the sidecar.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use keepass_core::CompositeKey;
 use keepass_core::kdbx::{Kdbx, Sealed};
+use keepass_core::secret::keyfile_hash;
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -29,10 +31,15 @@ fn read_string_field(sidecar: &str, field: &str) -> Option<String> {
     let needle = format!("\"{field}\":");
     let idx = sidecar.find(&needle)?;
     let rest = &sidecar[idx + needle.len()..];
-    let q = rest.find('"')?;
-    let rest = &rest[q + 1..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_owned())
+    let trimmed = rest.trim_start();
+    // Reject `null` and any non-string value — only a leading `"` means
+    // "this field has a real string value".
+    if !trimmed.starts_with('"') {
+        return None;
+    }
+    let inner = &trimmed[1..];
+    let end = inner.find('"')?;
+    Some(inner[..end].to_owned())
 }
 
 fn read_usize_field(sidecar: &str, field: &str) -> Option<usize> {
@@ -53,11 +60,6 @@ fn unlock_one(path: &Path) -> Result<(), String> {
     }
     let sidecar = fs::read_to_string(&sidecar_path).expect("read sidecar");
 
-    // Skip fixtures that require a keyfile — keyfile parsing isn't wired yet.
-    if sidecar.contains("\"key_file\":") && !sidecar.contains("\"key_file\": null") {
-        return Ok(());
-    }
-
     let Some(password) = read_string_field(&sidecar, "master_password") else {
         return Ok(());
     };
@@ -69,7 +71,20 @@ fn unlock_one(path: &Path) -> Result<(), String> {
         .read_header()
         .map_err(|e| format!("read_header: {e}"))?;
 
-    let composite = CompositeKey::from_password(password.as_bytes());
+    // Build the composite key, threading in a keyfile if one is referenced.
+    let composite = match read_string_field(&sidecar, "key_file") {
+        Some(name) if !name.is_empty() => {
+            let kf_path = path.parent().unwrap().join(&name);
+            let kf_bytes = fs::read(&kf_path).map_err(|e| format!("read keyfile: {e}"))?;
+            match keyfile_hash(&kf_bytes) {
+                Ok(hash) => {
+                    CompositeKey::from_password_and_keyfile_hash(password.as_bytes(), &hash)
+                }
+                Err(e) => return Err(format!("keyfile_hash: {e}")),
+            }
+        }
+        _ => CompositeKey::from_password(password.as_bytes()),
+    };
 
     let unlocked = match kdbx.unlock(&composite) {
         Ok(u) => u,
@@ -106,7 +121,7 @@ fn unlock_one(path: &Path) -> Result<(), String> {
 }
 
 #[test]
-fn unlock_every_password_only_fixture() {
+fn unlock_every_valid_fixture() {
     let root = fixtures_root();
     let mut checked = 0;
     let mut failures = Vec::new();
