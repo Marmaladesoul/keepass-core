@@ -1,33 +1,17 @@
 //! XML reading and writing for KDBX inner documents.
 //!
 //! KDBX's inner payload is a UTF-8 XML document with KeePass-specific
-//! conventions (e.g. `Protected="True"` attributes on sensitive fields,
-//! base64-encoded binary attachments, KeePass-flavoured timestamp encoding).
-//! This module provides thin wrappers around [`quick-xml`] plus the
-//! machinery for *unknown-element preservation* — the forward-compatibility
-//! mechanism that lets a vault edited by this crate round-trip through newer
-//! KeePass versions without losing fields this crate doesn't understand.
+//! conventions: `Protected="True"` attributes on sensitive fields, base64-
+//! encoded binary attachments, KeePass-flavoured timestamp encoding, an
+//! `<UnknownXML>`-like preservation discipline, and so on.
+//!
+//! This module provides thin wrappers around [`quick-xml`] for streaming
+//! the inner document and extracting typed values from specific paths. The
+//! full typed-model decoder (entries, groups, metadata) sits on top of
+//! these primitives in a follow-up module.
 //!
 //! [`quick-xml`]: https://docs.rs/quick-xml
 
-/// Error type for XML-related failures.
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum XmlError {
-    /// The XML document was malformed.
-    #[error("malformed XML: {0}")]
-    Malformed(String),
+pub mod reader;
 
-    /// A required element was missing.
-    #[error("missing required element: {0}")]
-    MissingElement(&'static str),
-
-    /// An element contained a value that could not be parsed.
-    #[error("invalid value in element {element}: {detail}")]
-    InvalidValue {
-        /// The element whose value failed to parse.
-        element: &'static str,
-        /// Human-readable detail about the failure.
-        detail: String,
-    },
-}
+pub use reader::{XmlError, extract_generator, extract_text_at_path};
