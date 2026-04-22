@@ -1,4 +1,4 @@
-//! Type-length-value (TLV) reader for the KDBX outer header.
+//! Type-length-value (TLV) framing for the KDBX outer header — reader and writer.
 //!
 //! Immediately after the 12-byte [`crate::format::FileSignature`], every KDBX
 //! file carries a sequence of TLV records that describe the cipher, KDF,
@@ -23,6 +23,7 @@
 //! decode the field-specific payloads. Keeping those concerns separate makes
 //! the TLV loop itself trivial to test in isolation — and trivial to fuzz.
 
+use thiserror::Error;
 use winnow::Parser;
 use winnow::binary::{le_u8, le_u16, le_u32};
 use winnow::error::{ContextError, ErrMode};
@@ -132,6 +133,117 @@ pub fn read_header_fields<'a>(
         }
         fields.push(field);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Writer
+// ---------------------------------------------------------------------------
+
+/// Error type for [`write_header_fields`].
+///
+/// The only failure mode is a record whose value is too long for the
+/// configured [`LengthWidth`]. All other writes succeed.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TlvWriteError {
+    /// A record's value length did not fit the chosen length-prefix width.
+    ///
+    /// Emitted when the caller passes, for example, a 70 000-byte value
+    /// alongside [`LengthWidth::U16`] (KDBX3), whose prefix tops out at
+    /// `u16::MAX` = 65 535.
+    #[error(
+        "TLV record for tag {tag} has length {len} which exceeds maximum {max} for this version"
+    )]
+    LengthOverflow {
+        /// The tag of the offending record.
+        tag: u8,
+        /// The actual value length in bytes.
+        len: usize,
+        /// The maximum length the chosen [`LengthWidth`] can encode.
+        max: u64,
+    },
+}
+
+/// Append a single TLV record to `out`.
+///
+/// The inverse of [`parse_field`]: emits tag, then the length as
+/// little-endian bytes of the requested width, then the raw value.
+#[inline]
+fn write_field(
+    out: &mut Vec<u8>,
+    field: &TlvField<'_>,
+    width: LengthWidth,
+) -> Result<(), TlvWriteError> {
+    match width {
+        LengthWidth::U16 => {
+            let len =
+                u16::try_from(field.value.len()).map_err(|_| TlvWriteError::LengthOverflow {
+                    tag: field.tag,
+                    len: field.value.len(),
+                    max: u64::from(u16::MAX),
+                })?;
+            out.push(field.tag);
+            out.extend_from_slice(&len.to_le_bytes());
+        }
+        LengthWidth::U32 => {
+            let len =
+                u32::try_from(field.value.len()).map_err(|_| TlvWriteError::LengthOverflow {
+                    tag: field.tag,
+                    len: field.value.len(),
+                    max: u64::from(u32::MAX),
+                })?;
+            out.push(field.tag);
+            out.extend_from_slice(&len.to_le_bytes());
+        }
+    }
+    out.extend_from_slice(field.value);
+    Ok(())
+}
+
+/// Serialise a sequence of TLV records followed by an end-of-header sentinel.
+///
+/// The exact inverse of [`read_header_fields`]: feeding this function's
+/// output back into the reader with the same [`LengthWidth`] yields the
+/// original `fields` slice and an `end` record with identical tag and
+/// value bytes.
+///
+/// Records are emitted in the order they appear in `fields` with no
+/// reordering, deduplication, or other policy — this layer deals only
+/// with framing; semantic validation lives in [`super::header::OuterHeader`].
+///
+/// The `end` record's value bytes are preserved verbatim. Real KeePass
+/// writers conventionally emit tag `0` with value `\r\n\r\n`, but this
+/// function lets callers round-trip whatever sentinel payload the reader
+/// surfaced.
+///
+/// # Errors
+///
+/// Returns [`TlvWriteError::LengthOverflow`] if any record's value exceeds
+/// the width's addressable range — 65 535 bytes for [`LengthWidth::U16`]
+/// and `u32::MAX` for [`LengthWidth::U32`] on 64-bit targets. On 32-bit
+/// targets a `U32` overflow is unreachable by construction, since
+/// `usize::MAX == u32::MAX` and a `Vec<u8>` can never be longer.
+pub fn write_header_fields(
+    fields: &[TlvField<'_>],
+    end: TlvField<'_>,
+    width: LengthWidth,
+) -> Result<Vec<u8>, TlvWriteError> {
+    // Pre-size: 3 or 5 bytes header per record + sum of value lengths.
+    let per_record_overhead = match width {
+        LengthWidth::U16 => 3,
+        LengthWidth::U32 => 5,
+    };
+    let total_values: usize = fields
+        .iter()
+        .map(|f| f.value.len())
+        .chain(std::iter::once(end.value.len()))
+        .sum();
+    let mut out = Vec::with_capacity(per_record_overhead * (fields.len() + 1) + total_values);
+    for field in fields {
+        write_field(&mut out, field, width)?;
+    }
+    write_field(&mut out, &end, width)?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -281,5 +393,220 @@ mod tests {
             v, expected,
             "value slice should borrow from buf, not a copy"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn writes_v3_matches_pack_v3() {
+        let records: &[(u8, &[u8])] = &[(2, b"hi"), (4, &[0x42; 32])];
+        let end_val = b"\r\n\r\n";
+        let expected = {
+            let mut v = pack_v3(records);
+            v.extend_from_slice(&pack_v3(&[(0, end_val)]));
+            v
+        };
+        let fields: Vec<TlvField<'_>> = records
+            .iter()
+            .map(|&(tag, value)| TlvField { tag, value })
+            .collect();
+        let end = TlvField {
+            tag: 0,
+            value: end_val,
+        };
+        let out = write_header_fields(&fields, end, LengthWidth::U16).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn writes_v4_matches_pack_v4() {
+        let records: &[(u8, &[u8])] = &[(2, b"uuid"), (4, &[0x42; 32]), (11, b"kdf params")];
+        let end_val = b"END!";
+        let expected = {
+            let mut v = pack_v4(records);
+            v.extend_from_slice(&pack_v4(&[(0, end_val)]));
+            v
+        };
+        let fields: Vec<TlvField<'_>> = records
+            .iter()
+            .map(|&(tag, value)| TlvField { tag, value })
+            .collect();
+        let end = TlvField {
+            tag: 0,
+            value: end_val,
+        };
+        let out = write_header_fields(&fields, end, LengthWidth::U32).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn round_trip_v3() {
+        let fields_in = vec![
+            TlvField {
+                tag: 2,
+                value: b"hello",
+            },
+            TlvField {
+                tag: 4,
+                value: &[0xAA; 32],
+            },
+            TlvField {
+                tag: 7,
+                value: &[0x01; 16],
+            },
+        ];
+        let end_in = TlvField {
+            tag: 0,
+            value: b"\r\n\r\n",
+        };
+        let bytes = write_header_fields(&fields_in, end_in, LengthWidth::U16).unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields_out, end_out) = read_header_fields(&mut cursor, LengthWidth::U16).unwrap();
+        assert!(cursor.is_empty());
+        assert_eq!(fields_out.len(), fields_in.len());
+        for (a, b) in fields_out.iter().zip(fields_in.iter()) {
+            assert_eq!(a.tag, b.tag);
+            assert_eq!(a.value, b.value);
+        }
+        assert_eq!(end_out.tag, 0);
+        assert_eq!(end_out.value, b"\r\n\r\n");
+    }
+
+    #[test]
+    fn round_trip_v4() {
+        let fields_in = vec![
+            TlvField {
+                tag: 2,
+                value: b"uuid-bytes-here!",
+            },
+            TlvField {
+                tag: 11,
+                value: b"variant dict payload",
+            },
+            TlvField {
+                tag: 12,
+                value: b"",
+            },
+        ];
+        let end_in = TlvField {
+            tag: 0,
+            value: b"\r\n\r\n",
+        };
+        let bytes = write_header_fields(&fields_in, end_in, LengthWidth::U32).unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields_out, end_out) = read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
+        assert!(cursor.is_empty());
+        for (a, b) in fields_out.iter().zip(fields_in.iter()) {
+            assert_eq!(a.tag, b.tag);
+            assert_eq!(a.value, b.value);
+        }
+        assert_eq!(end_out.value, b"\r\n\r\n");
+    }
+
+    #[test]
+    fn round_trip_v4_large_payload() {
+        let payload = vec![0xCDu8; 100_000];
+        let fields_in = vec![TlvField {
+            tag: 5,
+            value: &payload,
+        }];
+        let end_in = TlvField { tag: 0, value: b"" };
+        let bytes = write_header_fields(&fields_in, end_in, LengthWidth::U32).unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields_out, _end) = read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
+        assert_eq!(fields_out.len(), 1);
+        assert_eq!(fields_out[0].tag, 5);
+        assert_eq!(fields_out[0].value.len(), 100_000);
+        assert_eq!(fields_out[0].value, payload.as_slice());
+    }
+
+    #[test]
+    fn zero_length_value_round_trips() {
+        let fields_in = vec![TlvField { tag: 7, value: b"" }];
+        let end_in = TlvField { tag: 0, value: b"" };
+        let bytes = write_header_fields(&fields_in, end_in, LengthWidth::U16).unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields_out, end_out) = read_header_fields(&mut cursor, LengthWidth::U16).unwrap();
+        assert_eq!(fields_out.len(), 1);
+        assert_eq!(fields_out[0].tag, 7);
+        assert_eq!(fields_out[0].value, b"");
+        assert_eq!(end_out.value, b"");
+    }
+
+    #[test]
+    fn end_sentinel_preserves_arbitrary_value() {
+        // Non-canonical sentinel payload — the reader surfaces it, so the
+        // writer must round-trip it byte-for-byte.
+        let end_in = TlvField {
+            tag: 0,
+            value: b"END!",
+        };
+        let bytes = write_header_fields(&[], end_in, LengthWidth::U32).unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields, end_out) = read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
+        assert!(fields.is_empty());
+        assert_eq!(end_out.tag, 0);
+        assert_eq!(end_out.value, b"END!");
+    }
+
+    #[test]
+    fn rejects_overflow_for_u16_width() {
+        let big = vec![0u8; 70_000];
+        let fields = vec![TlvField {
+            tag: 5,
+            value: &big,
+        }];
+        let end = TlvField { tag: 0, value: b"" };
+        let err = write_header_fields(&fields, end, LengthWidth::U16).unwrap_err();
+        assert_eq!(
+            err,
+            TlvWriteError::LengthOverflow {
+                tag: 5,
+                len: 70_000,
+                max: u64::from(u16::MAX),
+            }
+        );
+    }
+
+    #[test]
+    fn empty_field_list_writes_just_end_sentinel() {
+        let end_in = TlvField {
+            tag: 0,
+            value: b"\r\n\r\n",
+        };
+        let bytes = write_header_fields(&[], end_in, LengthWidth::U16).unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields, end_out) = read_header_fields(&mut cursor, LengthWidth::U16).unwrap();
+        assert!(fields.is_empty());
+        assert_eq!(end_out.tag, 0);
+        assert_eq!(end_out.value, b"\r\n\r\n");
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn duplicate_tags_round_trip() {
+        // Framing layer has no policy: duplicates pass through untouched
+        // and in order. The typed-header layer is what rejects them.
+        let fields_in = vec![
+            TlvField {
+                tag: 2,
+                value: b"first",
+            },
+            TlvField {
+                tag: 2,
+                value: b"second",
+            },
+        ];
+        let end_in = TlvField { tag: 0, value: b"" };
+        let bytes = write_header_fields(&fields_in, end_in, LengthWidth::U32).unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields_out, _end) = read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
+        assert_eq!(fields_out.len(), 2);
+        assert_eq!(fields_out[0].tag, 2);
+        assert_eq!(fields_out[0].value, b"first");
+        assert_eq!(fields_out[1].tag, 2);
+        assert_eq!(fields_out[1].value, b"second");
     }
 }
