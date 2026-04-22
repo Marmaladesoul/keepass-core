@@ -90,6 +90,68 @@ pub fn read_hashed_block_stream(input: &[u8]) -> Result<Vec<u8>, HashedBlockErro
     }
 }
 
+/// Default on-disk block size for [`write_hashed_block_stream`]: 1 MiB.
+///
+/// Matches the reference KeePass / KeePassXC writers' convention and
+/// strikes a middle ground between verification granularity (smaller
+/// blocks fail faster on corruption) and framing overhead (4 byte
+/// index + 32 byte SHA-256 + 4 byte size per block).
+pub const DEFAULT_BLOCK_SIZE: usize = 1024 * 1024;
+
+/// Encode a payload as a KDBX3 `HashedBlockStream` — the inverse of
+/// [`read_hashed_block_stream`].
+///
+/// Splits `payload` into blocks of at most `block_size` bytes, emits
+/// each as `(u32 index, [u8; 32] sha256, u32 size, data)`, and closes
+/// with the canonical end-marker block `(index, [0; 32], 0)`.
+///
+/// The output is the payload section that goes **after** the 32-byte
+/// StreamStartBytes sentinel; callers (e.g. `do_save_v3` in `kdbx.rs`)
+/// prepend the sentinel themselves.
+///
+/// Use [`DEFAULT_BLOCK_SIZE`] unless you have a specific reason to
+/// pick something else.
+///
+/// # Errors
+///
+/// Returns [`HashedBlockError::BlockSizeZero`] if `block_size` is zero
+/// (a non-empty payload would otherwise loop forever).
+///
+/// # Panics
+///
+/// Does not panic. Each block is bounded by `block_size`, whose fit
+/// in a `u32` is the caller's responsibility; `block_size` as
+/// `usize::MAX` would overflow, but the 1 MiB default is nowhere near.
+pub fn write_hashed_block_stream(
+    payload: &[u8],
+    block_size: usize,
+) -> Result<Vec<u8>, HashedBlockError> {
+    if block_size == 0 {
+        return Err(HashedBlockError::BlockSizeZero);
+    }
+
+    // Pre-size: payload + 40 bytes per block + 40 byte end marker.
+    let block_count = payload.len().div_ceil(block_size).max(1);
+    let mut out = Vec::with_capacity(payload.len() + 40 * (block_count + 1));
+
+    let mut block_index: u32 = 0;
+    for chunk in payload.chunks(block_size) {
+        let size = u32::try_from(chunk.len()).expect("chunks bounded by block_size ≤ u32::MAX");
+        out.extend_from_slice(&block_index.to_le_bytes());
+        out.extend_from_slice(&Sha256::digest(chunk));
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(chunk);
+        block_index = block_index.wrapping_add(1);
+    }
+
+    // End marker: current index, all-zero hash, size = 0, no data.
+    out.extend_from_slice(&block_index.to_le_bytes());
+    out.extend_from_slice(&[0u8; 32]);
+    out.extend_from_slice(&0u32.to_le_bytes());
+
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Low-level byte-reading helpers
 // ---------------------------------------------------------------------------
@@ -147,6 +209,10 @@ pub enum HashedBlockError {
     /// end-marker block has `size = 0` and a 32-byte all-zero hash.
     #[error("hashed-block end marker has non-zero hash")]
     MalformedEndMarker,
+
+    /// [`write_hashed_block_stream`] was called with a zero block size.
+    #[error("hashed-block stream writer requires a non-zero block size")]
+    BlockSizeZero,
 }
 
 impl From<HashedBlockError> for FormatError {
@@ -159,6 +225,7 @@ impl From<HashedBlockError> for FormatError {
             HashedBlockError::BlockIndexOutOfOrder { .. } => "hashed-block index out of order",
             HashedBlockError::HashMismatch { .. } => "hashed-block hash mismatch",
             HashedBlockError::MalformedEndMarker => "hashed-block end marker malformed",
+            HashedBlockError::BlockSizeZero => "hashed-block writer given zero block size",
         })
     }
 }
@@ -337,6 +404,58 @@ mod tests {
         let decoded = read_hashed_block_stream(&stream).unwrap();
         assert_eq!(decoded.len(), 100_000);
         assert_eq!(decoded[0], 0xAB);
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn writer_matches_test_encoder_for_single_block() {
+        let payload = b"hello";
+        let expected = encode(&[payload]);
+        let got = write_hashed_block_stream(payload, 1024).unwrap();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn writer_chunks_large_payload() {
+        let payload: Vec<u8> = (0..5_000u32).map(|i| (i & 0xFF) as u8).collect();
+        let bytes = write_hashed_block_stream(&payload, 1024).unwrap();
+        let decoded = read_hashed_block_stream(&bytes).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn writer_round_trips_empty_payload() {
+        let bytes = write_hashed_block_stream(&[], 1024).unwrap();
+        // Only the end marker: 4 + 32 + 4 = 40 bytes.
+        assert_eq!(bytes.len(), 40);
+        let decoded = read_hashed_block_stream(&bytes).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn writer_round_trips_default_block_size() {
+        // ~2.5 MiB at 1 MiB chunks → 3 blocks.
+        let payload = vec![0x55u8; 2 * 1024 * 1024 + 1024];
+        let bytes = write_hashed_block_stream(&payload, DEFAULT_BLOCK_SIZE).unwrap();
+        let decoded = read_hashed_block_stream(&bytes).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn writer_rejects_zero_block_size() {
+        let err = write_hashed_block_stream(b"any", 0).unwrap_err();
+        assert!(matches!(err, HashedBlockError::BlockSizeZero));
+    }
+
+    #[test]
+    fn writer_output_is_deterministic() {
+        let payload = b"same input, same output";
+        let a = write_hashed_block_stream(payload, 8).unwrap();
+        let b = write_hashed_block_stream(payload, 8).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]

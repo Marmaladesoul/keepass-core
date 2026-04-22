@@ -36,3 +36,11 @@ must_use_candidate      = "allow"   # pedantic; noisy during stub phase
 missing_errors_doc      = "allow"   # re-enable once APIs are fleshed out
 doc_markdown            = "allow"   # flags every "KeePass", "KDBX", etc. in prose
 multiple_crate_versions = "allow"   # transitive conflicts we cannot fix
+
+# Optimise third-party dependencies even in debug / test builds. Crypto
+# primitives (AES-KDF, Argon2, SHA-256, ChaCha20) are 10–15× slower
+# unoptimised, which pushes the fixture round-trip test suite from a
+# couple of minutes to tens of minutes. Keeping our own crates at
+# opt-level 0 preserves fast debug builds and readable stack traces.
+[profile.dev.package."*"]
+opt-level = 3
