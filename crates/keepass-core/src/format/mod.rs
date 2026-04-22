@@ -9,6 +9,7 @@
 
 pub mod hashed_block_stream;
 pub mod header;
+pub mod header_hmac;
 pub mod hmac_block_stream;
 pub mod kdf_params;
 pub mod tlv;
@@ -17,6 +18,7 @@ pub mod v4;
 pub mod var_dictionary;
 
 pub use hashed_block_stream::{HashedBlockError, read_hashed_block_stream};
+pub use header_hmac::{HeaderAuthError, verify_header_hash, verify_header_hmac};
 pub use hmac_block_stream::{HEADER_HMAC_BLOCK_INDEX, HmacBlockError, read_hmac_block_stream};
 
 pub use header::{
