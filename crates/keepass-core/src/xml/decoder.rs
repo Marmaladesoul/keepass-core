@@ -41,7 +41,9 @@ use uuid::Uuid;
 
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
-use crate::model::{CustomField, Entry, EntryId, Group, GroupId, Meta, Timestamps, Vault};
+use crate::model::{
+    Attachment, CustomField, Entry, EntryId, Group, GroupId, Meta, Timestamps, Vault,
+};
 
 /// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
 /// `1970-01-01T00:00:00Z` (the Unix epoch). Used to convert KDBX4
@@ -141,7 +143,14 @@ pub fn decode_vault_with_cipher(
     }
 
     let root = root.ok_or(XmlError::MissingElement("KeePassFile/Root/Group"))?;
-    Ok(Vault { root, meta })
+    // The decoder does not populate Vault::binaries — that pool comes
+    // from the outer format layer (KDBX4 inner header or KDBX3
+    // <Binaries>) and is attached by the Kdbx unlock pipeline.
+    Ok(Vault {
+        root,
+        meta,
+        binaries: Vec::new(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +258,7 @@ fn read_entry<R: std::io::BufRead>(
         custom_fields: Vec::new(),
         tags: Vec::new(),
         history: Vec::new(),
+        attachments: Vec::new(),
         times: Timestamps::default(),
     };
 
@@ -269,6 +279,12 @@ fn read_entry<R: std::io::BufRead>(
                         "String" => {
                             let (key, value, protected) = read_string_kv(reader, buf, cipher)?;
                             assign_well_known_field(&mut entry, &key, value, protected);
+                            continue;
+                        }
+                        "Binary" => {
+                            if let Some(att) = read_binary_kv(reader, buf)? {
+                                entry.attachments.push(att);
+                            }
                             continue;
                         }
                         "Times" => {
@@ -428,6 +444,87 @@ fn read_string_kv<R: std::io::BufRead>(
         }
         buf.clear();
     }
+}
+
+/// Read a `<Binary>` KV element on an entry:
+/// `<Binary><Key>filename</Key><Value Ref="N"/></Binary>`.
+///
+/// Returns `Some(Attachment)` when the element carries both a key and
+/// a `Ref` attribute. Returns `Ok(None)` for malformed or incomplete
+/// elements — some writers emit leftover `<Binary/>` placeholders,
+/// and we'd rather silently drop them than fail the whole decode.
+fn read_binary_kv<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Option<Attachment>, XmlError> {
+    let mut key: Option<String> = None;
+    let mut ref_id: Option<u32> = None;
+    let mut depth: i32 = 0;
+
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 {
+                    match name.as_str() {
+                        "Key" => {
+                            key = Some(read_text(reader, buf)?);
+                            continue;
+                        }
+                        "Value" => {
+                            ref_id = parse_ref_attribute(&e)?;
+                            // Consume the (possibly non-empty) <Value>
+                            // body so the cursor ends up past </Value>.
+                            let _ = read_text(reader, buf)?;
+                            continue;
+                        }
+                        _ => depth += 1,
+                    }
+                } else {
+                    depth += 1;
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 && name == "Value" {
+                    ref_id = parse_ref_attribute(&e)?;
+                }
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(match (key, ref_id) {
+                        (Some(name), Some(ref_id)) => Some(Attachment { name, ref_id }),
+                        _ => None,
+                    });
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <Binary>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn parse_ref_attribute(e: &BytesStart<'_>) -> Result<Option<u32>, XmlError> {
+    for attr in e.attributes() {
+        let a = attr.map_err(|err| XmlError::Malformed(err.to_string()))?;
+        if a.key.as_ref() == b"Ref" {
+            let s = std::str::from_utf8(&a.value)
+                .map_err(|err| XmlError::Malformed(err.to_string()))?;
+            return s
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|e| XmlError::InvalidValue {
+                    element: "Value",
+                    detail: format!("binary Ref is not a non-negative integer: {e}"),
+                });
+        }
+    }
+    Ok(None)
 }
 
 /// Base64-decode a protected `<Value>` payload, XOR it in place against
@@ -1696,5 +1793,84 @@ mod tests {
 
     fn xor(plain: &[u8], keystream: &[u8]) -> Vec<u8> {
         plain.iter().zip(keystream).map(|(p, k)| p ^ k).collect()
+    }
+
+    // -----------------------------------------------------------------
+    // <Binary> attachment references
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_binary_references_on_entry() {
+        let xml = br#"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <Binary><Key>hello.txt</Key><Value Ref="0"/></Binary>
+        <Binary><Key>image.png</Key><Value Ref="3"/></Binary>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#;
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.attachments.len(), 2);
+        assert_eq!(e.attachments[0].name, "hello.txt");
+        assert_eq!(e.attachments[0].ref_id, 0);
+        assert_eq!(e.attachments[1].name, "image.png");
+        assert_eq!(e.attachments[1].ref_id, 3);
+    }
+
+    #[test]
+    fn binary_without_ref_attribute_is_silently_dropped() {
+        // Some writers leave a stub <Binary/> behind when an attachment
+        // is removed. Don't fail the whole decode over it.
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <Binary><Key>orphan</Key><Value/></Binary>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(e.attachments.is_empty());
+    }
+
+    #[test]
+    fn binary_with_non_integer_ref_is_rejected() {
+        let xml = br#"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <Binary><Key>bad</Key><Value Ref="not-a-number"/></Binary>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#;
+        let err = decode_vault(xml).unwrap_err();
+        assert!(matches!(
+            err,
+            XmlError::InvalidValue {
+                element: "Value",
+                ..
+            }
+        ));
     }
 }

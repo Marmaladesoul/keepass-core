@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 
 use keepass_core::CompositeKey;
 use keepass_core::kdbx::{Kdbx, Sealed};
-use keepass_core::model::Entry;
+use keepass_core::model::{Entry, Vault};
 use keepass_core::secret::keyfile_hash;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -34,7 +35,12 @@ fn load_sidecar(path: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-fn check_entry_against_sidecar(actual: &Entry, expected: &Value) -> Result<(), String> {
+#[allow(clippy::too_many_lines)]
+fn check_entry_against_sidecar(
+    actual: &Entry,
+    expected: &Value,
+    vault: &Vault,
+) -> Result<(), String> {
     if let Some(Value::String(u)) = expected.get("username") {
         if &actual.username != u {
             return Err(format!("username {:?} ≠ expected {u:?}", actual.username));
@@ -92,9 +98,64 @@ fn check_entry_against_sidecar(actual: &Entry, expected: &Value) -> Result<(), S
             }
         }
     }
+    if let Some(Value::Number(n)) = expected.get("attachment_count") {
+        if let Some(expected_count) = n.as_u64() {
+            let got_count = actual.attachments.len() as u64;
+            if got_count != expected_count {
+                return Err(format!(
+                    "attachment_count {got_count} ≠ expected {expected_count}"
+                ));
+            }
+        }
+    }
+    if let Some(Value::Array(atts)) = expected.get("attachments") {
+        let mut expected_names: Vec<String> = atts
+            .iter()
+            .filter_map(|v| v.get("filename").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let mut got_names: Vec<String> =
+            actual.attachments.iter().map(|a| a.name.clone()).collect();
+        expected_names.sort();
+        got_names.sort();
+        if got_names != expected_names {
+            return Err(format!(
+                "attachment filenames {got_names:?} ≠ expected {expected_names:?}"
+            ));
+        }
+        // For fixtures where the binary pool is populated (KDBX4 today;
+        // KDBX3 lands in a follow-up), verify each attachment's bytes
+        // hash to the sidecar's sha256.
+        if !vault.binaries.is_empty() {
+            for expected_att in atts {
+                let Some(filename) = expected_att.get("filename").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(expected_sha) = expected_att.get("sha256").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(att) = actual.attachments.iter().find(|a| a.name == filename) else {
+                    continue;
+                };
+                let Some(bin) = vault.binaries.get(att.ref_id as usize) else {
+                    return Err(format!(
+                        "attachment {filename:?} Ref={} out of pool bounds ({} binaries)",
+                        att.ref_id,
+                        vault.binaries.len()
+                    ));
+                };
+                let got_sha = format!("{:x}", Sha256::digest(&bin.data));
+                if got_sha != expected_sha {
+                    return Err(format!(
+                        "attachment {filename:?} sha256 {got_sha} ≠ expected {expected_sha}"
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn unlock_one(path: &Path) -> Result<(), String> {
     let Some(sidecar) = load_sidecar(path) else {
         return Ok(());
@@ -167,6 +228,46 @@ fn unlock_one(path: &Path) -> Result<(), String> {
         }
     }
 
+    // Top-level `attachments` array (kdbxweb-style sidecars): for each
+    // expected attachment, find the entry by title and verify the
+    // referenced binary's SHA-256.
+    if let Some(atts) = sidecar.get("attachments").and_then(Value::as_array) {
+        for a in atts {
+            let (Some(entry_title), Some(filename)) = (
+                a.get("entry").and_then(Value::as_str),
+                a.get("filename").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let Some(expected_sha) = a.get("sha256").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(entry) = vault.iter_entries().find(|e| e.title == entry_title) else {
+                return Err(format!(
+                    "attachment {filename:?} refers to missing entry {entry_title:?}"
+                ));
+            };
+            let Some(att) = entry.attachments.iter().find(|att| att.name == filename) else {
+                return Err(format!(
+                    "entry {entry_title:?} missing attachment {filename:?}"
+                ));
+            };
+            let Some(bin) = vault.binaries.get(att.ref_id as usize) else {
+                return Err(format!(
+                    "attachment {filename:?} Ref={} out of pool bounds ({} binaries)",
+                    att.ref_id,
+                    vault.binaries.len()
+                ));
+            };
+            let got_sha = format!("{:x}", Sha256::digest(&bin.data));
+            if got_sha != expected_sha {
+                return Err(format!(
+                    "attachment {filename:?} sha256 {got_sha} ≠ expected {expected_sha}"
+                ));
+            }
+        }
+    }
+
     // Per-entry assertions when the sidecar lists entries.
     if let Some(entries) = sidecar.get("entries").and_then(Value::as_array) {
         // Index actual entries by title for order-independent matching.
@@ -185,7 +286,7 @@ fn unlock_one(path: &Path) -> Result<(), String> {
             // first that matches the expected fields.
             let mut last_err: Option<String> = None;
             let matched = candidates.iter().any(|actual| {
-                match check_entry_against_sidecar(actual, expected) {
+                match check_entry_against_sidecar(actual, expected, vault) {
                     Ok(()) => true,
                     Err(e) => {
                         last_err = Some(e);
