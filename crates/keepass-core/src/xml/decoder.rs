@@ -1164,9 +1164,46 @@ fn assign_meta_field(meta: &mut Meta, field: &str, text: String) -> Result<(), X
         "RecycleBinChanged" => {
             meta.recycle_bin_changed = Some(parse_timestamp(&text, "RecycleBinChanged")?);
         }
+        "SettingsChanged" => {
+            meta.settings_changed = Some(parse_timestamp(&text, "SettingsChanged")?);
+        }
+        "MasterKeyChanged" => {
+            meta.master_key_changed = Some(parse_timestamp(&text, "MasterKeyChanged")?);
+        }
+        "MasterKeyChangeRec" => {
+            meta.master_key_change_rec = parse_int(&text, "MasterKeyChangeRec")?;
+        }
+        "MasterKeyChangeForce" => {
+            meta.master_key_change_force = parse_int(&text, "MasterKeyChangeForce")?;
+        }
+        "HistoryMaxItems" => {
+            meta.history_max_items = parse_int(&text, "HistoryMaxItems")?;
+        }
+        "HistoryMaxSize" => {
+            meta.history_max_size = parse_int(&text, "HistoryMaxSize")?;
+        }
+        "MaintenanceHistoryDays" => {
+            meta.maintenance_history_days = parse_int::<u32>(&text, "MaintenanceHistoryDays")?;
+        }
         _ => { /* unknown Meta child — ignore for now */ }
     }
     Ok(())
+}
+
+/// Parse a decimal integer (signed or unsigned) out of an XML element's
+/// trimmed text content. Maps parse failures to
+/// [`XmlError::InvalidValue`] tagged with the source element.
+fn parse_int<T>(text: &str, element: &'static str) -> Result<T, XmlError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    text.trim()
+        .parse::<T>()
+        .map_err(|e| XmlError::InvalidValue {
+            element,
+            detail: format!("not a valid integer: {e}"),
+        })
 }
 
 /// Read a `<Times>` block into a [`Timestamps`]. Assumes the opening
@@ -2099,6 +2136,78 @@ mod tests {
             vault.meta.recycle_bin_changed,
             Some(Utc.with_ymd_and_hms(2026, 4, 22, 11, 22, 33).unwrap())
         );
+    }
+
+    #[test]
+    fn parses_meta_history_and_master_key_settings() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <SettingsChanged>2026-04-22T10:00:00Z</SettingsChanged>
+    <MasterKeyChanged>2026-04-21T10:00:00Z</MasterKeyChanged>
+    <MasterKeyChangeRec>180</MasterKeyChangeRec>
+    <MasterKeyChangeForce>365</MasterKeyChangeForce>
+    <HistoryMaxItems>20</HistoryMaxItems>
+    <HistoryMaxSize>12582912</HistoryMaxSize>
+    <MaintenanceHistoryDays>90</MaintenanceHistoryDays>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(
+            vault.meta.settings_changed,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 10, 0, 0).unwrap())
+        );
+        assert_eq!(
+            vault.meta.master_key_changed,
+            Some(Utc.with_ymd_and_hms(2026, 4, 21, 10, 0, 0).unwrap())
+        );
+        assert_eq!(vault.meta.master_key_change_rec, 180);
+        assert_eq!(vault.meta.master_key_change_force, 365);
+        assert_eq!(vault.meta.history_max_items, 20);
+        assert_eq!(vault.meta.history_max_size, 12_582_912);
+        assert_eq!(vault.meta.maintenance_history_days, 90);
+    }
+
+    #[test]
+    fn defaults_match_keepass_stock_values() {
+        // Confirms the manual Default impl matches the KeePass 2.x
+        // factory-default values rather than Rust's all-zero integers.
+        let m = Meta::default();
+        assert_eq!(m.master_key_change_rec, -1);
+        assert_eq!(m.master_key_change_force, -1);
+        assert_eq!(m.history_max_items, 10);
+        assert_eq!(m.history_max_size, 6 * 1024 * 1024);
+        assert_eq!(m.maintenance_history_days, 365);
+    }
+
+    #[test]
+    fn rejects_non_integer_history_setting() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <HistoryMaxItems>lots</HistoryMaxItems>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let err = decode_vault(xml).unwrap_err();
+        assert!(matches!(
+            err,
+            XmlError::InvalidValue {
+                element: "HistoryMaxItems",
+                ..
+            }
+        ));
     }
 
     #[test]
