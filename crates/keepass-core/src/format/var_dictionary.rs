@@ -37,8 +37,13 @@
 //! | 0x18 | [`Value::String`] | UTF-8                 |
 //! | 0x42 | [`Value::Bytes`]  | Raw bytes             |
 //!
-//! This module handles **decoding only** for now. Encoding (for round-trip
-//! write support) lands alongside the KDBX writer.
+//! This module handles both decoding and encoding. The encoder
+//! ([`VarDictionary::write`]) always emits entries in ASCII-sorted
+//! key order (BTreeMap iteration order). Byte-exact round-trip of a
+//! source blob therefore holds only when that source was already
+//! sorted — KeePassXC is; kdbxweb is not. Typed round-trip
+//! (parse → write → parse yields the same [`VarDictionary`]) always
+//! holds.
 
 use std::collections::BTreeMap;
 
@@ -162,6 +167,70 @@ impl VarDictionary {
         parse_dictionary(cursor)
     }
 
+    /// Serialise this dictionary to a byte buffer — the inverse of
+    /// [`Self::parse`].
+    ///
+    /// Emits the version prefix (`[minor, major]`), then every entry in
+    /// BTreeMap iteration order (sorted by key), then the `0x00`
+    /// terminator. Round-trips any dictionary produced by
+    /// [`Self::parse`] back to a byte-identical form *when the source
+    /// bytes also listed entries in sorted key order*. Not every
+    /// upstream writer does so — kdbxweb in particular emits entries
+    /// in insertion order — so byte-exact round-trip of an arbitrary
+    /// source blob is not guaranteed. Typed round-trip (parse-write-
+    /// parse yields the same [`VarDictionary`]) always holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VarDictionaryWriteError::LengthOverflow`] if any key
+    /// or value's byte length exceeds `i32::MAX`. Effectively
+    /// unreachable — KeePass headers hold kilobytes of data, not
+    /// gigabytes — but surfaced as a typed error rather than a panic.
+    pub fn write(&self) -> Result<Vec<u8>, VarDictionaryWriteError> {
+        // Pre-size: 2 bytes version + per-entry (1 type + 4 key-len +
+        // key + 4 value-len + value) + 1 terminator.
+        let approx: usize = 2
+            + self
+                .entries
+                .iter()
+                .map(|(k, v)| 1 + 4 + k.len() + 4 + value_byte_len(v))
+                .sum::<usize>()
+            + 1;
+        let mut out = Vec::with_capacity(approx);
+
+        // Version prefix: [minor, major], so u16::from_le_bytes reads
+        // the minor byte as the low byte — matches the decoder.
+        out.push(self.version_minor);
+        out.push(self.version_major);
+
+        for (key, value) in &self.entries {
+            let ty = value_type_byte(value);
+            let key_len =
+                i32::try_from(key.len()).map_err(|_| VarDictionaryWriteError::LengthOverflow {
+                    key: key.clone(),
+                    field: Field::Key,
+                    len: key.len(),
+                })?;
+            out.push(ty);
+            out.extend_from_slice(&key_len.to_le_bytes());
+            out.extend_from_slice(key.as_bytes());
+
+            let value_bytes = encode_value_payload(value);
+            let value_len = i32::try_from(value_bytes.len()).map_err(|_| {
+                VarDictionaryWriteError::LengthOverflow {
+                    key: key.clone(),
+                    field: Field::Value,
+                    len: value_bytes.len(),
+                }
+            })?;
+            out.extend_from_slice(&value_len.to_le_bytes());
+            out.extend_from_slice(&value_bytes);
+        }
+
+        out.push(TYPE_END);
+        Ok(out)
+    }
+
     /// Like [`Self::parse`], but asserts that the entire buffer is consumed.
     ///
     /// # Errors
@@ -179,8 +248,86 @@ impl VarDictionary {
 }
 
 // ---------------------------------------------------------------------------
-// Error type
+// Encoder helpers
 // ---------------------------------------------------------------------------
+
+/// The type byte that identifies this value's variant on disk.
+const fn value_type_byte(v: &Value) -> u8 {
+    match v {
+        Value::U32(_) => TYPE_U32,
+        Value::U64(_) => TYPE_U64,
+        Value::Bool(_) => TYPE_BOOL,
+        Value::I32(_) => TYPE_I32,
+        Value::I64(_) => TYPE_I64,
+        Value::String(_) => TYPE_STRING,
+        Value::Bytes(_) => TYPE_BYTES,
+    }
+}
+
+/// Byte length this value occupies in the payload section (after its
+/// length prefix). Used for pre-sizing the output buffer.
+fn value_byte_len(v: &Value) -> usize {
+    match v {
+        Value::U32(_) | Value::I32(_) => 4,
+        Value::U64(_) | Value::I64(_) => 8,
+        Value::Bool(_) => 1,
+        Value::String(s) => s.len(),
+        Value::Bytes(b) => b.len(),
+    }
+}
+
+/// Encode the raw value payload (without type byte or length prefix).
+fn encode_value_payload(v: &Value) -> Vec<u8> {
+    match v {
+        Value::U32(n) => n.to_le_bytes().to_vec(),
+        Value::U64(n) => n.to_le_bytes().to_vec(),
+        Value::Bool(b) => vec![u8::from(*b)],
+        Value::I32(n) => n.to_le_bytes().to_vec(),
+        Value::I64(n) => n.to_le_bytes().to_vec(),
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Bytes(b) => b.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+/// Which side of a VarDictionary entry overflowed the length prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Field {
+    /// The key string.
+    Key,
+    /// The value payload.
+    Value,
+}
+
+impl std::fmt::Display for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key => f.write_str("key"),
+            Self::Value => f.write_str("value"),
+        }
+    }
+}
+
+/// Errors that may arise while encoding a VarDictionary.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum VarDictionaryWriteError {
+    /// A key or value exceeded the length that fits in the on-disk
+    /// `i32` length prefix. Effectively unreachable for real headers.
+    #[error("VarDictionary {field} for key {key:?} has length {len} which overflows i32")]
+    LengthOverflow {
+        /// The key whose entry overflowed.
+        key: String,
+        /// Whether the key or value field was too long.
+        field: Field,
+        /// The actual length in bytes.
+        len: usize,
+    },
+}
 
 /// Errors that may arise while decoding a VarDictionary.
 #[derive(Debug, Error)]
@@ -623,5 +770,159 @@ mod tests {
         let d = VarDictionary::parse(&buf).unwrap();
         let keys: Vec<_> = d.entries.keys().collect();
         assert_eq!(keys, ["alpha", "mu", "zeta"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer tests
+    // -----------------------------------------------------------------------
+
+    /// Build a dictionary by hand and confirm write/parse/write is stable.
+    fn dict_from(entries: &[(&str, Value)], major: u8, minor: u8) -> VarDictionary {
+        let mut d = VarDictionary {
+            version_major: major,
+            version_minor: minor,
+            entries: BTreeMap::new(),
+        };
+        for (k, v) in entries {
+            d.entries.insert((*k).to_owned(), v.clone());
+        }
+        d
+    }
+
+    #[test]
+    fn writes_empty_dictionary() {
+        let d = dict_from(&[], 1, 0);
+        let bytes = d.write().unwrap();
+        assert_eq!(bytes, vec![0x00, 0x01, TYPE_END]);
+        let back = VarDictionary::parse_consuming(&bytes).unwrap();
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn round_trips_every_value_type() {
+        let d = dict_from(
+            &[
+                ("b32", Value::U32(0xDEAD_BEEF)),
+                ("b64", Value::U64(0x1234_5678_9ABC_DEF0)),
+                ("flag", Value::Bool(true)),
+                ("i32", Value::I32(-7)),
+                ("i64", Value::I64(-1_000_000_000_000)),
+                ("name", Value::String("Contoso".to_owned())),
+                ("salt", Value::Bytes(vec![0xCA, 0xFE, 0xBA, 0xBE])),
+            ],
+            1,
+            0,
+        );
+        let bytes = d.write().unwrap();
+        let back = VarDictionary::parse_consuming(&bytes).unwrap();
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn byte_exact_round_trip_when_source_is_sorted() {
+        // Build a byte stream in sorted-key order, parse it, re-emit,
+        // and assert equality.
+        let mut buf = Vec::new();
+        push_version(&mut buf, 1, 0);
+        push_entry(&mut buf, TYPE_BYTES, "$UUID", &[0xEFu8; 16]);
+        push_entry(&mut buf, TYPE_U64, "I", &2u64.to_le_bytes());
+        push_entry(&mut buf, TYPE_U64, "M", &(65_536u64).to_le_bytes());
+        push_entry(&mut buf, TYPE_U32, "P", &1u32.to_le_bytes());
+        push_entry(&mut buf, TYPE_BYTES, "S", &[0xAB; 32]);
+        push_entry(&mut buf, TYPE_U32, "V", &19u32.to_le_bytes());
+        buf.push(TYPE_END);
+
+        let d = VarDictionary::parse_consuming(&buf).unwrap();
+        let rewritten = d.write().unwrap();
+        assert_eq!(rewritten, buf);
+    }
+
+    #[test]
+    fn writer_sorts_unsorted_input() {
+        // An unsorted source is normalised to sorted order by the writer
+        // because the in-memory BTreeMap has no concept of "original
+        // order". This is the documented behaviour.
+        let mut buf = Vec::new();
+        push_version(&mut buf, 1, 0);
+        push_entry(&mut buf, TYPE_U32, "zeta", &0u32.to_le_bytes());
+        push_entry(&mut buf, TYPE_U32, "alpha", &1u32.to_le_bytes());
+        buf.push(TYPE_END);
+        let d = VarDictionary::parse_consuming(&buf).unwrap();
+        let rewritten = d.write().unwrap();
+        // Parse the rewritten form via byte inspection: first entry after
+        // the version prefix should be "alpha".
+        assert_eq!(&rewritten[0..2], &[0x00, 0x01]);
+        // type(1) + i32 key_len(4) = 5 bytes, then key bytes.
+        assert_eq!(&rewritten[2..3], &[TYPE_U32]);
+        assert_eq!(&rewritten[3..7], &5i32.to_le_bytes());
+        assert_eq!(&rewritten[7..12], b"alpha");
+    }
+
+    #[test]
+    fn version_bytes_are_minor_then_major() {
+        let d = dict_from(&[], 1, 42);
+        let bytes = d.write().unwrap();
+        // [minor=42, major=1] per the KDBX VarDictionary layout.
+        assert_eq!(bytes[0], 42);
+        assert_eq!(bytes[1], 1);
+    }
+
+    #[test]
+    fn string_values_are_not_null_terminated() {
+        let d = dict_from(&[("Name", Value::String("abc".to_owned()))], 1, 0);
+        let bytes = d.write().unwrap();
+        // Find the value_len i32 for "Name": type(1) + keylen(4) + key(4) = 9 bytes in,
+        // so the value length sits at offset 2+9 = 11.
+        let vlen = i32::from_le_bytes([bytes[11], bytes[12], bytes[13], bytes[14]]);
+        assert_eq!(
+            vlen, 3,
+            "string value length should be 3, no NUL terminator"
+        );
+    }
+
+    #[test]
+    fn bool_encodes_as_single_byte() {
+        let d = dict_from(&[("T", Value::Bool(true))], 1, 0);
+        let bytes = d.write().unwrap();
+        let back = VarDictionary::parse_consuming(&bytes).unwrap();
+        assert_eq!(back.entries.get("T"), Some(&Value::Bool(true)));
+        // Terminator byte is the last.
+        assert_eq!(*bytes.last().unwrap(), TYPE_END);
+    }
+
+    #[test]
+    fn minor_version_is_preserved_on_round_trip() {
+        let d = dict_from(&[("X", Value::U32(1))], 1, 99);
+        let bytes = d.write().unwrap();
+        let back = VarDictionary::parse_consuming(&bytes).unwrap();
+        assert_eq!(back.version_major, 1);
+        assert_eq!(back.version_minor, 99);
+    }
+
+    #[test]
+    fn large_bytes_value_round_trips() {
+        // 100 kB byte value — well within i32 range, exercises the large
+        // allocation path.
+        let payload = vec![0x77u8; 100_000];
+        let d = dict_from(&[("big", Value::Bytes(payload.clone()))], 1, 0);
+        let bytes = d.write().unwrap();
+        let back = VarDictionary::parse_consuming(&bytes).unwrap();
+        assert_eq!(back.entries.get("big"), Some(&Value::Bytes(payload)));
+    }
+
+    #[test]
+    fn realistic_argon2_blob_round_trips_byte_exact() {
+        let mut buf = Vec::new();
+        push_version(&mut buf, 1, 0);
+        // Sorted keys: $UUID, I, M, P, S, V (ASCII-sort order).
+        push_entry(&mut buf, TYPE_BYTES, "$UUID", &[0xEFu8; 16]);
+        push_entry(&mut buf, TYPE_U64, "I", &2u64.to_le_bytes());
+        push_entry(&mut buf, TYPE_U64, "M", &(65_536u64).to_le_bytes());
+        push_entry(&mut buf, TYPE_U32, "P", &1u32.to_le_bytes());
+        push_entry(&mut buf, TYPE_BYTES, "S", &[0xAB; 32]);
+        push_entry(&mut buf, TYPE_U32, "V", &19u32.to_le_bytes());
+        buf.push(TYPE_END);
+        let d = VarDictionary::parse_consuming(&buf).unwrap();
+        assert_eq!(d.write().unwrap(), buf);
     }
 }
