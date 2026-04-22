@@ -7,12 +7,15 @@
 //! The [`Version`] enum enumerates supported major versions. Per-version
 //! code lives in the `v3` and `v4` submodules.
 
+pub mod hashed_block_stream;
 pub mod header;
 pub mod kdf_params;
 pub mod tlv;
 pub mod v3;
 pub mod v4;
 pub mod var_dictionary;
+
+pub use hashed_block_stream::{HashedBlockError, read_hashed_block_stream};
 
 pub use header::{
     CipherId, CompressionFlags, EncryptionIv, HeaderError, InnerStreamAlgorithm, KnownCipher,
