@@ -206,9 +206,9 @@ pub struct Vault {
 /// is either a string (possibly empty) or an `Option`, so a minimal
 /// document with just `<Generator>` round-trips cleanly.
 ///
-/// Fields beyond this minimum — memory-protection flags, recycle-bin
-/// config, custom icons, custom data, header hash, history settings —
-/// land in follow-up PRs.
+/// Fields beyond this set — memory-protection flags, custom icons,
+/// custom data, header hash, history settings — land in follow-up
+/// PRs.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Meta {
@@ -229,6 +229,21 @@ pub struct Meta {
     /// `<DefaultUserNameChanged>` — last time the default username
     /// was edited.
     pub default_username_changed: Option<chrono::DateTime<Utc>>,
+    /// `<RecycleBinEnabled>` — whether soft-delete is wired up. When
+    /// true and [`Self::recycle_bin_uuid`] points to an existing
+    /// group, KeePass writers move deleted entries into that group
+    /// instead of removing them. Absent elements are treated as
+    /// `false`.
+    pub recycle_bin_enabled: bool,
+    /// `<RecycleBinUUID>` — the [`GroupId`] of the recycle-bin
+    /// group, or `None` if the document lists no recycle bin.
+    /// Writers sometimes emit an all-zero UUID to mean "no recycle
+    /// bin", which we surface as `None` for symmetry with the
+    /// explicitly-absent case.
+    pub recycle_bin_uuid: Option<GroupId>,
+    /// `<RecycleBinChanged>` — last time the recycle-bin
+    /// configuration was edited.
+    pub recycle_bin_changed: Option<chrono::DateTime<Utc>>,
 }
 
 impl Vault {

@@ -578,6 +578,21 @@ fn assign_meta_field(meta: &mut Meta, field: &str, text: String) -> Result<(), X
         "DefaultUserNameChanged" => {
             meta.default_username_changed = Some(parse_timestamp(&text, "DefaultUserNameChanged")?);
         }
+        "RecycleBinEnabled" => meta.recycle_bin_enabled = parse_bool(&text, "RecycleBinEnabled")?,
+        "RecycleBinUUID" => {
+            let uuid = parse_uuid(&text)?;
+            // KeePass writers sometimes emit an all-zero UUID to mean
+            // "no recycle bin". Treat that as None for symmetry with
+            // the explicitly-absent case.
+            meta.recycle_bin_uuid = if uuid.is_nil() {
+                None
+            } else {
+                Some(GroupId(uuid))
+            };
+        }
+        "RecycleBinChanged" => {
+            meta.recycle_bin_changed = Some(parse_timestamp(&text, "RecycleBinChanged")?);
+        }
         _ => { /* unknown Meta child — ignore for now */ }
     }
     Ok(())
@@ -1436,6 +1451,56 @@ mod tests {
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
         assert_eq!(vault.meta, Meta::default());
+    }
+
+    #[test]
+    fn parses_recycle_bin_meta_fields() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <RecycleBinEnabled>True</RecycleBinEnabled>
+    <RecycleBinUUID>AAAAAAAAAAAAAAAAAAAAAg==</RecycleBinUUID>
+    <RecycleBinChanged>2026-04-22T11:22:33Z</RecycleBinChanged>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert!(vault.meta.recycle_bin_enabled);
+        let mut expected = [0u8; 16];
+        expected[15] = 2;
+        assert_eq!(
+            vault.meta.recycle_bin_uuid,
+            Some(GroupId(Uuid::from_bytes(expected)))
+        );
+        assert_eq!(
+            vault.meta.recycle_bin_changed,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 11, 22, 33).unwrap())
+        );
+    }
+
+    #[test]
+    fn zero_recycle_bin_uuid_is_treated_as_none() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <RecycleBinEnabled>False</RecycleBinEnabled>
+    <RecycleBinUUID>AAAAAAAAAAAAAAAAAAAAAA==</RecycleBinUUID>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert!(!vault.meta.recycle_bin_enabled);
+        assert_eq!(vault.meta.recycle_bin_uuid, None);
     }
 
     // -----------------------------------------------------------------
