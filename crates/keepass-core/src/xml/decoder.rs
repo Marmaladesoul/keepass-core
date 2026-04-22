@@ -13,9 +13,21 @@
 //! - `<Meta>` fields beyond `<Generator>` (database name, memory
 //!   protection flags, recycle-bin config, custom icons, custom data)
 //! - Binary references (`<Value Ref="N"/>`)
-//! - Protected-value decryption (the value is preserved as the
-//!   base64 ciphertext string until a higher layer applies the inner
-//!   stream cipher)
+//!
+//! ## Protected values
+//!
+//! Fields whose `<Value>` carries `Protected="True"` are stored as
+//! base64-encoded ciphertext under the *inner-stream cipher*. The
+//! keystream is **document-continuous** — a single stream, consumed
+//! by every protected value in source order. That means decryption
+//! must happen *during* XML parsing, not in a post-pass, or the
+//! keystream desynchronises.
+//!
+//! [`decode_vault_with_cipher`] threads a mutable
+//! [`InnerStreamCipher`] through the parser and decrypts each
+//! protected value in place. [`decode_vault`] is a convenience that
+//! runs with [`InnerStreamCipher::None`] — useful for tests and for
+//! documents whose payloads are plain text (rare in real vaults).
 //!
 //! Implementation pattern: a single pass over the [`quick_xml::Reader`]
 //! event stream with a small manual state machine. No DOM allocation,
@@ -28,13 +40,33 @@ use quick_xml::events::{BytesStart, Event};
 use uuid::Uuid;
 
 use super::reader::XmlError;
+use crate::crypto::InnerStreamCipher;
 use crate::model::{CustomField, Entry, EntryId, Group, GroupId, Vault};
 
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Decode a KeePass inner XML document into a typed [`Vault`].
+/// Decode a KeePass inner XML document into a typed [`Vault`], with no
+/// inner-stream cipher applied.
+///
+/// Equivalent to calling [`decode_vault_with_cipher`] with
+/// [`InnerStreamCipher::None`]: protected values are base64-decoded and
+/// the raw bytes taken as UTF-8 plaintext (i.e. the ciphertext is
+/// treated as the plaintext). Useful in tests and for documents whose
+/// protected payloads were never encrypted. Real vaults should go
+/// through [`decode_vault_with_cipher`] with a real cipher.
+///
+/// # Errors
+///
+/// See [`decode_vault_with_cipher`].
+pub fn decode_vault(xml: &[u8]) -> Result<Vault, XmlError> {
+    let mut cipher = InnerStreamCipher::None;
+    decode_vault_with_cipher(xml, &mut cipher)
+}
+
+/// Decode a KeePass inner XML document into a typed [`Vault`],
+/// decrypting protected values via the given inner-stream cipher.
 ///
 /// The input must be the already-decrypted, already-decompressed inner
 /// XML bytes — i.e. what comes out of the
@@ -42,13 +74,27 @@ use crate::model::{CustomField, Entry, EntryId, Group, GroupId, Vault};
 /// [`crate::format::hmac_block_stream`] + AES-CBC + gzip pipeline
 /// (KDBX4).
 ///
+/// `cipher` is advanced once per `Protected="True"` `<Value>` element,
+/// in document order, consuming `ciphertext.len()` bytes of keystream
+/// for each. Pass [`InnerStreamCipher::None`] (or use [`decode_vault`])
+/// to skip decryption.
+///
+/// After a successful call, every [`Entry::password`] and every
+/// [`CustomField`] whose `protected` is `true` holds the *plaintext*
+/// UTF-8 value. The `protected` flag remains `true` to mark the field
+/// as secret for downstream consumers (audit, write-back).
+///
 /// # Errors
 ///
-/// Returns [`XmlError::Malformed`] on invalid XML, or
-/// [`XmlError::MissingElement`] if either `<KeePassFile>` or
-/// `<Root>` is absent. A missing `<Meta>` is tolerated (rare in real
-/// vaults but the decoder doesn't require it).
-pub fn decode_vault(xml: &[u8]) -> Result<Vault, XmlError> {
+/// Returns [`XmlError::Malformed`] on invalid XML,
+/// [`XmlError::MissingElement`] if `<KeePassFile>/<Root>/<Group>` is
+/// absent, or [`XmlError::InvalidValue`] if a protected payload is not
+/// valid base64 or decrypts to non-UTF-8 bytes. A missing `<Meta>` is
+/// tolerated (rare in real vaults but the decoder doesn't require it).
+pub fn decode_vault_with_cipher(
+    xml: &[u8],
+    cipher: &mut InnerStreamCipher,
+) -> Result<Vault, XmlError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
 
@@ -73,7 +119,7 @@ pub fn decode_vault(xml: &[u8]) -> Result<Vault, XmlError> {
                 // frame we pushed for it so our own End handling stays
                 // balanced.
                 if stack == ["KeePassFile", "Root", "Group"] && state.root.is_none() {
-                    let root = read_group(&mut reader, &mut buf)?;
+                    let root = read_group(&mut reader, &mut buf, cipher)?;
                     state.root = Some(root);
                     stack.pop();
                 }
@@ -123,6 +169,7 @@ struct DecoderState {
 fn read_group<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
+    cipher: &mut InnerStreamCipher,
 ) -> Result<Group, XmlError> {
     let mut group = Group {
         id: GroupId(Uuid::nil()),
@@ -143,7 +190,7 @@ fn read_group<R: std::io::BufRead>(
                 if depth == 0 {
                     match name.as_str() {
                         "Group" => {
-                            let child = read_group(reader, buf)?;
+                            let child = read_group(reader, buf, cipher)?;
                             group.groups.push(child);
                             // read_group consumed the full nested block
                             // up through its closing </Group>; depth
@@ -151,7 +198,7 @@ fn read_group<R: std::io::BufRead>(
                             continue;
                         }
                         "Entry" => {
-                            let entry = read_entry(reader, buf)?;
+                            let entry = read_entry(reader, buf, cipher)?;
                             group.entries.push(entry);
                             continue;
                         }
@@ -200,6 +247,7 @@ fn read_group<R: std::io::BufRead>(
 fn read_entry<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
+    cipher: &mut InnerStreamCipher,
 ) -> Result<Entry, XmlError> {
     let mut entry = Entry {
         id: EntryId(Uuid::nil()),
@@ -226,7 +274,7 @@ fn read_entry<R: std::io::BufRead>(
                             continue;
                         }
                         "String" => {
-                            let (key, value, protected) = read_string_kv(reader, buf)?;
+                            let (key, value, protected) = read_string_kv(reader, buf, cipher)?;
                             assign_well_known_field(&mut entry, &key, value, protected);
                             continue;
                         }
@@ -257,12 +305,15 @@ fn read_entry<R: std::io::BufRead>(
 
 /// Read a `<String>` KV element: `<String><Key>Title</Key><Value>foo</Value></String>`.
 ///
-/// The `<Value>` element may carry `Protected="True"`; the caller gets
-/// the boolean so they can decide what to do with the (still base64)
-/// payload.
+/// If the `<Value>` element carries `Protected="True"`, the raw content
+/// is base64-decoded and passed through `cipher`, and the resulting
+/// UTF-8 plaintext becomes the returned value. The `protected` flag is
+/// still set so downstream consumers know the field was stored as a
+/// secret.
 fn read_string_kv<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
+    cipher: &mut InnerStreamCipher,
 ) -> Result<(String, String, bool), XmlError> {
     let mut key = String::new();
     let mut value = String::new();
@@ -282,7 +333,12 @@ fn read_string_kv<R: std::io::BufRead>(
                         }
                         "Value" => {
                             protected = has_protected_attribute(&e)?;
-                            value = read_text(reader, buf)?;
+                            let raw = read_text(reader, buf)?;
+                            value = if protected {
+                                decrypt_protected_value(&raw, cipher)?
+                            } else {
+                                raw
+                            };
                             continue;
                         }
                         _ => depth += 1,
@@ -300,6 +356,8 @@ fn read_string_kv<R: std::io::BufRead>(
             Ok(Event::Empty(e)) => {
                 // A `<Value />` (self-closing) still counts — the value
                 // is empty but we should capture the Protected attribute.
+                // An empty protected value consumes zero keystream bytes,
+                // which is correct: the cipher state is unchanged.
                 let name = tag_name(&e)?;
                 if depth == 0 && name == "Value" {
                     protected = has_protected_attribute(&e)?;
@@ -313,6 +371,21 @@ fn read_string_kv<R: std::io::BufRead>(
         }
         buf.clear();
     }
+}
+
+/// Base64-decode a protected `<Value>` payload, XOR it in place against
+/// the cipher's keystream, and interpret the result as UTF-8.
+fn decrypt_protected_value(raw: &str, cipher: &mut InnerStreamCipher) -> Result<String, XmlError> {
+    let trimmed = raw.trim();
+    let mut bytes = BASE64.decode(trimmed).map_err(|e| XmlError::InvalidValue {
+        element: "Value",
+        detail: format!("protected payload is not valid base64: {e}"),
+    })?;
+    cipher.process(&mut bytes);
+    String::from_utf8(bytes).map_err(|e| XmlError::InvalidValue {
+        element: "Value",
+        detail: format!("decrypted protected payload is not valid UTF-8: {e}"),
+    })
 }
 
 fn assign_well_known_field(entry: &mut Entry, key: &str, value: String, protected: bool) {
@@ -472,9 +545,10 @@ mod tests {
         assert_eq!(gmail.username, "alice@example.com");
         assert_eq!(gmail.url, "https://mail.google.com");
         assert_eq!(gmail.notes, "Primary email");
-        // Password content is preserved as the (base64-encoded) XML value;
-        // higher layers decrypt it via the inner-stream cipher.
-        assert_eq!(gmail.password, "cGxhaW4=");
+        // Password is base64-decoded and XOR'd against the (None) cipher,
+        // which is a passthrough — so we see the raw plaintext bytes
+        // that the test payload encoded (cGxhaW4= == "plain").
+        assert_eq!(gmail.password, "plain");
     }
 
     #[test]
@@ -489,11 +563,9 @@ mod tests {
 
     #[test]
     fn protected_flag_captured_for_password() {
-        // Our sample XML has Password marked Protected="True". The XML
-        // decoder itself doesn't currently surface that info on Entry
-        // (the password is just assigned to Entry::password as a
-        // string), but the information is observable on custom fields —
-        // test that path is at least exercised by another element.
+        // Protected="True" on a custom field survives into CustomField.
+        // The base64 payload (c2VjcmV0 == "secret") is decoded through
+        // the None cipher, yielding the plaintext string directly.
         let xml = br#"<?xml version="1.0"?>
 <KeePassFile>
   <Meta><Generator>X</Generator></Meta>
@@ -503,7 +575,7 @@ mod tests {
       <Name>R</Name>
       <Entry>
         <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
-        <String><Key>TOTP Seed</Key><Value Protected="True">secret</Value></String>
+        <String><Key>TOTP Seed</Key><Value Protected="True">c2VjcmV0</Value></String>
       </Entry>
     </Group>
   </Root>
@@ -512,6 +584,7 @@ mod tests {
         let e = vault.iter_entries().next().unwrap();
         assert_eq!(e.custom_fields.len(), 1);
         assert!(e.custom_fields[0].protected);
+        assert_eq!(e.custom_fields[0].value, "secret");
     }
 
     #[test]
@@ -655,5 +728,177 @@ mod tests {
         let vault = decode_vault(xml).unwrap();
         let e = vault.iter_entries().next().unwrap();
         assert_eq!(e.title, "");
+    }
+
+    // -----------------------------------------------------------------
+    // Cipher-threaded decoding
+    // -----------------------------------------------------------------
+
+    use crate::format::InnerStreamAlgorithm;
+
+    /// Build an XML document where each protected value is the base64 of
+    /// the XOR of the corresponding plaintext against the keystream
+    /// generated by `key`. Two protected values in document order, so
+    /// that keystream-advancement is observable in the output.
+    fn encrypt(plaintext: &[u8], keystream: &mut [u8]) -> String {
+        assert!(keystream.len() >= plaintext.len());
+        let mut buf = plaintext.to_vec();
+        for (b, k) in buf.iter_mut().zip(keystream.iter()) {
+            *b ^= k;
+        }
+        BASE64.encode(&buf)
+    }
+
+    #[test]
+    fn salsa20_cipher_decrypts_protected_values_in_document_order() {
+        // Derive the keystream we'll XOR against our two secrets.
+        let key = [0x42u8; 32];
+        let mut stream = [0u8; 64];
+        let mut ks = InnerStreamCipher::new(InnerStreamAlgorithm::Salsa20, &key).unwrap();
+        ks.process(&mut stream);
+
+        let pw_plain = b"hunter2";
+        let totp_plain = b"JBSWY3DPEHPK3PXP";
+
+        // First protected value consumes bytes 0..pw_plain.len() of the
+        // keystream; the second consumes the following totp_plain.len()
+        // bytes. Encrypt accordingly.
+        let (head, rest) = stream.split_at_mut(pw_plain.len());
+        let pw_cipher = encrypt(pw_plain, head);
+        let (mid, _) = rest.split_at_mut(totp_plain.len());
+        let totp_cipher = encrypt(totp_plain, mid);
+
+        let xml = format!(
+            r#"<KeePassFile>
+  <Meta><Generator>T</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>Gmail</Value></String>
+        <String><Key>Password</Key><Value Protected="True">{pw_cipher}</Value></String>
+        <String><Key>TOTP Seed</Key><Value Protected="True">{totp_cipher}</Value></String>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#
+        );
+
+        let mut cipher = InnerStreamCipher::new(InnerStreamAlgorithm::Salsa20, &key).unwrap();
+        let vault = decode_vault_with_cipher(xml.as_bytes(), &mut cipher).unwrap();
+        let entry = vault.iter_entries().next().unwrap();
+
+        assert_eq!(entry.title, "Gmail");
+        assert_eq!(entry.password, "hunter2");
+        assert_eq!(entry.custom_fields.len(), 1);
+        assert_eq!(entry.custom_fields[0].key, "TOTP Seed");
+        assert_eq!(entry.custom_fields[0].value, "JBSWY3DPEHPK3PXP");
+        assert!(entry.custom_fields[0].protected);
+    }
+
+    #[test]
+    fn chacha20_cipher_decrypts_protected_values() {
+        let key = b"inner-stream-key-arbitrary-len".to_vec();
+        let mut stream = [0u8; 64];
+        let mut ks = InnerStreamCipher::new(InnerStreamAlgorithm::ChaCha20, &key).unwrap();
+        ks.process(&mut stream);
+
+        let plain = b"correct horse battery staple";
+        let (head, _) = stream.split_at_mut(plain.len());
+        let cipher_b64 = encrypt(plain, head);
+
+        let xml = format!(
+            r#"<KeePassFile>
+  <Meta><Generator>T</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Password</Key><Value Protected="True">{cipher_b64}</Value></String>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#
+        );
+
+        let mut cipher = InnerStreamCipher::new(InnerStreamAlgorithm::ChaCha20, &key).unwrap();
+        let vault = decode_vault_with_cipher(xml.as_bytes(), &mut cipher).unwrap();
+        let entry = vault.iter_entries().next().unwrap();
+        assert_eq!(entry.password, "correct horse battery staple");
+    }
+
+    #[test]
+    fn non_base64_protected_value_is_rejected() {
+        let xml = br#"<KeePassFile>
+  <Meta><Generator>T</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Password</Key><Value Protected="True">!!!not base64!!!</Value></String>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#;
+        let mut cipher = InnerStreamCipher::None;
+        let err = decode_vault_with_cipher(xml, &mut cipher).unwrap_err();
+        assert!(matches!(
+            err,
+            XmlError::InvalidValue {
+                element: "Value",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_utf8_plaintext_is_rejected() {
+        // A Salsa20 keystream over an arbitrary 8-byte ciphertext will
+        // almost never yield valid UTF-8; engineer that directly by
+        // XOR-ing valid base64-decoded bytes that result in 0xFF bytes
+        // under the None cipher.
+        // 0xFF 0xFE 0xFD is never valid UTF-8 as a standalone sequence.
+        let payload = BASE64.encode([0xFF_u8, 0xFE, 0xFD]);
+        let xml = format!(
+            r#"<KeePassFile>
+  <Meta><Generator>T</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Password</Key><Value Protected="True">{payload}</Value></String>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#
+        );
+        let mut cipher = InnerStreamCipher::None;
+        let err = decode_vault_with_cipher(xml.as_bytes(), &mut cipher).unwrap_err();
+        assert!(matches!(
+            err,
+            XmlError::InvalidValue {
+                element: "Value",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_vault_is_decode_vault_with_cipher_none() {
+        // The plain wrapper should produce identical output to
+        // decode_vault_with_cipher(&mut None).
+        let xml = sample_xml();
+        let a = decode_vault(xml).unwrap();
+        let mut none = InnerStreamCipher::None;
+        let b = decode_vault_with_cipher(xml, &mut none).unwrap();
+        assert_eq!(a, b);
     }
 }
