@@ -21,7 +21,7 @@ pub mod var_dictionary;
 pub use hashed_block_stream::{HashedBlockError, read_hashed_block_stream};
 pub use header_hmac::{HeaderAuthError, verify_header_hash, verify_header_hmac};
 pub use hmac_block_stream::{HEADER_HMAC_BLOCK_INDEX, HmacBlockError, read_hmac_block_stream};
-pub use inner_header::{InnerBinary, InnerHeader, InnerHeaderError};
+pub use inner_header::{InnerBinary, InnerHeader, InnerHeaderError, InnerHeaderWriteError};
 
 pub use header::{
     CipherId, CompressionFlags, END_OF_HEADER_VALUE, EncryptionIv, HeaderError,
