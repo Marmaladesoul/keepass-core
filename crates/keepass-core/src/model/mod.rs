@@ -134,6 +134,10 @@ pub struct Entry {
     /// (not-yet-modelled) Meta/CustomIcons pool. `None` when the
     /// entry uses one of the built-in icons.
     pub custom_icon_uuid: Option<Uuid>,
+    /// `<CustomData>` — free-form plugin / client-specific key/value
+    /// items attached to this entry. Same shape as
+    /// [`Meta::custom_data`], just scoped to the entry.
+    pub custom_data: Vec<CustomDataItem>,
     /// `<Times>` block — creation, modification, expiry, etc. Absent
     /// blocks deserialise to [`Timestamps::default`].
     pub times: Timestamps,
@@ -203,6 +207,10 @@ pub struct Group {
     /// explicitly includes or excludes this group from searches, `None`
     /// inherits from the parent.
     pub enable_searching: Option<bool>,
+    /// `<CustomData>` — free-form plugin / client-specific key/value
+    /// items attached to this group. Same shape as
+    /// [`Meta::custom_data`], just scoped to the group.
+    pub custom_data: Vec<CustomDataItem>,
     /// `<Times>` block for the group itself.
     pub times: Timestamps,
 }
@@ -452,6 +460,7 @@ mod tests {
             background_color: String::new(),
             override_url: String::new(),
             custom_icon_uuid: None,
+            custom_data: Vec::new(),
             times: Timestamps::default(),
         }
     }
@@ -467,6 +476,7 @@ mod tests {
             default_auto_type_sequence: String::new(),
             enable_auto_type: None,
             enable_searching: None,
+            custom_data: Vec::new(),
             times: Timestamps::default(),
         }
     }
