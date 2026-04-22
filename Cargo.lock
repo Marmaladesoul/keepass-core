@@ -312,6 +312,7 @@ dependencies = [
  "quick-xml",
  "salsa20",
  "secrecy",
+ "serde_json",
  "sha2",
  "subtle",
  "thiserror",
