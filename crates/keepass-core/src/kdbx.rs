@@ -40,10 +40,11 @@ use crate::crypto::{
 };
 use crate::error::Error;
 use crate::format::{
-    FileSignature, FormatError, HMAC_BLOCK_DEFAULT_SIZE, InnerBinary, InnerHeader,
-    InnerStreamAlgorithm, KnownCipher, OuterHeader, SIGNATURE_1, SIGNATURE_2, Version,
+    FileSignature, FormatError, HASHED_BLOCK_DEFAULT_SIZE, HMAC_BLOCK_DEFAULT_SIZE, InnerBinary,
+    InnerHeader, InnerStreamAlgorithm, KnownCipher, OuterHeader, SIGNATURE_1, SIGNATURE_2, Version,
     compute_header_hash, compute_header_hmac, read_hashed_block_stream, read_header_fields,
-    read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hmac_block_stream,
+    read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hashed_block_stream,
+    write_hmac_block_stream,
 };
 use crate::model::{Binary, Vault};
 use crate::secret::{CompositeKey, TransformedKey};
@@ -536,7 +537,14 @@ fn do_unlock(
     Ok(Unlocked {
         vault,
         outer_header: header.clone(),
-        inner_stream: None, // KDBX3 doesn't have a separate inner header
+        // KDBX3 uses outer-header fields, but the *effective* inner-stream
+        // key is SHA-256(ProtectedStreamKey). Cache the hashed form so
+        // save_to_bytes can spin up a fresh cipher symmetrically with
+        // how the decoder built one.
+        inner_stream: Some(InnerStreamParams {
+            algorithm: inner_stream_algorithm,
+            key: inner_stream_key,
+        }),
         transformed_key: transformed,
     })
 }
@@ -547,9 +555,7 @@ fn do_unlock(
 
 fn do_save(signature: FileSignature, version: Version, state: &Unlocked) -> Result<Vec<u8>, Error> {
     match version {
-        Version::V3 => Err(Error::Format(FormatError::MalformedHeader(
-            "save_to_bytes is not yet implemented for KDBX3",
-        ))),
+        Version::V3 => do_save_v3(signature, state),
         Version::V4 => do_save_v4(signature, state),
     }
 }
@@ -656,6 +662,87 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Err
     out.extend_from_slice(&header_hash);
     out.extend_from_slice(&header_hmac);
     out.extend_from_slice(&block_stream);
+    Ok(out)
+}
+
+fn do_save_v3(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Error> {
+    let header = &state.outer_header;
+    let inner_params = state
+        .inner_stream
+        .as_ref()
+        .ok_or(FormatError::MalformedHeader(
+            "KDBX3 save_to_bytes requires inner-stream parameters from unlock",
+        ))?;
+
+    // KDBX3 supports only AES-256-CBC in the shipped reader (ChaCha20 is
+    // a KDBX4-only cipher, and Twofish-CBC is still deferred on both).
+    match header.cipher_id.well_known() {
+        Some(KnownCipher::Aes256Cbc) => {}
+        Some(KnownCipher::ChaCha20) => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "KDBX3 save_to_bytes: ChaCha20 is a KDBX4-only cipher",
+            )));
+        }
+        Some(KnownCipher::TwofishCbc) => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "KDBX3 save_to_bytes does not support Twofish-CBC",
+            )));
+        }
+        None => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "KDBX3 save_to_bytes: unrecognised outer cipher",
+            )));
+        }
+    }
+
+    let stream_start_bytes =
+        header
+            .stream_start_bytes
+            .as_ref()
+            .ok_or(FormatError::MalformedHeader(
+                "KDBX3 save_to_bytes requires StreamStartBytes in the outer header",
+            ))?;
+
+    // --- Inner-stream cipher + XML encode --------------------------------
+    // KDBX3 has no inner header and no inner-header binaries pool — any
+    // attachment bytes live inside the XML's <Binaries> section. The
+    // inner-stream cipher only touches protected <Value> elements.
+    let mut inner_cipher = InnerStreamCipher::new(inner_params.algorithm, &inner_params.key)
+        .map_err(|_| CryptoError::Decrypt)?;
+    let xml_bytes = encode_vault_with_cipher(&state.vault, &mut inner_cipher)?;
+
+    // --- Compress XML (if declared) --------------------------------------
+    let compressed = compress(header.compression, &xml_bytes)
+        .map_err(|_| FormatError::MalformedHeader("compression failed on write"))?;
+
+    // --- Wrap in a HashedBlockStream -------------------------------------
+    let framed = write_hashed_block_stream(&compressed, HASHED_BLOCK_DEFAULT_SIZE)
+        .map_err(FormatError::from)?;
+
+    // --- Prepend the stream-start sentinel -------------------------------
+    let mut plaintext = Vec::with_capacity(32 + framed.len());
+    plaintext.extend_from_slice(&stream_start_bytes.0);
+    plaintext.extend_from_slice(&framed);
+
+    // --- Outer-cipher encrypt --------------------------------------------
+    let cipher_key = derive_cipher_key(&header.master_seed, &state.transformed_key);
+    let ciphertext = aes_256_cbc_encrypt(&cipher_key, &header.encryption_iv, &plaintext)
+        .map_err(|_| CryptoError::Decrypt)?;
+
+    // --- Build outer header bytes (signature + TLVs) ---------------------
+    let mut out = Vec::with_capacity(256 + ciphertext.len());
+    out.extend_from_slice(&SIGNATURE_1);
+    out.extend_from_slice(&SIGNATURE_2);
+    out.extend_from_slice(&signature.minor.to_le_bytes());
+    out.extend_from_slice(&signature.major.to_le_bytes());
+    let tlv_bytes = header
+        .write()
+        .map_err(|_| FormatError::MalformedHeader("failed to write outer header"))?;
+    out.extend_from_slice(&tlv_bytes);
+
+    // KDBX3 has no header hash or HMAC — the encrypted StreamStartBytes
+    // sentinel is the integrity check. Just append the ciphertext.
+    out.extend_from_slice(&ciphertext);
     Ok(out)
 }
 
