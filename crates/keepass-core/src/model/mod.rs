@@ -106,6 +106,11 @@ pub struct Entry {
     /// writers from either convention are handled. Empty segments
     /// are dropped.
     pub tags: Vec<String>,
+    /// `<History>` — older snapshots of this entry, in the order
+    /// KeePass wrote them (typically oldest → newest). Each snapshot
+    /// is itself a full [`Entry`]; its own `history` field is always
+    /// empty (KeePass does not nest history).
+    pub history: Vec<Entry>,
     /// `<Times>` block — creation, modification, expiry, etc. Absent
     /// blocks deserialise to [`Timestamps::default`].
     pub times: Timestamps,
@@ -258,6 +263,7 @@ mod tests {
             notes: String::new(),
             custom_fields: Vec::new(),
             tags: Vec::new(),
+            history: Vec::new(),
             times: Timestamps::default(),
         }
     }
