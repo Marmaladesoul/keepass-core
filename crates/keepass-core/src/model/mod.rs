@@ -118,6 +118,22 @@ pub struct Entry {
     /// payload bytes, because KeePass deduplicates identical payloads
     /// across entries.
     pub attachments: Vec<Attachment>,
+    /// `<ForegroundColor>` — user-chosen text colour for the entry,
+    /// written as a hex `"#RRGGBB"` string. Empty when the entry uses
+    /// the client's default colour.
+    pub foreground_color: String,
+    /// `<BackgroundColor>` — user-chosen row-background colour.
+    /// Empty when the entry uses the client's default colour.
+    pub background_color: String,
+    /// `<OverrideURL>` — per-entry URL-scheme override. KeePass uses
+    /// this for custom "open in browser X" or "launch via script"
+    /// behaviour; empty means the URL field opens via the client's
+    /// default handler.
+    pub override_url: String,
+    /// `<CustomIconUUID>` — reference to a custom icon in the
+    /// (not-yet-modelled) Meta/CustomIcons pool. `None` when the
+    /// entry uses one of the built-in icons.
+    pub custom_icon_uuid: Option<Uuid>,
     /// `<Times>` block — creation, modification, expiry, etc. Absent
     /// blocks deserialise to [`Timestamps::default`].
     pub times: Timestamps,
@@ -432,6 +448,10 @@ mod tests {
             tags: Vec::new(),
             history: Vec::new(),
             attachments: Vec::new(),
+            foreground_color: String::new(),
+            background_color: String::new(),
+            override_url: String::new(),
+            custom_icon_uuid: None,
             times: Timestamps::default(),
         }
     }
