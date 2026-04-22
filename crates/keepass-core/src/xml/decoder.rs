@@ -42,7 +42,7 @@ use uuid::Uuid;
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
 use crate::model::{
-    Attachment, CustomField, Entry, EntryId, Group, GroupId, Meta, Timestamps, Vault,
+    Attachment, Binary, CustomField, Entry, EntryId, Group, GroupId, Meta, Timestamps, Vault,
 };
 
 /// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
@@ -107,6 +107,10 @@ pub fn decode_vault_with_cipher(
 
     let mut meta = Meta::default();
     let mut root: Option<Group> = None;
+    // Populated by <Meta><Binaries> on KDBX3. KDBX4 leaves this empty;
+    // the unlock pipeline attaches the inner-header binaries after
+    // decode_vault_with_cipher returns.
+    let mut binaries: Vec<Binary> = Vec::new();
 
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
@@ -122,7 +126,7 @@ pub fn decode_vault_with_cipher(
                 //   KeePassFile/Meta → read_meta (consumes through </Meta>)
                 //   KeePassFile/Root/Group → read_group (consumes through </Group>)
                 if stack == ["KeePassFile", "Meta"] {
-                    meta = read_meta(&mut reader, &mut buf)?;
+                    meta = read_meta(&mut reader, &mut buf, &mut binaries)?;
                     stack.pop();
                 } else if stack == ["KeePassFile", "Root", "Group"] && root.is_none() {
                     root = Some(read_group(&mut reader, &mut buf, cipher)?);
@@ -143,13 +147,13 @@ pub fn decode_vault_with_cipher(
     }
 
     let root = root.ok_or(XmlError::MissingElement("KeePassFile/Root/Group"))?;
-    // The decoder does not populate Vault::binaries — that pool comes
-    // from the outer format layer (KDBX4 inner header or KDBX3
-    // <Binaries>) and is attached by the Kdbx unlock pipeline.
+    // KDBX3 populates `binaries` above via Meta/Binaries. KDBX4 leaves it
+    // empty — the unlock pipeline replaces it with the inner-header
+    // binaries after we return.
     Ok(Vault {
         root,
         meta,
-        binaries: Vec::new(),
+        binaries,
     })
 }
 
@@ -628,6 +632,7 @@ fn has_protected_attribute(e: &BytesStart<'_>) -> Result<bool, XmlError> {
 fn read_meta<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
+    binaries: &mut Vec<Binary>,
 ) -> Result<Meta, XmlError> {
     let mut meta = Meta::default();
     let mut depth: i32 = 0;
@@ -638,6 +643,10 @@ fn read_meta<R: std::io::BufRead>(
             Ok(Event::Start(e)) => {
                 let name = tag_name(&e)?;
                 if depth == 0 {
+                    if name == "Binaries" {
+                        read_binaries_pool(reader, buf, binaries)?;
+                        continue;
+                    }
                     let text = read_text(reader, buf)?;
                     assign_meta_field(&mut meta, &name, text)?;
                     continue;
@@ -657,6 +666,135 @@ fn read_meta<R: std::io::BufRead>(
         }
         buf.clear();
     }
+}
+
+/// Read a KDBX3 `<Binaries>` pool. Each child is a
+/// `<Binary ID="N" Compressed="True|False">base64</Binary>` element.
+///
+/// Entries with `Compressed="True"` are gzip-decompressed on the fly so
+/// the resulting [`Binary::data`] is always the raw payload that
+/// downstream `<Binary Ref="N"/>` references expect.
+///
+/// The output vector is indexed by `ID` (not insertion order). Gaps
+/// (skipped IDs) are filled with empty placeholder [`Binary`] entries
+/// so that `binaries[ref_id]` works without off-by-N surprises — this
+/// matches how KeePass writers actually use the pool, which is always
+/// densely numbered from zero.
+fn read_binaries_pool<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+    binaries: &mut Vec<Binary>,
+) -> Result<(), XmlError> {
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 && name == "Binary" {
+                    let (id, compressed) = parse_binary_attributes(&e)?;
+                    let text = read_text(reader, buf)?;
+                    let bin = decode_kdbx3_binary(&text, compressed)?;
+                    insert_binary_at(binaries, id, bin);
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::Empty(e)) => {
+                // <Binary ID="N"/> with no payload — zero-byte attachment.
+                let name = tag_name(&e)?;
+                if depth == 0 && name == "Binary" {
+                    let (id, _compressed) = parse_binary_attributes(&e)?;
+                    insert_binary_at(
+                        binaries,
+                        id,
+                        Binary {
+                            data: Vec::new(),
+                            protected: false,
+                        },
+                    );
+                }
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(());
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <Binaries>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn parse_binary_attributes(e: &BytesStart<'_>) -> Result<(u32, bool), XmlError> {
+    let mut id: Option<u32> = None;
+    let mut compressed = false;
+    for attr in e.attributes() {
+        let a = attr.map_err(|err| XmlError::Malformed(err.to_string()))?;
+        match a.key.as_ref() {
+            b"ID" => {
+                let s = std::str::from_utf8(&a.value)
+                    .map_err(|err| XmlError::Malformed(err.to_string()))?;
+                id = Some(s.parse::<u32>().map_err(|e| XmlError::InvalidValue {
+                    element: "Binary",
+                    detail: format!("ID is not a non-negative integer: {e}"),
+                })?);
+            }
+            b"Compressed" => {
+                let s = std::str::from_utf8(&a.value)
+                    .map_err(|err| XmlError::Malformed(err.to_string()))?;
+                compressed = s.eq_ignore_ascii_case("true");
+            }
+            _ => { /* ignore unknown attrs */ }
+        }
+    }
+    let id = id.ok_or(XmlError::InvalidValue {
+        element: "Binary",
+        detail: "missing required ID attribute".to_owned(),
+    })?;
+    Ok((id, compressed))
+}
+
+fn decode_kdbx3_binary(text: &str, compressed: bool) -> Result<Binary, XmlError> {
+    let trimmed = text.trim();
+    let raw = BASE64.decode(trimmed).map_err(|e| XmlError::InvalidValue {
+        element: "Binary",
+        detail: format!("payload is not valid base64: {e}"),
+    })?;
+    let data = if compressed {
+        crate::crypto::decompress(crate::format::CompressionFlags::Gzip, &raw).map_err(|e| {
+            XmlError::InvalidValue {
+                element: "Binary",
+                detail: format!("compressed payload failed to decompress: {e}"),
+            }
+        })?
+    } else {
+        raw
+    };
+    Ok(Binary {
+        data,
+        protected: false,
+    })
+}
+
+/// Insert a [`Binary`] at position `id`, growing the pool with empty
+/// placeholders as needed so that `pool[id]` is a valid index.
+fn insert_binary_at(pool: &mut Vec<Binary>, id: u32, bin: Binary) {
+    let idx = id as usize;
+    if idx >= pool.len() {
+        pool.resize(
+            idx + 1,
+            Binary {
+                data: Vec::new(),
+                protected: false,
+            },
+        );
+    }
+    pool[idx] = bin;
 }
 
 fn assign_meta_field(meta: &mut Meta, field: &str, text: String) -> Result<(), XmlError> {
@@ -1846,6 +1984,67 @@ mod tests {
         let vault = decode_vault(xml).unwrap();
         let e = vault.iter_entries().next().unwrap();
         assert!(e.attachments.is_empty());
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as _;
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(bytes).unwrap();
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn parses_kdbx3_binaries_pool_with_compressed_and_uncompressed() {
+        let hello_raw = BASE64.encode(b"hello");
+        let world_gz_b64 = BASE64.encode(gzip(b"world"));
+
+        let xml = format!(
+            r#"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <Binaries>
+      <Binary ID="0" Compressed="False">{hello_raw}</Binary>
+      <Binary ID="1" Compressed="True">{world_gz_b64}</Binary>
+    </Binaries>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>"#
+        );
+        let vault = decode_vault(xml.as_bytes()).unwrap();
+        assert_eq!(vault.binaries.len(), 2);
+        assert_eq!(vault.binaries[0].data, b"hello");
+        assert!(!vault.binaries[0].protected);
+        assert_eq!(vault.binaries[1].data, b"world");
+    }
+
+    #[test]
+    fn kdbx3_binaries_pool_handles_sparse_ids() {
+        let xml = br#"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <Binaries>
+      <Binary ID="2" Compressed="False">YWJj</Binary>
+    </Binaries>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>"#;
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.binaries.len(), 3); // 0, 1 placeholders + 2
+        assert!(vault.binaries[0].data.is_empty());
+        assert!(vault.binaries[1].data.is_empty());
+        assert_eq!(vault.binaries[2].data, b"abc");
     }
 
     #[test]
