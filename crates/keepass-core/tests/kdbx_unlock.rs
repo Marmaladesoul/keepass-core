@@ -4,15 +4,18 @@
 //! header, derives the composite key from the sidecar's master password
 //! (optionally combined with the referenced keyfile), and asserts the
 //! full pipeline (KDF → cipher → block-stream → compression → inner
-//! header → XML) produces a vault whose entry count and generator match
-//! the sidecar.
+//! header → XML) produces a vault whose entry count, generator, and
+//! per-entry fields (title / username / URL / tags) match the sidecar.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use keepass_core::CompositeKey;
 use keepass_core::kdbx::{Kdbx, Sealed};
+use keepass_core::model::Entry;
 use keepass_core::secret::keyfile_hash;
+use serde_json::Value;
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -24,47 +27,74 @@ fn fixtures_root() -> PathBuf {
         .join("fixtures")
 }
 
-/// Extract the value of a JSON string field from a sidecar. The sidecars are
-/// simple hand-written files; a full JSON parser would be over-engineered
-/// here.
-fn read_string_field(sidecar: &str, field: &str) -> Option<String> {
-    let needle = format!("\"{field}\":");
-    let idx = sidecar.find(&needle)?;
-    let rest = &sidecar[idx + needle.len()..];
-    let trimmed = rest.trim_start();
-    // Reject `null` and any non-string value — only a leading `"` means
-    // "this field has a real string value".
-    if !trimmed.starts_with('"') {
-        return None;
-    }
-    let inner = &trimmed[1..];
-    let end = inner.find('"')?;
-    Some(inner[..end].to_owned())
+/// Load the JSON sidecar alongside `path`, if any.
+fn load_sidecar(path: &Path) -> Option<Value> {
+    let p = path.with_extension("json");
+    let text = fs::read_to_string(p).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
-fn read_usize_field(sidecar: &str, field: &str) -> Option<usize> {
-    let needle = format!("\"{field}\":");
-    let idx = sidecar.find(&needle)?;
-    let rest = &sidecar[idx + needle.len()..];
-    let trimmed = rest.trim_start();
-    let end = trimmed
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(trimmed.len());
-    trimmed[..end].parse().ok()
+fn check_entry_against_sidecar(actual: &Entry, expected: &Value) -> Result<(), String> {
+    if let Some(Value::String(u)) = expected.get("username") {
+        if &actual.username != u {
+            return Err(format!("username {:?} ≠ expected {u:?}", actual.username));
+        }
+    }
+    if let Some(Value::String(url)) = expected.get("url") {
+        if &actual.url != url {
+            return Err(format!("url {:?} ≠ expected {url:?}", actual.url));
+        }
+    }
+    if let Some(Value::String(notes)) = expected.get("notes") {
+        if &actual.notes != notes {
+            return Err(format!("notes {:?} ≠ expected {notes:?}", actual.notes));
+        }
+    }
+    if let Some(Value::Array(tags)) = expected.get("tags") {
+        let mut expected_tags: Vec<String> = tags
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        let mut got_tags = actual.tags.clone();
+        expected_tags.sort();
+        got_tags.sort();
+        if got_tags != expected_tags {
+            return Err(format!("tags {got_tags:?} ≠ expected {expected_tags:?}"));
+        }
+    }
+    if let Some(Value::Number(n)) = expected.get("password_length") {
+        if let Some(expected_len) = n.as_u64() {
+            let got_len = actual.password.chars().count() as u64;
+            if got_len != expected_len {
+                return Err(format!(
+                    "password length {got_len} ≠ expected {expected_len}"
+                ));
+            }
+        }
+    }
+    if let Some(Value::Number(n)) = expected.get("custom_field_count") {
+        if let Some(expected_count) = n.as_u64() {
+            let got_count = actual.custom_fields.len() as u64;
+            if got_count != expected_count {
+                return Err(format!(
+                    "custom_field_count {got_count} ≠ expected {expected_count}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn unlock_one(path: &Path) -> Result<(), String> {
-    let sidecar_path = path.with_extension("json");
-    if !sidecar_path.exists() {
-        return Ok(());
-    }
-    let sidecar = fs::read_to_string(&sidecar_path).expect("read sidecar");
-
-    let Some(password) = read_string_field(&sidecar, "master_password") else {
+    let Some(sidecar) = load_sidecar(path) else {
         return Ok(());
     };
-    let expected_entries = read_usize_field(&sidecar, "entry_count");
-    let expected_generator = read_string_field(&sidecar, "generator");
+
+    let password = sidecar
+        .get("master_password")
+        .and_then(Value::as_str)
+        .ok_or("sidecar has no master_password")?
+        .to_owned();
 
     let kdbx = Kdbx::<Sealed>::open(path)
         .map_err(|e| format!("open: {e}"))?
@@ -72,9 +102,9 @@ fn unlock_one(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("read_header: {e}"))?;
 
     // Build the composite key, threading in a keyfile if one is referenced.
-    let composite = match read_string_field(&sidecar, "key_file") {
+    let composite = match sidecar.get("key_file").and_then(Value::as_str) {
         Some(name) if !name.is_empty() => {
-            let kf_path = path.parent().unwrap().join(&name);
+            let kf_path = path.parent().unwrap().join(name);
             let kf_bytes = fs::read(&kf_path).map_err(|e| format!("read keyfile: {e}"))?;
             match keyfile_hash(&kf_bytes) {
                 Ok(hash) => {
@@ -99,24 +129,61 @@ fn unlock_one(path: &Path) -> Result<(), String> {
 
     let vault = unlocked.vault();
 
-    if let Some(expected) = expected_entries {
-        if vault.total_entries() != expected {
+    // Total-entry count.
+    if let Some(expected) = sidecar.get("entry_count").and_then(Value::as_u64) {
+        if vault.total_entries() as u64 != expected {
             return Err(format!(
-                "entry count {} ≠ expected {}",
-                vault.total_entries(),
-                expected
+                "entry_count {} ≠ expected {expected}",
+                vault.total_entries()
             ));
         }
     }
 
-    if let Some(expected) = expected_generator {
+    // Generator.
+    if let Some(expected) = sidecar.get("generator").and_then(Value::as_str) {
         if vault.meta.generator != expected {
             return Err(format!(
-                "generator {:?} ≠ expected {:?}",
-                vault.meta.generator, expected
+                "generator {:?} ≠ expected {expected:?}",
+                vault.meta.generator
             ));
         }
     }
+
+    // Per-entry assertions when the sidecar lists entries.
+    if let Some(entries) = sidecar.get("entries").and_then(Value::as_array) {
+        // Index actual entries by title for order-independent matching.
+        let mut by_title: HashMap<String, Vec<&Entry>> = HashMap::new();
+        for e in vault.iter_entries() {
+            by_title.entry(e.title.clone()).or_default().push(e);
+        }
+        for expected in entries {
+            let Some(title) = expected.get("title").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(candidates) = by_title.get(title) else {
+                return Err(format!("missing entry with title {title:?}"));
+            };
+            // If multiple entries share a title, try each and accept the
+            // first that matches the expected fields.
+            let mut last_err: Option<String> = None;
+            let matched = candidates.iter().any(|actual| {
+                match check_entry_against_sidecar(actual, expected) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        last_err = Some(e);
+                        false
+                    }
+                }
+            });
+            if !matched {
+                return Err(format!(
+                    "entry {title:?}: {}",
+                    last_err.unwrap_or_else(|| "no field-level mismatch recorded".to_owned())
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
