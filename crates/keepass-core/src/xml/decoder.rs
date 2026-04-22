@@ -293,6 +293,10 @@ fn read_entry<R: std::io::BufRead>(
         tags: Vec::new(),
         history: Vec::new(),
         attachments: Vec::new(),
+        foreground_color: String::new(),
+        background_color: String::new(),
+        override_url: String::new(),
+        custom_icon_uuid: None,
         times: Timestamps::default(),
     };
 
@@ -328,6 +332,31 @@ fn read_entry<R: std::io::BufRead>(
                         "Tags" => {
                             let raw = read_text(reader, buf)?;
                             entry.tags = parse_tags(&raw);
+                            continue;
+                        }
+                        "ForegroundColor" => {
+                            entry.foreground_color = read_text(reader, buf)?;
+                            continue;
+                        }
+                        "BackgroundColor" => {
+                            entry.background_color = read_text(reader, buf)?;
+                            continue;
+                        }
+                        "OverrideURL" => {
+                            entry.override_url = read_text(reader, buf)?;
+                            continue;
+                        }
+                        "CustomIconUUID" => {
+                            let text = read_text(reader, buf)?;
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                let uuid = parse_uuid(trimmed)?;
+                                // Nil UUID means "no custom icon" per the
+                                // same convention we use for RecycleBinUUID.
+                                if !uuid.is_nil() {
+                                    entry.custom_icon_uuid = Some(uuid);
+                                }
+                            }
                             continue;
                         }
                         "History" => {
@@ -2648,5 +2677,90 @@ mod tests {
         let vault = decode_vault(xml).unwrap();
         assert_eq!(vault.root.enable_auto_type, None);
         assert_eq!(vault.root.enable_searching, None);
+    }
+
+    // -----------------------------------------------------------------
+    // Entry: colours, override URL, custom icon
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_entry_colors_override_url_and_custom_icon() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <ForegroundColor>#FF0000</ForegroundColor>
+        <BackgroundColor>#00FFAA</BackgroundColor>
+        <OverrideURL>cmd://firefox %1</OverrideURL>
+        <CustomIconUUID>AAAAAAAAAAAAAAAAAAAAAg==</CustomIconUUID>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.foreground_color, "#FF0000");
+        assert_eq!(e.background_color, "#00FFAA");
+        assert_eq!(e.override_url, "cmd://firefox %1");
+        let mut expected = [0u8; 16];
+        expected[15] = 2;
+        assert_eq!(e.custom_icon_uuid, Some(Uuid::from_bytes(expected)));
+    }
+
+    #[test]
+    fn missing_entry_metadata_fields_are_empty_or_none() {
+        let vault = decode_vault(sample_xml()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(e.foreground_color.is_empty());
+        assert!(e.background_color.is_empty());
+        assert!(e.override_url.is_empty());
+        assert_eq!(e.custom_icon_uuid, None);
+    }
+
+    #[test]
+    fn zero_custom_icon_uuid_is_treated_as_none() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <CustomIconUUID>AAAAAAAAAAAAAAAAAAAAAA==</CustomIconUUID>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.custom_icon_uuid, None);
+    }
+
+    #[test]
+    fn empty_custom_icon_uuid_element_is_treated_as_none() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <CustomIconUUID/>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.custom_icon_uuid, None);
     }
 }
