@@ -42,8 +42,8 @@ use uuid::Uuid;
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
 use crate::model::{
-    Attachment, Binary, CustomDataItem, CustomField, DeletedObject, Entry, EntryId, Group, GroupId,
-    MemoryProtection, Meta, Timestamps, Vault,
+    Attachment, Binary, CustomDataItem, CustomField, CustomIcon, DeletedObject, Entry, EntryId,
+    Group, GroupId, MemoryProtection, Meta, Timestamps, Vault,
 };
 
 /// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
@@ -844,6 +844,10 @@ fn read_meta<R: std::io::BufRead>(
                         meta.custom_data = read_custom_data(reader, buf)?;
                         continue;
                     }
+                    if name == "CustomIcons" {
+                        meta.custom_icons = read_custom_icons(reader, buf)?;
+                        continue;
+                    }
                     let text = read_text(reader, buf)?;
                     assign_meta_field(&mut meta, &name, text)?;
                     continue;
@@ -858,6 +862,107 @@ fn read_meta<R: std::io::BufRead>(
             }
             Ok(Event::Eof) => {
                 return Err(XmlError::Malformed("EOF inside <Meta>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Read a `<CustomIcons>` block — a flat list of `<Icon>` children.
+///
+/// Each icon supplies a UUID, a base64-encoded image payload, an
+/// optional `<Name>`, and an optional `<LastModificationTime>`. Icons
+/// without both a UUID and a Data payload are silently dropped — an
+/// icon record with no identity or no bytes can't usefully round-trip.
+fn read_custom_icons<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Vec<CustomIcon>, XmlError> {
+    let mut out = Vec::new();
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 && name == "Icon" {
+                    if let Some(icon) = read_one_custom_icon(reader, buf)? {
+                        out.push(icon);
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(out);
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <CustomIcons>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn read_one_custom_icon<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Option<CustomIcon>, XmlError> {
+    let mut uuid: Option<Uuid> = None;
+    let mut data: Option<Vec<u8>> = None;
+    let mut name = String::new();
+    let mut last_modified: Option<DateTime<Utc>> = None;
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let tag = tag_name(&e)?;
+                if depth == 0 {
+                    let text = read_text(reader, buf)?;
+                    match tag.as_str() {
+                        "UUID" => uuid = Some(parse_uuid(&text)?),
+                        "Data" => {
+                            let bytes =
+                                BASE64
+                                    .decode(text.trim())
+                                    .map_err(|e| XmlError::InvalidValue {
+                                        element: "Data",
+                                        detail: format!("not valid base64: {e}"),
+                                    })?;
+                            data = Some(bytes);
+                        }
+                        "Name" => name = text,
+                        "LastModificationTime" => {
+                            last_modified = Some(parse_timestamp(&text, "LastModificationTime")?);
+                        }
+                        _ => { /* unknown child — ignore */ }
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(match (uuid, data) {
+                        (Some(uuid), Some(data)) => Some(CustomIcon {
+                            uuid,
+                            data,
+                            name,
+                            last_modified,
+                        }),
+                        _ => None,
+                    });
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <Icon>".to_owned()));
             }
             _ => {}
         }
@@ -2136,6 +2241,103 @@ mod tests {
             vault.meta.recycle_bin_changed,
             Some(Utc.with_ymd_and_hms(2026, 4, 22, 11, 22, 33).unwrap())
         );
+    }
+
+    #[test]
+    fn parses_meta_custom_icons_pool() {
+        let png = b"\x89PNG\r\n\x1a\n-fake-icon-payload";
+        let png_b64 = BASE64.encode(png);
+        let uuid_b64 = BASE64.encode([0u8; 15].iter().chain(&[0x2a]).copied().collect::<Vec<_>>());
+        let xml = format!(
+            r"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <CustomIcons>
+      <Icon>
+        <UUID>{uuid_b64}</UUID>
+        <Data>{png_b64}</Data>
+        <Name>Bank logo</Name>
+        <LastModificationTime>2026-04-22T10:00:00Z</LastModificationTime>
+      </Icon>
+      <Icon>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <Data>{png_b64}</Data>
+      </Icon>
+    </CustomIcons>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>"
+        );
+        let vault = decode_vault(xml.as_bytes()).unwrap();
+        assert_eq!(vault.meta.custom_icons.len(), 2);
+        assert_eq!(vault.meta.custom_icons[0].data, png);
+        assert_eq!(vault.meta.custom_icons[0].name, "Bank logo");
+        assert_eq!(
+            vault.meta.custom_icons[0].last_modified,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 10, 0, 0).unwrap())
+        );
+        assert_eq!(vault.meta.custom_icons[1].name, "");
+        assert_eq!(vault.meta.custom_icons[1].last_modified, None);
+    }
+
+    #[test]
+    fn custom_icon_missing_uuid_or_data_is_dropped() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <CustomIcons>
+      <Icon><Data>YWJj</Data></Icon>
+      <Icon><UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID></Icon>
+      <Icon>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAg==</UUID>
+        <Data>YWJj</Data>
+      </Icon>
+    </CustomIcons>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.meta.custom_icons.len(), 1);
+        assert_eq!(vault.meta.custom_icons[0].data, b"abc");
+    }
+
+    #[test]
+    fn custom_icon_bad_base64_rejected() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <CustomIcons>
+      <Icon>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <Data>!!!not base64!!!</Data>
+      </Icon>
+    </CustomIcons>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let err = decode_vault(xml).unwrap_err();
+        assert!(matches!(
+            err,
+            XmlError::InvalidValue {
+                element: "Data",
+                ..
+            }
+        ));
     }
 
     #[test]
