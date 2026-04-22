@@ -186,6 +186,7 @@ fn read_group<R: std::io::BufRead>(
         default_auto_type_sequence: String::new(),
         enable_auto_type: None,
         enable_searching: None,
+        custom_data: Vec::new(),
         times: Timestamps::default(),
     };
 
@@ -248,6 +249,10 @@ fn read_group<R: std::io::BufRead>(
                             group.enable_searching = parse_tristate(&text);
                             continue;
                         }
+                        "CustomData" => {
+                            group.custom_data = read_custom_data(reader, buf)?;
+                            continue;
+                        }
                         _ => {
                             // Unknown child of <Group>. Skip silently for
                             // now; future work adds full preservation.
@@ -277,6 +282,11 @@ fn read_group<R: std::io::BufRead>(
 // Entry reader
 // ---------------------------------------------------------------------------
 
+// Linear switch over every <Entry> child element — breaking up by
+// category (text / protected / metadata / timestamps / history) would
+// spread the dispatch across several helpers without meaningful
+// clarity gain. The function body is still readable top-to-bottom.
+#[allow(clippy::too_many_lines)]
 fn read_entry<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
@@ -297,6 +307,7 @@ fn read_entry<R: std::io::BufRead>(
         background_color: String::new(),
         override_url: String::new(),
         custom_icon_uuid: None,
+        custom_data: Vec::new(),
         times: Timestamps::default(),
     };
 
@@ -357,6 +368,10 @@ fn read_entry<R: std::io::BufRead>(
                                     entry.custom_icon_uuid = Some(uuid);
                                 }
                             }
+                            continue;
+                        }
+                        "CustomData" => {
+                            entry.custom_data = read_custom_data(reader, buf)?;
                             continue;
                         }
                         "History" => {
@@ -2762,5 +2777,79 @@ mod tests {
         let vault = decode_vault(xml).unwrap();
         let e = vault.iter_entries().next().unwrap();
         assert_eq!(e.custom_icon_uuid, None);
+    }
+
+    // -----------------------------------------------------------------
+    // Group + Entry CustomData
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_group_custom_data() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <CustomData>
+        <Item>
+          <Key>plugin.group.flag</Key>
+          <Value>enabled</Value>
+        </Item>
+      </CustomData>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.root.custom_data.len(), 1);
+        assert_eq!(vault.root.custom_data[0].key, "plugin.group.flag");
+        assert_eq!(vault.root.custom_data[0].value, "enabled");
+    }
+
+    #[test]
+    fn parses_entry_custom_data() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <CustomData>
+          <Item>
+            <Key>plugin.entry.foo</Key>
+            <Value>bar</Value>
+            <LastModificationTime>2026-04-21T10:00:00Z</LastModificationTime>
+          </Item>
+          <Item>
+            <Key>plugin.entry.baz</Key>
+            <Value>qux</Value>
+          </Item>
+        </CustomData>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.custom_data.len(), 2);
+        assert_eq!(e.custom_data[0].key, "plugin.entry.foo");
+        assert_eq!(e.custom_data[0].value, "bar");
+        assert_eq!(
+            e.custom_data[0].last_modified,
+            Some(Utc.with_ymd_and_hms(2026, 4, 21, 10, 0, 0).unwrap())
+        );
+        assert_eq!(e.custom_data[1].key, "plugin.entry.baz");
+        assert_eq!(e.custom_data[1].last_modified, None);
+    }
+
+    #[test]
+    fn missing_group_or_entry_custom_data_is_empty() {
+        let vault = decode_vault(sample_xml()).unwrap();
+        assert!(vault.root.custom_data.is_empty());
+        let e = vault.iter_entries().next().unwrap();
+        assert!(e.custom_data.is_empty());
     }
 }
