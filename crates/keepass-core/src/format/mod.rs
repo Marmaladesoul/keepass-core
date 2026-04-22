@@ -28,7 +28,7 @@ pub use header::{
     MasterSeed, OuterHeader, ProtectedStreamKey, StreamStartBytes, TransformSeed,
 };
 pub use kdf_params::{Argon2Variant, Argon2Version, KdfId, KdfParams, KdfParamsError, KnownKdf};
-pub use tlv::{LengthWidth, TlvField, read_header_fields};
+pub use tlv::{LengthWidth, TlvField, TlvWriteError, read_header_fields, write_header_fields};
 pub use var_dictionary::{Value as VarValue, VarDictionary, VarDictionaryError};
 
 // ---------------------------------------------------------------------------
