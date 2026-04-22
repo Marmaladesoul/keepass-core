@@ -42,8 +42,8 @@ use uuid::Uuid;
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
 use crate::model::{
-    Attachment, Binary, CustomDataItem, CustomField, CustomIcon, DeletedObject, Entry, EntryId,
-    Group, GroupId, MemoryProtection, Meta, Timestamps, Vault,
+    Attachment, AutoType, AutoTypeAssociation, Binary, CustomDataItem, CustomField, CustomIcon,
+    DeletedObject, Entry, EntryId, Group, GroupId, MemoryProtection, Meta, Timestamps, Vault,
 };
 
 /// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
@@ -338,6 +338,7 @@ fn read_entry<R: std::io::BufRead>(
         custom_data: Vec::new(),
         quality_check: true,
         previous_parent_group: None,
+        auto_type: AutoType::default(),
         times: Timestamps::default(),
     };
 
@@ -412,6 +413,10 @@ fn read_entry<R: std::io::BufRead>(
                         "PreviousParentGroup" => {
                             let text = read_text(reader, buf)?;
                             entry.previous_parent_group = parse_optional_group_id(&text)?;
+                            continue;
+                        }
+                        "AutoType" => {
+                            entry.auto_type = read_auto_type(reader, buf)?;
                             continue;
                         }
                         "History" => {
@@ -874,6 +879,111 @@ fn read_meta<R: std::io::BufRead>(
             }
             Ok(Event::Eof) => {
                 return Err(XmlError::Malformed("EOF inside <Meta>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Read an `<AutoType>` block into an [`AutoType`]. Assumes the
+/// opening `<AutoType>` tag has just been consumed; reads up to and
+/// including the matching `</AutoType>`.
+///
+/// Unknown children are silently ignored; known flags that are absent
+/// keep their default values (see [`AutoType::default`]).
+fn read_auto_type<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<AutoType, XmlError> {
+    let mut at = AutoType::default();
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 {
+                    if name == "Association" {
+                        if let Some(assoc) = read_auto_type_association(reader, buf)? {
+                            at.associations.push(assoc);
+                        }
+                        continue;
+                    }
+                    let text = read_text(reader, buf)?;
+                    match name.as_str() {
+                        "Enabled" => at.enabled = parse_bool(&text, "Enabled")?,
+                        "DataTransferObfuscation" => {
+                            at.data_transfer_obfuscation =
+                                parse_int::<u32>(&text, "DataTransferObfuscation")?;
+                        }
+                        "DefaultSequence" => at.default_sequence = text,
+                        _ => { /* unknown — ignore */ }
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(at);
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <AutoType>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn read_auto_type_association<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Option<AutoTypeAssociation>, XmlError> {
+    let mut window = String::new();
+    let mut keystroke_sequence = String::new();
+    let mut saw_any = false;
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 {
+                    let text = read_text(reader, buf)?;
+                    match name.as_str() {
+                        "Window" => {
+                            window = text;
+                            saw_any = true;
+                        }
+                        "KeystrokeSequence" => {
+                            keystroke_sequence = text;
+                            saw_any = true;
+                        }
+                        _ => { /* unknown — ignore */ }
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(if saw_any {
+                        Some(AutoTypeAssociation {
+                            window,
+                            keystroke_sequence,
+                        })
+                    } else {
+                        None
+                    });
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <Association>".to_owned()));
             }
             _ => {}
         }
@@ -3362,5 +3472,85 @@ mod tests {
         let vault = decode_vault(xml).unwrap();
         assert_eq!(vault.root.previous_parent_group, None);
         assert_eq!(vault.root.last_top_visible_entry, None);
+    }
+
+    // -----------------------------------------------------------------
+    // AutoType
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_entry_auto_type_with_associations() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <AutoType>
+          <Enabled>False</Enabled>
+          <DataTransferObfuscation>1</DataTransferObfuscation>
+          <DefaultSequence>{USERNAME}{TAB}{PASSWORD}{ENTER}</DefaultSequence>
+          <Association>
+            <Window>Firefox - *</Window>
+            <KeystrokeSequence>{PASSWORD}{ENTER}</KeystrokeSequence>
+          </Association>
+          <Association>
+            <Window>Work VPN - *</Window>
+            <KeystrokeSequence>{USERNAME}{TAB}{PASSWORD}</KeystrokeSequence>
+          </Association>
+        </AutoType>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(!e.auto_type.enabled);
+        assert_eq!(e.auto_type.data_transfer_obfuscation, 1);
+        assert_eq!(
+            e.auto_type.default_sequence,
+            "{USERNAME}{TAB}{PASSWORD}{ENTER}"
+        );
+        assert_eq!(e.auto_type.associations.len(), 2);
+        assert_eq!(e.auto_type.associations[0].window, "Firefox - *");
+        assert_eq!(
+            e.auto_type.associations[0].keystroke_sequence,
+            "{PASSWORD}{ENTER}"
+        );
+        assert_eq!(e.auto_type.associations[1].window, "Work VPN - *");
+    }
+
+    #[test]
+    fn missing_auto_type_block_gives_default() {
+        let vault = decode_vault(sample_xml()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(e.auto_type.enabled); // default: enabled
+        assert_eq!(e.auto_type.data_transfer_obfuscation, 0);
+        assert!(e.auto_type.default_sequence.is_empty());
+        assert!(e.auto_type.associations.is_empty());
+    }
+
+    #[test]
+    fn empty_auto_type_block_keeps_defaults() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <AutoType/>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.auto_type, crate::model::AutoType::default());
     }
 }
