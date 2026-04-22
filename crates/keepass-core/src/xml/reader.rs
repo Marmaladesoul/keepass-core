@@ -65,10 +65,7 @@ impl From<quick_xml::Error> for XmlError {
 ///
 /// Returns [`XmlError::Malformed`] if the XML is invalid at the bytes
 /// level (unterminated tag, bad entity, etc.).
-pub fn extract_text_at_path(
-    xml: &[u8],
-    path: &[&str],
-) -> Result<Option<String>, XmlError> {
+pub fn extract_text_at_path(xml: &[u8], path: &[&str]) -> Result<Option<String>, XmlError> {
     if path.is_empty() {
         return Ok(None);
     }
@@ -122,8 +119,8 @@ pub fn extract_text_at_path(
             }
             Ok(Event::CData(c)) if in_target => {
                 // CDATA is passed through verbatim (no entity decoding).
-                let s = std::str::from_utf8(&c)
-                    .map_err(|err| XmlError::Malformed(err.to_string()))?;
+                let s =
+                    std::str::from_utf8(&c).map_err(|err| XmlError::Malformed(err.to_string()))?;
                 collected.push_str(s);
             }
             Ok(Event::Eof) => return Ok(None),
@@ -248,7 +245,8 @@ mod tests {
 
     #[test]
     fn handles_utf8_content() {
-        let xml = "<KeePassFile><Meta><Generator>KéePässXÇ</Generator></Meta></KeePassFile>".as_bytes();
+        let xml =
+            "<KeePassFile><Meta><Generator>KéePässXÇ</Generator></Meta></KeePassFile>".as_bytes();
         assert_eq!(
             extract_generator(xml).unwrap().as_deref(),
             Some("KéePässXÇ")
