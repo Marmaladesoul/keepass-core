@@ -138,6 +138,17 @@ pub struct Entry {
     /// items attached to this entry. Same shape as
     /// [`Meta::custom_data`], just scoped to the entry.
     pub custom_data: Vec<CustomDataItem>,
+    /// `<QualityCheck>` — whether this entry's password participates
+    /// in the host client's password-quality audit (duplicate
+    /// detection, strength meter, breach check). Defaults to `true`;
+    /// users opt out per-entry for things like PINs and recovery
+    /// codes where quality metrics don't apply.
+    pub quality_check: bool,
+    /// `<PreviousParentGroup>` — the group this entry was moved out
+    /// of, used by KeePass to make "undo move" reversible across
+    /// saves. `None` when the entry has never been moved (or the
+    /// field wasn't written).
+    pub previous_parent_group: Option<GroupId>,
     /// `<Times>` block — creation, modification, expiry, etc. Absent
     /// blocks deserialise to [`Timestamps::default`].
     pub times: Timestamps,
@@ -211,6 +222,15 @@ pub struct Group {
     /// items attached to this group. Same shape as
     /// [`Meta::custom_data`], just scoped to the group.
     pub custom_data: Vec<CustomDataItem>,
+    /// `<PreviousParentGroup>` — the group this group was moved out
+    /// of, for "undo move" symmetry with [`Entry::previous_parent_group`].
+    /// `None` when the group has never been moved.
+    pub previous_parent_group: Option<GroupId>,
+    /// `<LastTopVisibleEntry>` — UI hint: the [`EntryId`] that was
+    /// scrolled to the top of the entry list last time this group
+    /// was viewed. `None` when no entry has been marked, or when
+    /// the field was absent from the XML.
+    pub last_top_visible_entry: Option<EntryId>,
     /// `<Times>` block for the group itself.
     pub times: Timestamps,
 }
@@ -461,6 +481,8 @@ mod tests {
             override_url: String::new(),
             custom_icon_uuid: None,
             custom_data: Vec::new(),
+            quality_check: true,
+            previous_parent_group: None,
             times: Timestamps::default(),
         }
     }
@@ -477,6 +499,8 @@ mod tests {
             enable_auto_type: None,
             enable_searching: None,
             custom_data: Vec::new(),
+            previous_parent_group: None,
+            last_top_visible_entry: None,
             times: Timestamps::default(),
         }
     }
