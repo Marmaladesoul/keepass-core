@@ -42,7 +42,7 @@ use uuid::Uuid;
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
 use crate::model::{
-    Attachment, Binary, CustomField, DeletedObject, Entry, EntryId, Group, GroupId,
+    Attachment, Binary, CustomDataItem, CustomField, DeletedObject, Entry, EntryId, Group, GroupId,
     MemoryProtection, Meta, Timestamps, Vault,
 };
 
@@ -768,6 +768,10 @@ fn read_meta<R: std::io::BufRead>(
                         meta.memory_protection = read_memory_protection(reader, buf)?;
                         continue;
                     }
+                    if name == "CustomData" {
+                        meta.custom_data = read_custom_data(reader, buf)?;
+                        continue;
+                    }
                     let text = read_text(reader, buf)?;
                     assign_meta_field(&mut meta, &name, text)?;
                     continue;
@@ -782,6 +786,96 @@ fn read_meta<R: std::io::BufRead>(
             }
             Ok(Event::Eof) => {
                 return Err(XmlError::Malformed("EOF inside <Meta>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Read a `<CustomData>` block — a flat list of `<Item>` children, each
+/// with a `<Key>`, `<Value>`, and optional `<LastModificationTime>`.
+///
+/// Items without both a Key and Value are silently dropped; partial
+/// items round-trip to nothing rather than an opaque error because
+/// KeePass doesn't specify what writers should do when they see such a
+/// record.
+fn read_custom_data<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Vec<CustomDataItem>, XmlError> {
+    let mut out = Vec::new();
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 && name == "Item" {
+                    if let Some(item) = read_custom_data_item(reader, buf)? {
+                        out.push(item);
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(out);
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <CustomData>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn read_custom_data_item<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Option<CustomDataItem>, XmlError> {
+    let mut key: Option<String> = None;
+    let mut value: Option<String> = None;
+    let mut last_modified: Option<DateTime<Utc>> = None;
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 {
+                    let text = read_text(reader, buf)?;
+                    match name.as_str() {
+                        "Key" => key = Some(text),
+                        "Value" => value = Some(text),
+                        "LastModificationTime" => {
+                            last_modified = Some(parse_timestamp(&text, "LastModificationTime")?);
+                        }
+                        _ => { /* unknown — ignore */ }
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(match (key, value) {
+                        (Some(key), Some(value)) => Some(CustomDataItem {
+                            key,
+                            value,
+                            last_modified,
+                        }),
+                        _ => None,
+                    });
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <Item>".to_owned()));
             }
             _ => {}
         }
@@ -2460,6 +2554,82 @@ mod tests {
         assert!(vault.root.default_auto_type_sequence.is_empty());
         assert_eq!(vault.root.enable_auto_type, None);
         assert_eq!(vault.root.enable_searching, None);
+    }
+
+    // -----------------------------------------------------------------
+    // Meta/CustomData
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_meta_custom_data_items() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <CustomData>
+      <Item>
+        <Key>KPXC_DECRYPTION_TIME_PREFERENCE</Key>
+        <Value>1000</Value>
+        <LastModificationTime>2026-04-21T10:00:00Z</LastModificationTime>
+      </Item>
+      <Item>
+        <Key>plugin.example.flag</Key>
+        <Value>true</Value>
+      </Item>
+    </CustomData>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.meta.custom_data.len(), 2);
+        assert_eq!(
+            vault.meta.custom_data[0].key,
+            "KPXC_DECRYPTION_TIME_PREFERENCE"
+        );
+        assert_eq!(vault.meta.custom_data[0].value, "1000");
+        assert_eq!(
+            vault.meta.custom_data[0].last_modified,
+            Some(Utc.with_ymd_and_hms(2026, 4, 21, 10, 0, 0).unwrap())
+        );
+        assert_eq!(vault.meta.custom_data[1].key, "plugin.example.flag");
+        assert_eq!(vault.meta.custom_data[1].value, "true");
+        assert_eq!(vault.meta.custom_data[1].last_modified, None);
+    }
+
+    #[test]
+    fn incomplete_custom_data_item_is_dropped() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <CustomData>
+      <Item><Key>orphan</Key></Item>
+      <Item><Value>orphan</Value></Item>
+      <Item>
+        <Key>real</Key>
+        <Value>v</Value>
+      </Item>
+    </CustomData>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.meta.custom_data.len(), 1);
+        assert_eq!(vault.meta.custom_data[0].key, "real");
+    }
+
+    #[test]
+    fn missing_custom_data_is_empty() {
+        let vault = decode_vault(sample_xml()).unwrap();
+        assert!(vault.meta.custom_data.is_empty());
     }
 
     #[test]
