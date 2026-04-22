@@ -27,7 +27,10 @@
 
 use thiserror::Error;
 
-use super::{FormatError, InnerStreamAlgorithm, LengthWidth, TlvField, read_header_fields};
+use super::{
+    FormatError, InnerStreamAlgorithm, LengthWidth, TlvField, TlvWriteError, read_header_fields,
+    write_header_fields,
+};
 
 // ---------------------------------------------------------------------------
 // Tag constants
@@ -162,6 +165,96 @@ impl InnerHeader {
             consumed_bytes,
         })
     }
+
+    /// Serialise this inner header back to bytes — the inverse of
+    /// [`Self::parse`].
+    ///
+    /// Emits tags in fixed order: `INNER_RANDOM_STREAM_ID` (1),
+    /// `INNER_STREAM_KEY` (2), then each binary attachment as a
+    /// `BINARY_ATTACHMENT` (3) in insertion order, and finally an
+    /// end-of-header sentinel with an empty value (matching what
+    /// KeePassXC and kdbxweb emit; the decoder accepts any value
+    /// bytes for the sentinel but empty is canonical for the inner
+    /// header).
+    ///
+    /// The byte output is suitable for placement at the start of the
+    /// decompressed, decrypted KDBX4 payload, immediately before the
+    /// XML document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InnerHeaderWriteError::EmptyInnerStreamKey`] if the
+    /// inner-stream key is empty — the spec forbids this, and the
+    /// decoder already rejects it on read.
+    ///
+    /// Returns [`InnerHeaderWriteError::Tlv`] wrapping
+    /// [`TlvWriteError::LengthOverflow`] if a binary attachment
+    /// exceeds `u32::MAX` bytes. Effectively unreachable for any
+    /// real attachment.
+    pub fn write(&self) -> Result<Vec<u8>, InnerHeaderWriteError> {
+        if self.inner_stream_key.is_empty() {
+            return Err(InnerHeaderWriteError::EmptyInnerStreamKey);
+        }
+
+        let algo_bytes: [u8; 4] = match self.inner_stream_algorithm {
+            InnerStreamAlgorithm::None => 0u32,
+            InnerStreamAlgorithm::Salsa20 => 2u32,
+            InnerStreamAlgorithm::ChaCha20 => 3u32,
+        }
+        .to_le_bytes();
+
+        // Pre-compose each binary's TLV payload (flags byte + data)
+        // into an owned buffer, so the borrowed TlvField slice below
+        // has somewhere to point.
+        let binary_payloads: Vec<Vec<u8>> = self
+            .binaries
+            .iter()
+            .map(|b| {
+                let mut v = Vec::with_capacity(1 + b.data.len());
+                v.push(b.flags);
+                v.extend_from_slice(&b.data);
+                v
+            })
+            .collect();
+
+        let mut fields: Vec<TlvField<'_>> = Vec::with_capacity(2 + binary_payloads.len());
+        fields.push(TlvField {
+            tag: tag::INNER_RANDOM_STREAM_ID,
+            value: &algo_bytes,
+        });
+        fields.push(TlvField {
+            tag: tag::INNER_STREAM_KEY,
+            value: &self.inner_stream_key,
+        });
+        for payload in &binary_payloads {
+            fields.push(TlvField {
+                tag: tag::BINARY_ATTACHMENT,
+                value: payload,
+            });
+        }
+
+        let end = TlvField {
+            tag: tag::END_OF_HEADER,
+            value: &[],
+        };
+        write_header_fields(&fields, end, LengthWidth::U32).map_err(InnerHeaderWriteError::Tlv)
+    }
+}
+
+/// Error type for [`InnerHeader::write`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum InnerHeaderWriteError {
+    /// The inner-stream key is empty. Spec-forbidden; the decoder
+    /// rejects this on read too, so an in-memory header that trips
+    /// this error was built manually and incompletely.
+    #[error("inner-stream key is empty")]
+    EmptyInnerStreamKey,
+
+    /// A binary attachment's length exceeded the on-disk `u32` length
+    /// prefix. Effectively unreachable.
+    #[error(transparent)]
+    Tlv(#[from] TlvWriteError),
 }
 
 // ---------------------------------------------------------------------------
@@ -444,5 +537,135 @@ mod tests {
     #[test]
     fn rejects_empty_input() {
         assert!(InnerHeader::parse(&[]).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer tests
+    // -----------------------------------------------------------------------
+
+    fn minimal_inner() -> InnerHeader {
+        InnerHeader {
+            inner_stream_algorithm: InnerStreamAlgorithm::ChaCha20,
+            inner_stream_key: vec![0x42u8; 64],
+            binaries: Vec::new(),
+            consumed_bytes: 0, // unused by write()
+        }
+    }
+
+    /// Assert that write + parse round-trips every typed field.
+    fn assert_roundtrip(h: &InnerHeader) {
+        let bytes = h.write().expect("write succeeds");
+        let back = InnerHeader::parse(&bytes).expect("re-parse succeeds");
+        assert_eq!(back.inner_stream_algorithm, h.inner_stream_algorithm);
+        assert_eq!(back.inner_stream_key, h.inner_stream_key);
+        assert_eq!(back.binaries.len(), h.binaries.len());
+        for (a, b) in back.binaries.iter().zip(h.binaries.iter()) {
+            assert_eq!(a.flags, b.flags);
+            assert_eq!(a.data, b.data);
+        }
+        assert_eq!(back.consumed_bytes, bytes.len());
+    }
+
+    #[test]
+    fn round_trips_minimal_inner_header() {
+        assert_roundtrip(&minimal_inner());
+    }
+
+    #[test]
+    fn round_trips_with_salsa20_algorithm() {
+        let mut h = minimal_inner();
+        h.inner_stream_algorithm = InnerStreamAlgorithm::Salsa20;
+        h.inner_stream_key = vec![0x11u8; 32];
+        assert_roundtrip(&h);
+    }
+
+    #[test]
+    fn round_trips_with_none_algorithm() {
+        let mut h = minimal_inner();
+        h.inner_stream_algorithm = InnerStreamAlgorithm::None;
+        h.inner_stream_key = vec![0x22u8; 32];
+        assert_roundtrip(&h);
+    }
+
+    #[test]
+    fn round_trips_with_binaries() {
+        let mut h = minimal_inner();
+        h.binaries = vec![
+            InnerBinary {
+                flags: 0x01,
+                data: b"protected attachment".to_vec(),
+            },
+            InnerBinary {
+                flags: 0x00,
+                data: b"plain attachment".to_vec(),
+            },
+            InnerBinary {
+                flags: 0x03,
+                data: vec![0xCDu8; 4096],
+            },
+        ];
+        assert_roundtrip(&h);
+    }
+
+    #[test]
+    fn empty_inner_stream_key_errors() {
+        let mut h = minimal_inner();
+        h.inner_stream_key = Vec::new();
+        assert!(matches!(
+            h.write().unwrap_err(),
+            InnerHeaderWriteError::EmptyInnerStreamKey
+        ));
+    }
+
+    #[test]
+    fn writes_tags_in_canonical_order() {
+        let mut h = minimal_inner();
+        h.binaries = vec![InnerBinary {
+            flags: 0,
+            data: b"x".to_vec(),
+        }];
+        let bytes = h.write().unwrap();
+        // tag(1) + len(4) = 5 bytes of header per record; first byte
+        // of each record is the tag. Expected order: 1, 2, 3, 0.
+        assert_eq!(bytes[0], tag::INNER_RANDOM_STREAM_ID);
+        // algorithm value: 4 bytes → next record at offset 5 + 4 = 9
+        assert_eq!(bytes[9], tag::INNER_STREAM_KEY);
+    }
+
+    #[test]
+    fn end_sentinel_has_empty_value() {
+        let h = minimal_inner();
+        let bytes = h.write().unwrap();
+        // Parse and confirm the trailing end record has no value bytes.
+        let mut cursor: &[u8] = &bytes;
+        let (fields, end) = super::read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
+        assert_eq!(fields.len(), 2); // algorithm + key
+        assert_eq!(end.tag, tag::END_OF_HEADER);
+        assert_eq!(end.value, b"");
+    }
+
+    #[test]
+    fn empty_binary_data_is_allowed_by_writer() {
+        // data=[] gives a 1-byte payload (just the flags byte), which
+        // the reader accepts — rejection is for zero-byte value (no
+        // flags byte at all).
+        let mut h = minimal_inner();
+        h.binaries = vec![InnerBinary {
+            flags: 0x01,
+            data: Vec::new(),
+        }];
+        assert_roundtrip(&h);
+    }
+
+    #[test]
+    fn many_binaries_round_trip_in_order() {
+        let mut h = minimal_inner();
+        h.binaries = (0..32u8)
+            .map(|i| InnerBinary {
+                flags: i & 0x01,
+                data: vec![i; 16],
+            })
+            .collect();
+        assert_roundtrip(&h);
     }
 }
