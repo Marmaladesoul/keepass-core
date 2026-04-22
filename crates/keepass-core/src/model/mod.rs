@@ -231,6 +231,10 @@ pub struct Group {
     /// was viewed. `None` when no entry has been marked, or when
     /// the field was absent from the XML.
     pub last_top_visible_entry: Option<EntryId>,
+    /// `<CustomIconUUID>` — reference to a custom icon in the
+    /// [`Meta::custom_icons`] pool. Same semantics as
+    /// [`Entry::custom_icon_uuid`], scoped to the group.
+    pub custom_icon_uuid: Option<Uuid>,
     /// `<Times>` block for the group itself.
     pub times: Timestamps,
 }
@@ -400,10 +404,21 @@ pub struct Meta {
     /// before the client prunes them.
     pub maintenance_history_days: u32,
     /// `<CustomIcons>` — pool of custom entry / group icons,
-    /// referenced by [`Entry::custom_icon_uuid`] (and the not-yet-
-    /// modelled group-level equivalent). Each icon carries its own
-    /// UUID plus the decoded image bytes.
+    /// referenced by [`Entry::custom_icon_uuid`] and
+    /// [`Group::custom_icon_uuid`]. Each icon carries its own UUID
+    /// plus the decoded image bytes.
     pub custom_icons: Vec<CustomIcon>,
+    /// `<Color>` — hex colour (e.g. `"#FF0000"`) used by KeePass 2.x
+    /// clients as the vault-level colour swatch. Empty when the
+    /// vault uses the client's default colour.
+    pub color: String,
+    /// `<HeaderHash>` — SHA-256 of the outer header, written into
+    /// KDBX3 inner XML as a belt-and-braces integrity check. KDBX4
+    /// moves this to the binary header (`verify_header_hash`) and
+    /// doesn't emit the XML element. Preserved verbatim as the
+    /// base64-encoded string for lossless round-trip — we don't
+    /// re-verify it here.
+    pub header_hash: String,
 }
 
 /// One icon in the vault's [`Meta::custom_icons`] pool.
@@ -452,6 +467,8 @@ impl Default for Meta {
             history_max_size: 6 * 1024 * 1024,
             maintenance_history_days: 365,
             custom_icons: Vec::new(),
+            color: String::new(),
+            header_hash: String::new(),
         }
     }
 }
@@ -577,6 +594,7 @@ mod tests {
             custom_data: Vec::new(),
             previous_parent_group: None,
             last_top_visible_entry: None,
+            custom_icon_uuid: None,
             times: Timestamps::default(),
         }
     }

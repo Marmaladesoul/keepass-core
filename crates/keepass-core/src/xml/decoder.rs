@@ -193,6 +193,7 @@ fn read_group<R: std::io::BufRead>(
         custom_data: Vec::new(),
         previous_parent_group: None,
         last_top_visible_entry: None,
+        custom_icon_uuid: None,
         times: Timestamps::default(),
     };
 
@@ -267,6 +268,17 @@ fn read_group<R: std::io::BufRead>(
                         "LastTopVisibleEntry" => {
                             let text = read_text(reader, buf)?;
                             group.last_top_visible_entry = parse_optional_entry_id(&text)?;
+                            continue;
+                        }
+                        "CustomIconUUID" => {
+                            let text = read_text(reader, buf)?;
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                let uuid = parse_uuid(trimmed)?;
+                                if !uuid.is_nil() {
+                                    group.custom_icon_uuid = Some(uuid);
+                                }
+                            }
                             continue;
                         }
                         _ => {
@@ -1290,6 +1302,8 @@ fn assign_meta_field(meta: &mut Meta, field: &str, text: String) -> Result<(), X
         "MaintenanceHistoryDays" => {
             meta.maintenance_history_days = parse_int::<u32>(&text, "MaintenanceHistoryDays")?;
         }
+        "Color" => meta.color = text,
+        "HeaderHash" => meta.header_hash = text,
         _ => { /* unknown Meta child — ignore for now */ }
     }
     Ok(())
@@ -3261,6 +3275,47 @@ mod tests {
         let e = vault.iter_entries().next().unwrap();
         assert!(e.quality_check);
         assert_eq!(e.previous_parent_group, None);
+    }
+
+    #[test]
+    fn parses_group_custom_icon_uuid() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <CustomIconUUID>AAAAAAAAAAAAAAAAAAAAAg==</CustomIconUUID>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let mut expected = [0u8; 16];
+        expected[15] = 2;
+        assert_eq!(
+            vault.root.custom_icon_uuid,
+            Some(Uuid::from_bytes(expected))
+        );
+    }
+
+    #[test]
+    fn parses_meta_color_and_header_hash() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <Color>#FF8800</Color>
+    <HeaderHash>Zm9vYmFy</HeaderHash>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.meta.color, "#FF8800");
+        assert_eq!(vault.meta.header_hash, "Zm9vYmFy");
     }
 
     #[test]
