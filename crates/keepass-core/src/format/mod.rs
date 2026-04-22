@@ -9,6 +9,7 @@
 
 pub mod hashed_block_stream;
 pub mod header;
+pub mod hmac_block_stream;
 pub mod kdf_params;
 pub mod tlv;
 pub mod v3;
@@ -16,6 +17,7 @@ pub mod v4;
 pub mod var_dictionary;
 
 pub use hashed_block_stream::{HashedBlockError, read_hashed_block_stream};
+pub use hmac_block_stream::{HEADER_HMAC_BLOCK_INDEX, HmacBlockError, read_hmac_block_stream};
 
 pub use header::{
     CipherId, CompressionFlags, EncryptionIv, HeaderError, InnerStreamAlgorithm, KnownCipher,
