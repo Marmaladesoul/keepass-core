@@ -18,7 +18,10 @@ pub mod v3;
 pub mod v4;
 pub mod var_dictionary;
 
-pub use hashed_block_stream::{HashedBlockError, read_hashed_block_stream};
+pub use hashed_block_stream::{
+    DEFAULT_BLOCK_SIZE as HASHED_BLOCK_DEFAULT_SIZE, HashedBlockError, read_hashed_block_stream,
+    write_hashed_block_stream,
+};
 pub use header_hmac::{
     HeaderAuthError, compute_header_hash, compute_header_hmac, verify_header_hash,
     verify_header_hmac,

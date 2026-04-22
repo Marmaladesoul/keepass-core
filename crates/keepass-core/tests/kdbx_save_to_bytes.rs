@@ -144,9 +144,12 @@ fn composite_for(sidecar: &Value, path: &Path) -> Result<CompositeKey, String> {
     }
 }
 
-/// `true` if the fixture is KDBX4 with an AES-256-CBC outer cipher —
-/// the only configuration `save_to_bytes` supports in this first slice.
-fn is_kdbx4_aes256_cbc(path: &Path) -> bool {
+/// `true` if the fixture uses an outer cipher the save path can write.
+///
+/// Currently AES-256-CBC on KDBX3 and KDBX4. ChaCha20 is wired in on
+/// the KDBX4 save path too, but no fixture emits it (see the synthetic
+/// test in `kdbx::tests`). Twofish-CBC is still deferred on both.
+fn is_writable_cipher(path: &Path) -> bool {
     let Ok(bytes) = fs::read(path) else {
         return false;
     };
@@ -156,10 +159,9 @@ fn is_kdbx4_aes256_cbc(path: &Path) -> bool {
     let Ok(sig) = FileSignature::read(&bytes[..FileSignature::LEN]) else {
         return false;
     };
-    if sig.version().ok() != Some(Version::V4) {
+    if sig.version().is_err() {
         return false;
     }
-    // Open the real header to look at the cipher UUID.
     let Ok(kdbx) = Kdbx::<Sealed>::open_from_bytes(bytes) else {
         return false;
     };
@@ -173,18 +175,18 @@ fn is_kdbx4_aes256_cbc(path: &Path) -> bool {
 }
 
 #[test]
-fn every_kdbx4_aes256_cbc_fixture_round_trips_save_to_bytes() {
+fn every_writable_fixture_round_trips_save_to_bytes() {
     let root = fixtures_root();
     let mut kdbxs: Vec<_> = find_kdbxs(&root.join("pykeepass"));
     kdbxs.extend(find_kdbxs(&root.join("kdbxweb")));
     kdbxs.extend(find_kdbxs(&root.join("keepassxc")));
 
-    let mut saw_any = false;
+    let mut saw_v3 = false;
+    let mut saw_v4 = false;
     for path in &kdbxs {
-        if !is_kdbx4_aes256_cbc(path) {
+        if !is_writable_cipher(path) {
             continue;
         }
-        saw_any = true;
 
         let sidecar = load_sidecar(path).unwrap_or_else(|| panic!("{path:?}: no sidecar"));
         let composite =
@@ -195,6 +197,11 @@ fn every_kdbx4_aes256_cbc_fixture_round_trips_save_to_bytes() {
             .unwrap_or_else(|e| panic!("{path:?}: open: {e}"))
             .read_header()
             .unwrap_or_else(|e| panic!("{path:?}: read_header: {e}"));
+        match kdbx.version() {
+            Version::V3 => saw_v3 = true,
+            Version::V4 => saw_v4 = true,
+            _ => {}
+        }
         let unlocked1 = kdbx
             .unlock(&composite)
             .unwrap_or_else(|e| panic!("{path:?}: unlock: {e}"));
@@ -222,8 +229,6 @@ fn every_kdbx4_aes256_cbc_fixture_round_trips_save_to_bytes() {
         );
     }
 
-    assert!(
-        saw_any,
-        "no KDBX4 + AES-256-CBC fixtures found under {root:?}"
-    );
+    assert!(saw_v3, "no KDBX3 fixtures exercised under {root:?}");
+    assert!(saw_v4, "no KDBX4 fixtures exercised under {root:?}");
 }
