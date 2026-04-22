@@ -334,7 +334,7 @@ pub struct Binary {
 /// Fields beyond this set — memory-protection flags, custom icons,
 /// custom data, header hash, history settings — land in follow-up
 /// PRs.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Meta {
     /// `<Generator>` — identifies the writer (e.g. `"KeePassXC"`,
@@ -378,6 +378,56 @@ pub struct Meta {
     /// and client-specific settings. Preserved verbatim for round-trip
     /// so writers that don't know a particular key don't drop it.
     pub custom_data: Vec<CustomDataItem>,
+    /// `<SettingsChanged>` — last time any `<Meta>` setting was edited.
+    /// Distinct from the per-field `*Changed` timestamps.
+    pub settings_changed: Option<DateTime<Utc>>,
+    /// `<MasterKeyChanged>` — last time the master key was replaced.
+    /// Used by the recommendation / force policies below.
+    pub master_key_changed: Option<DateTime<Utc>>,
+    /// `<MasterKeyChangeRec>` — number of days between recommended
+    /// master-key changes. `-1` disables the recommendation.
+    pub master_key_change_rec: i64,
+    /// `<MasterKeyChangeForce>` — number of days after which the
+    /// client forces a master-key change. `-1` disables.
+    pub master_key_change_force: i64,
+    /// `<HistoryMaxItems>` — cap on entry-history length.
+    /// `-1` means unlimited.
+    pub history_max_items: i32,
+    /// `<HistoryMaxSize>` — cap on entry-history byte size.
+    /// `-1` means unlimited.
+    pub history_max_size: i64,
+    /// `<MaintenanceHistoryDays>` — how long to keep entry snapshots
+    /// before the client prunes them.
+    pub maintenance_history_days: u32,
+}
+
+impl Default for Meta {
+    fn default() -> Self {
+        // Values mirror KeePass 2.x's stock defaults where relevant,
+        // so a `Meta::default()` round-trips cleanly back through the
+        // writer without spurious diff churn.
+        Self {
+            generator: String::new(),
+            database_name: String::new(),
+            database_description: String::new(),
+            database_name_changed: None,
+            database_description_changed: None,
+            default_username: String::new(),
+            default_username_changed: None,
+            recycle_bin_enabled: false,
+            recycle_bin_uuid: None,
+            recycle_bin_changed: None,
+            memory_protection: MemoryProtection::default(),
+            custom_data: Vec::new(),
+            settings_changed: None,
+            master_key_changed: None,
+            master_key_change_rec: -1,
+            master_key_change_force: -1,
+            history_max_items: 10,
+            history_max_size: 6 * 1024 * 1024,
+            maintenance_history_days: 365,
+        }
+    }
 }
 
 /// One item in a `<CustomData>` collection.
