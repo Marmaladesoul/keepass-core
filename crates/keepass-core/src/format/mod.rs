@@ -24,8 +24,9 @@ pub use hmac_block_stream::{HEADER_HMAC_BLOCK_INDEX, HmacBlockError, read_hmac_b
 pub use inner_header::{InnerBinary, InnerHeader, InnerHeaderError};
 
 pub use header::{
-    CipherId, CompressionFlags, EncryptionIv, HeaderError, InnerStreamAlgorithm, KnownCipher,
-    MasterSeed, OuterHeader, ProtectedStreamKey, StreamStartBytes, TransformSeed,
+    CipherId, CompressionFlags, END_OF_HEADER_VALUE, EncryptionIv, HeaderError,
+    InnerStreamAlgorithm, KnownCipher, MasterSeed, OuterHeader, OuterHeaderWriteError,
+    ProtectedStreamKey, StreamStartBytes, TransformSeed,
 };
 pub use kdf_params::{Argon2Variant, Argon2Version, KdfId, KdfParams, KdfParamsError, KnownKdf};
 pub use tlv::{LengthWidth, TlvField, TlvWriteError, read_header_fields, write_header_fields};

@@ -15,8 +15,15 @@ use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::tlv::TlvField;
+use super::tlv::{TlvField, TlvWriteError, write_header_fields};
 use super::{FormatError, Version};
+
+/// Canonical end-of-header sentinel value bytes.
+///
+/// KeePass implementations by convention emit `\r\n\r\n` after the final
+/// TLV record with tag [`tag::END_OF_HEADER`]. Exposed for writers that
+/// want the default; readers preserve whatever bytes were on disk.
+pub const END_OF_HEADER_VALUE: &[u8] = b"\r\n\r\n";
 
 // ---------------------------------------------------------------------------
 // Tag numbers — shared constants
@@ -477,6 +484,162 @@ impl OuterHeader {
             }
         }
     }
+
+    /// Serialise this typed header back to an outer-header byte string —
+    /// the inverse of [`Self::parse`] composed with
+    /// [`super::tlv::read_header_fields`].
+    ///
+    /// The byte string starts at the first TLV tag and ends past the
+    /// end-of-header sentinel. It is suitable for concatenation after a
+    /// 12-byte [`super::FileSignature`] prefix, followed by the HMAC /
+    /// payload layers.
+    ///
+    /// Fields are emitted in tag-numeric ascending order: 2, 3, 4, 7,
+    /// and then the version-specific fields (5, 6, 8, 9, 10 for KDBX3;
+    /// 11, 12 for KDBX4). The end sentinel uses
+    /// [`END_OF_HEADER_VALUE`] (`\r\n\r\n`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OuterHeaderWriteError::MissingField`] if any
+    /// version-mandatory `Option<T>` field is `None`. This can only
+    /// happen when an [`OuterHeader`] was constructed manually and
+    /// incompletely; a header produced by [`Self::parse`] always
+    /// satisfies its version's mandatory set.
+    ///
+    /// Returns [`OuterHeaderWriteError::Tlv`] if a variable-length
+    /// field (KDF parameters, public custom data, encryption IV) is
+    /// longer than the chosen format version can encode — effectively
+    /// unreachable for well-formed headers.
+    pub fn write(&self) -> Result<Vec<u8>, OuterHeaderWriteError> {
+        // All value buffers are declared up front so their borrows live
+        // long enough for the TlvField vector to reference them.
+        let cipher_bytes: [u8; 16] = *self.cipher_id.0.as_bytes();
+        let compression_bytes: [u8; 4] = match self.compression {
+            CompressionFlags::None => 0u32.to_le_bytes(),
+            CompressionFlags::Gzip => 1u32.to_le_bytes(),
+        };
+
+        // Buffers for version-specific fields. Declared unconditionally
+        // to keep the borrow lifetimes uniform; only the ones relevant
+        // to this version are actually pushed into `fields`.
+        let transform_rounds_bytes: [u8; 8];
+        let inner_stream_id_bytes: [u8; 4];
+
+        let mut fields: Vec<TlvField<'_>> = Vec::with_capacity(10);
+
+        fields.push(TlvField {
+            tag: tag::CIPHER_ID,
+            value: &cipher_bytes,
+        });
+        fields.push(TlvField {
+            tag: tag::COMPRESSION_FLAGS,
+            value: &compression_bytes,
+        });
+        fields.push(TlvField {
+            tag: tag::MASTER_SEED,
+            value: &self.master_seed.0,
+        });
+        fields.push(TlvField {
+            tag: tag::ENCRYPTION_IV,
+            value: &self.encryption_iv.0,
+        });
+
+        match self.version {
+            Version::V3 => {
+                let transform_seed = self
+                    .transform_seed
+                    .as_ref()
+                    .ok_or(OuterHeaderWriteError::MissingField(tag::TRANSFORM_SEED))?;
+                let rounds = self
+                    .transform_rounds
+                    .ok_or(OuterHeaderWriteError::MissingField(tag::TRANSFORM_ROUNDS))?;
+                let protected_stream_key = self.protected_stream_key.as_ref().ok_or(
+                    OuterHeaderWriteError::MissingField(tag::PROTECTED_STREAM_KEY),
+                )?;
+                let stream_start_bytes = self
+                    .stream_start_bytes
+                    .as_ref()
+                    .ok_or(OuterHeaderWriteError::MissingField(tag::STREAM_START_BYTES))?;
+                let inner_stream =
+                    self.inner_stream_algorithm
+                        .ok_or(OuterHeaderWriteError::MissingField(
+                            tag::INNER_RANDOM_STREAM_ID,
+                        ))?;
+
+                transform_rounds_bytes = rounds.to_le_bytes();
+                inner_stream_id_bytes = match inner_stream {
+                    InnerStreamAlgorithm::None => 0u32,
+                    InnerStreamAlgorithm::Salsa20 => 2u32,
+                    InnerStreamAlgorithm::ChaCha20 => 3u32,
+                }
+                .to_le_bytes();
+
+                fields.push(TlvField {
+                    tag: tag::TRANSFORM_SEED,
+                    value: &transform_seed.0,
+                });
+                fields.push(TlvField {
+                    tag: tag::TRANSFORM_ROUNDS,
+                    value: &transform_rounds_bytes,
+                });
+                fields.push(TlvField {
+                    tag: tag::PROTECTED_STREAM_KEY,
+                    value: &protected_stream_key.0,
+                });
+                fields.push(TlvField {
+                    tag: tag::STREAM_START_BYTES,
+                    value: &stream_start_bytes.0,
+                });
+                fields.push(TlvField {
+                    tag: tag::INNER_RANDOM_STREAM_ID,
+                    value: &inner_stream_id_bytes,
+                });
+            }
+            Version::V4 => {
+                let kdf = self
+                    .kdf_parameters
+                    .as_ref()
+                    .ok_or(OuterHeaderWriteError::MissingField(tag::KDF_PARAMETERS))?;
+                fields.push(TlvField {
+                    tag: tag::KDF_PARAMETERS,
+                    value: kdf,
+                });
+                if let Some(pcd) = self.public_custom_data.as_ref() {
+                    fields.push(TlvField {
+                        tag: tag::PUBLIC_CUSTOM_DATA,
+                        value: pcd,
+                    });
+                }
+            }
+        }
+
+        let end = TlvField {
+            tag: tag::END_OF_HEADER,
+            value: END_OF_HEADER_VALUE,
+        };
+        write_header_fields(&fields, end, self.version.header_length_width())
+            .map_err(OuterHeaderWriteError::Tlv)
+    }
+}
+
+/// Error type for [`OuterHeader::write`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OuterHeaderWriteError {
+    /// A version-mandatory field was absent from the typed header.
+    ///
+    /// Only reachable when an [`OuterHeader`] was constructed by hand
+    /// (e.g. in tests) without populating every field its version
+    /// requires. Parsed headers always satisfy this invariant.
+    #[error("outer header is missing mandatory field (tag {0})")]
+    MissingField(u8),
+
+    /// A variable-length field exceeded the length prefix width for
+    /// this KDBX version. Effectively unreachable for well-formed
+    /// headers.
+    #[error(transparent)]
+    Tlv(#[from] TlvWriteError),
 }
 
 /// Error type for [`OuterHeader::decode_kdf_params`].
@@ -862,5 +1025,199 @@ mod tests {
 
         let s = format!("{:?}", ProtectedStreamKey([0xFF; 32]));
         assert!(!s.contains("FF"), "ProtectedStreamKey should redact: {s}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer tests
+    // -----------------------------------------------------------------------
+
+    use super::super::tlv::{LengthWidth, read_header_fields};
+
+    fn minimal_v4_header() -> OuterHeader {
+        OuterHeader {
+            version: Version::V4,
+            cipher_id: CipherId(Uuid::from_bytes(aes_cipher_id())),
+            compression: CompressionFlags::Gzip,
+            master_seed: MasterSeed([0x11; 32]),
+            encryption_iv: EncryptionIv(vec![0x22; 16]),
+            transform_seed: None,
+            transform_rounds: None,
+            protected_stream_key: None,
+            stream_start_bytes: None,
+            inner_stream_algorithm: None,
+            kdf_parameters: Some(vec![0xAA; 24]),
+            public_custom_data: None,
+        }
+    }
+
+    fn minimal_v3_header() -> OuterHeader {
+        OuterHeader {
+            version: Version::V3,
+            cipher_id: CipherId(Uuid::from_bytes(aes_cipher_id())),
+            compression: CompressionFlags::None,
+            master_seed: MasterSeed([0x01; 32]),
+            encryption_iv: EncryptionIv(vec![0x02; 16]),
+            transform_seed: Some(TransformSeed([0x03; 32])),
+            transform_rounds: Some(6_000_000),
+            protected_stream_key: Some(ProtectedStreamKey([0x04; 32])),
+            stream_start_bytes: Some(StreamStartBytes([0x05; 32])),
+            inner_stream_algorithm: Some(InnerStreamAlgorithm::Salsa20),
+            kdf_parameters: None,
+            public_custom_data: None,
+        }
+    }
+
+    /// Round-trip an `OuterHeader` through `write` + `read_header_fields` +
+    /// `parse` and assert field-level equality.
+    fn assert_roundtrip(h: &OuterHeader) {
+        let bytes = h.write().expect("write succeeds");
+        let mut cursor: &[u8] = &bytes;
+        let (fields, end) = read_header_fields(&mut cursor, h.version.header_length_width())
+            .expect("re-parse succeeds");
+        assert!(cursor.is_empty(), "writer should emit exactly the header");
+        assert_eq!(end.tag, tag::END_OF_HEADER);
+        assert_eq!(end.value, END_OF_HEADER_VALUE);
+        let re = OuterHeader::parse(&fields, h.version).expect("typed parse succeeds");
+        assert_eq!(re.version, h.version);
+        assert_eq!(re.cipher_id, h.cipher_id);
+        assert_eq!(re.compression, h.compression);
+        assert_eq!(re.master_seed, h.master_seed);
+        assert_eq!(re.encryption_iv, h.encryption_iv);
+        assert_eq!(re.transform_seed, h.transform_seed);
+        assert_eq!(re.transform_rounds, h.transform_rounds);
+        assert_eq!(re.protected_stream_key, h.protected_stream_key);
+        assert_eq!(re.stream_start_bytes, h.stream_start_bytes);
+        assert_eq!(re.inner_stream_algorithm, h.inner_stream_algorithm);
+        assert_eq!(re.kdf_parameters, h.kdf_parameters);
+        assert_eq!(re.public_custom_data, h.public_custom_data);
+    }
+
+    #[test]
+    fn writes_minimal_v4_header_round_trips() {
+        assert_roundtrip(&minimal_v4_header());
+    }
+
+    #[test]
+    fn writes_minimal_v3_header_round_trips() {
+        assert_roundtrip(&minimal_v3_header());
+    }
+
+    #[test]
+    fn v4_with_public_custom_data_round_trips() {
+        let mut h = minimal_v4_header();
+        h.public_custom_data = Some(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_roundtrip(&h);
+    }
+
+    #[test]
+    fn v4_without_public_custom_data_omits_the_tag() {
+        let h = minimal_v4_header();
+        let bytes = h.write().unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields, _) = read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
+        let tags: Vec<u8> = fields.iter().map(|f| f.tag).collect();
+        assert!(!tags.contains(&tag::PUBLIC_CUSTOM_DATA));
+    }
+
+    #[test]
+    fn v3_missing_transform_seed_errors() {
+        let mut h = minimal_v3_header();
+        h.transform_seed = None;
+        assert!(matches!(
+            h.write().unwrap_err(),
+            OuterHeaderWriteError::MissingField(tag::TRANSFORM_SEED)
+        ));
+    }
+
+    #[test]
+    fn v3_missing_transform_rounds_errors() {
+        let mut h = minimal_v3_header();
+        h.transform_rounds = None;
+        assert!(matches!(
+            h.write().unwrap_err(),
+            OuterHeaderWriteError::MissingField(tag::TRANSFORM_ROUNDS)
+        ));
+    }
+
+    #[test]
+    fn v3_missing_protected_stream_key_errors() {
+        let mut h = minimal_v3_header();
+        h.protected_stream_key = None;
+        assert!(matches!(
+            h.write().unwrap_err(),
+            OuterHeaderWriteError::MissingField(tag::PROTECTED_STREAM_KEY)
+        ));
+    }
+
+    #[test]
+    fn v3_missing_stream_start_bytes_errors() {
+        let mut h = minimal_v3_header();
+        h.stream_start_bytes = None;
+        assert!(matches!(
+            h.write().unwrap_err(),
+            OuterHeaderWriteError::MissingField(tag::STREAM_START_BYTES)
+        ));
+    }
+
+    #[test]
+    fn v3_missing_inner_stream_algorithm_errors() {
+        let mut h = minimal_v3_header();
+        h.inner_stream_algorithm = None;
+        assert!(matches!(
+            h.write().unwrap_err(),
+            OuterHeaderWriteError::MissingField(tag::INNER_RANDOM_STREAM_ID)
+        ));
+    }
+
+    #[test]
+    fn v4_missing_kdf_parameters_errors() {
+        let mut h = minimal_v4_header();
+        h.kdf_parameters = None;
+        assert!(matches!(
+            h.write().unwrap_err(),
+            OuterHeaderWriteError::MissingField(tag::KDF_PARAMETERS)
+        ));
+    }
+
+    #[test]
+    fn writes_tags_in_ascending_numeric_order() {
+        let h = minimal_v4_header();
+        let bytes = h.write().unwrap();
+        let mut cursor: &[u8] = &bytes;
+        let (fields, _) = read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
+        let tags: Vec<u8> = fields.iter().map(|f| f.tag).collect();
+        let mut sorted = tags.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            tags, sorted,
+            "fields should be emitted in ascending tag order"
+        );
+    }
+
+    #[test]
+    fn end_of_header_value_is_canonical_crlf_pair() {
+        assert_eq!(END_OF_HEADER_VALUE, b"\r\n\r\n");
+    }
+
+    #[test]
+    fn chacha20_iv_is_12_bytes() {
+        let mut h = minimal_v4_header();
+        h.cipher_id = CipherId(Uuid::from_bytes(chacha_cipher_id()));
+        h.encryption_iv = EncryptionIv(vec![0x33; 12]);
+        assert_roundtrip(&h);
+    }
+
+    #[test]
+    fn inner_stream_algorithm_chacha20_round_trips() {
+        let mut h = minimal_v3_header();
+        h.inner_stream_algorithm = Some(InnerStreamAlgorithm::ChaCha20);
+        assert_roundtrip(&h);
+    }
+
+    #[test]
+    fn inner_stream_algorithm_none_round_trips() {
+        let mut h = minimal_v3_header();
+        h.inner_stream_algorithm = Some(InnerStreamAlgorithm::None);
+        assert_roundtrip(&h);
     }
 }
