@@ -9,17 +9,18 @@
 //! | [`CompressionFlags::None`]    | raw inner XML (KDBX3 only)   |
 //! | [`CompressionFlags::Gzip`]    | standard RFC 1952 gzip stream|
 //!
-//! Most real-world vaults are gzipped. This module owns the thin wrapper
-//! around [`flate2`] for decompression. Compression (for writer support)
-//! lands alongside the KDBX writer; only the reader path is here.
+//! Most real-world vaults are gzipped. This module owns the thin wrappers
+//! around [`flate2`] for both compression and decompression.
 //!
 //! [`CompressionFlags`]: crate::format::CompressionFlags
 //! [`CompressionFlags::None`]: crate::format::CompressionFlags::None
 //! [`CompressionFlags::Gzip`]: crate::format::CompressionFlags::Gzip
 
-use std::io::Read;
+use std::io::{Read, Write};
 
+use flate2::Compression;
 use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use thiserror::Error;
 
 use crate::format::CompressionFlags;
@@ -78,6 +79,36 @@ pub fn decompress_with_limit(
             Ok(payload.to_vec())
         }
         CompressionFlags::Gzip => decompress_gzip(payload, max_output_bytes),
+    }
+}
+
+/// Compress a payload according to the declared [`CompressionFlags`] — the
+/// inverse of [`decompress`].
+///
+/// For [`CompressionFlags::None`], returns the input bytes as an owned
+/// `Vec<u8>` (a copy).
+///
+/// For [`CompressionFlags::Gzip`], encodes the payload as an RFC 1952
+/// gzip stream with [`flate2::Compression::default()`]. Output is a
+/// fresh `Vec<u8>`.
+///
+/// # Errors
+///
+/// Returns [`CompressionError::Gzip`] if the underlying `flate2` writer
+/// fails — which in practice only happens under memory exhaustion, since
+/// the underlying `Vec<u8>` sink never returns an I/O error.
+pub fn compress(flags: CompressionFlags, payload: &[u8]) -> Result<Vec<u8>, CompressionError> {
+    match flags {
+        CompressionFlags::None => Ok(payload.to_vec()),
+        CompressionFlags::Gzip => {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder
+                .write_all(payload)
+                .map_err(|e| CompressionError::Gzip(e.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|e| CompressionError::Gzip(e.to_string()))
+        }
     }
 }
 

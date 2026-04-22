@@ -34,18 +34,19 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::crypto::{
-    CryptoError, InnerStreamCipher, aes_256_cbc_decrypt, chacha20_decrypt, decompress,
-    derive_cipher_key, derive_hmac_base_key, derive_transformed_key,
+    CryptoError, InnerStreamCipher, aes_256_cbc_decrypt, aes_256_cbc_encrypt, chacha20_decrypt,
+    compress, decompress, derive_cipher_key, derive_hmac_base_key, derive_transformed_key,
 };
 use crate::error::Error;
 use crate::format::{
-    FileSignature, FormatError, InnerHeader, KnownCipher, OuterHeader, Version,
-    read_hashed_block_stream, read_header_fields, read_hmac_block_stream, verify_header_hash,
-    verify_header_hmac,
+    FileSignature, FormatError, HMAC_BLOCK_DEFAULT_SIZE, InnerBinary, InnerHeader,
+    InnerStreamAlgorithm, KnownCipher, OuterHeader, SIGNATURE_1, SIGNATURE_2, Version,
+    compute_header_hash, compute_header_hmac, read_hashed_block_stream, read_header_fields,
+    read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hmac_block_stream,
 };
 use crate::model::{Binary, Vault};
-use crate::secret::CompositeKey;
-use crate::xml::decode_vault_with_cipher;
+use crate::secret::{CompositeKey, TransformedKey};
+use crate::xml::{decode_vault_with_cipher, encode_vault_with_cipher};
 
 // ---------------------------------------------------------------------------
 // State markers
@@ -71,10 +72,37 @@ pub struct HeaderRead {
 }
 
 /// State marker: the vault has been fully decrypted, parsed, and is ready
-/// for read-only access. Write-back support lands in a follow-up.
+/// for read-only access or write-back via [`Kdbx::<Unlocked>::save_to_bytes`].
+///
+/// The framing bits (outer header, inner header, and the composite key
+/// that unlocked the file) are retained so a save can reuse them without
+/// re-running the (expensive) KDF.
 #[derive(Debug)]
 pub struct Unlocked {
     vault: Vault,
+    /// Outer header as parsed at unlock time. `save_to_bytes` reuses
+    /// every field — same cipher, same master seed, same KDF params —
+    /// so `unlock → save → re-open → unlock` produces the same vault
+    /// without touching the KDF.
+    outer_header: OuterHeader,
+    /// KDBX4 only: the inner-stream cipher's algorithm and key, retained
+    /// so `save_to_bytes` can spin up a fresh [`InnerStreamCipher`] that
+    /// encrypts protected values symmetrically with how they were
+    /// decrypted on unlock. On KDBX3 the equivalent lives in the outer
+    /// header, and save_to_bytes is not yet implemented for KDBX3.
+    inner_stream: Option<InnerStreamParams>,
+    /// The transformed (post-KDF) key derived at unlock time. Retained
+    /// so that `save_to_bytes` can derive the cipher key and HMAC base
+    /// key directly, skipping the expensive Argon2 / AES-KDF round.
+    transformed_key: TransformedKey,
+}
+
+/// Inner-stream cipher parameters retained across [`Kdbx::<Unlocked>`]
+/// for symmetric re-encryption on [`save_to_bytes`](Kdbx::save_to_bytes).
+#[derive(Debug, Clone)]
+struct InnerStreamParams {
+    algorithm: InnerStreamAlgorithm,
+    key: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -256,12 +284,12 @@ impl Kdbx<HeaderRead> {
     /// as a generic decryption failure, so an attacker cannot learn
     /// anything about the key from the error variant alone.
     pub fn unlock(self, composite: &CompositeKey) -> Result<Kdbx<Unlocked>, Error> {
-        let vault = do_unlock(&self.bytes, &self.state, composite)?;
+        let state = do_unlock(&self.bytes, &self.state, composite)?;
         Ok(Kdbx {
             bytes: self.bytes,
             signature: self.signature,
             version: self.version,
-            state: Unlocked { vault },
+            state,
         })
     }
 }
@@ -275,6 +303,54 @@ impl Kdbx<Unlocked> {
     #[must_use]
     pub fn vault(&self) -> &Vault {
         &self.state.vault
+    }
+
+    /// Mutable access to the decoded vault — for in-place edits before
+    /// a save.
+    pub fn vault_mut(&mut self) -> &mut Vault {
+        &mut self.state.vault
+    }
+
+    /// Serialise this unlocked database back to a KDBX byte stream —
+    /// the byte-level inverse of [`Kdbx::<HeaderRead>::unlock`].
+    ///
+    /// Reuses the outer-header framing (cipher, master seed, KDF
+    /// parameters, IV) that was parsed at unlock time, plus the
+    /// transformed key cached in the [`Unlocked`] state so no second
+    /// round of Argon2 is needed.
+    ///
+    /// # Supported configurations
+    ///
+    /// This first implementation targets **KDBX4 with AES-256-CBC**,
+    /// which is the default emitted by KeePassXC and covers the bulk
+    /// of real-world vaults. Other configurations return
+    /// [`FormatError::MalformedHeader`] with a description of what's
+    /// not yet supported:
+    ///
+    /// - KDBX3 (the signature + outer header is emitted but the
+    ///   HashedBlockStream writer and the different inner-stream key
+    ///   path aren't wired up yet).
+    /// - ChaCha20 outer cipher.
+    /// - Twofish-CBC outer cipher (which `unlock` already rejects).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Xml`] on XML encode failures,
+    /// [`Error::Format`] on framing failures (inner header write,
+    /// TLV overflow, compression failure), or [`Error::Crypto`] on
+    /// cipher / IV mismatches.
+    ///
+    /// # Round-trip guarantee
+    ///
+    /// `kdbx.save_to_bytes()` followed by `Kdbx::open_from_bytes(...)`
+    /// followed by `.read_header()?.unlock(same_key)?` yields a
+    /// [`Vault`] equal to the one currently in this [`Kdbx`]. Byte-
+    /// exact equality with the original source file is **not**
+    /// guaranteed: the XML encoder canonicalises formatting, the
+    /// VarDictionary encoder canonicalises key order, and the outer
+    /// header always emits tags in ascending numeric order.
+    pub fn save_to_bytes(&self) -> Result<Vec<u8>, Error> {
+        do_save(self.signature, self.version, &self.state)
     }
 }
 
@@ -292,7 +368,7 @@ fn do_unlock(
     bytes: &[u8],
     header_state: &HeaderRead,
     composite: &CompositeKey,
-) -> Result<Vault, Error> {
+) -> Result<Unlocked, Error> {
     let header = &header_state.header;
 
     // Twofish-CBC is deliberately deferred — no fixture in the current
@@ -439,7 +515,15 @@ fn do_unlock(
                 }
                 let mut vault = decode_vault_with_cipher(&xml, &mut c)?;
                 vault.binaries = binaries;
-                return Ok(vault);
+                return Ok(Unlocked {
+                    vault,
+                    outer_header: header.clone(),
+                    inner_stream: Some(InnerStreamParams {
+                        algorithm: inner.inner_stream_algorithm,
+                        key: inner.inner_stream_key,
+                    }),
+                    transformed_key: transformed,
+                });
             }
         };
 
@@ -448,7 +532,127 @@ fn do_unlock(
         .map_err(|_| CryptoError::Decrypt)?;
     let mut vault = decode_vault_with_cipher(&xml_bytes, &mut cipher)?;
     vault.binaries = binaries;
-    Ok(vault)
+    Ok(Unlocked {
+        vault,
+        outer_header: header.clone(),
+        inner_stream: None, // KDBX3 doesn't have a separate inner header
+        transformed_key: transformed,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Save pipeline — the byte-level inverse of do_unlock.
+// ---------------------------------------------------------------------------
+
+fn do_save(signature: FileSignature, version: Version, state: &Unlocked) -> Result<Vec<u8>, Error> {
+    match version {
+        Version::V3 => Err(Error::Format(FormatError::MalformedHeader(
+            "save_to_bytes is not yet implemented for KDBX3",
+        ))),
+        Version::V4 => do_save_v4(signature, state),
+    }
+}
+
+fn do_save_v4(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Error> {
+    let header = &state.outer_header;
+    let inner_params = state
+        .inner_stream
+        .as_ref()
+        .ok_or(FormatError::MalformedHeader(
+            "KDBX4 save_to_bytes requires inner-stream parameters from unlock",
+        ))?;
+
+    // Only AES-256-CBC is wired up for writes at present.
+    match header.cipher_id.well_known() {
+        Some(KnownCipher::Aes256Cbc) => {}
+        Some(KnownCipher::ChaCha20) => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "KDBX4 save_to_bytes does not yet support ChaCha20",
+            )));
+        }
+        Some(KnownCipher::TwofishCbc) => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "KDBX4 save_to_bytes does not support Twofish-CBC",
+            )));
+        }
+        None => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "KDBX4 save_to_bytes: unrecognised outer cipher",
+            )));
+        }
+    }
+
+    // --- Inner-stream cipher + inner header binaries ---------------------
+    let mut inner_cipher = InnerStreamCipher::new(inner_params.algorithm, &inner_params.key)
+        .map_err(|_| CryptoError::Decrypt)?;
+
+    let vault = &state.vault;
+    let mut inner_binaries: Vec<InnerBinary> = Vec::with_capacity(vault.binaries.len());
+    for b in &vault.binaries {
+        let flags: u8 = u8::from(b.protected);
+        let mut data = b.data.clone();
+        if b.protected {
+            // Stream cipher: XOR in the same keystream direction to
+            // re-encrypt. The cipher advances by `data.len()` bytes.
+            inner_cipher.process(&mut data);
+        }
+        inner_binaries.push(InnerBinary { flags, data });
+    }
+
+    let inner_header = InnerHeader {
+        inner_stream_algorithm: inner_params.algorithm,
+        inner_stream_key: inner_params.key.clone(),
+        binaries: inner_binaries,
+        consumed_bytes: 0, // unused by write()
+    };
+    let inner_header_bytes = inner_header
+        .write()
+        .map_err(|_| FormatError::MalformedHeader("failed to write inner header"))?;
+
+    // --- XML encode with the same cipher (now advanced past binaries) ----
+    let xml_bytes = encode_vault_with_cipher(vault, &mut inner_cipher)?;
+
+    // --- Decompressed plaintext = inner header || XML --------------------
+    let mut decompressed = Vec::with_capacity(inner_header_bytes.len() + xml_bytes.len());
+    decompressed.extend_from_slice(&inner_header_bytes);
+    decompressed.extend_from_slice(&xml_bytes);
+
+    // --- Compress if declared --------------------------------------------
+    let plaintext = compress(header.compression, &decompressed)
+        .map_err(|_| FormatError::MalformedHeader("compression failed on write"))?;
+
+    // --- Derive cipher key + HMAC base key from the cached transformed key
+    let cipher_key = derive_cipher_key(&header.master_seed, &state.transformed_key);
+    let hmac_base = derive_hmac_base_key(&header.master_seed, &state.transformed_key);
+
+    // --- Outer-cipher encrypt --------------------------------------------
+    let ciphertext = aes_256_cbc_encrypt(&cipher_key, &header.encryption_iv, &plaintext)
+        .map_err(|_| CryptoError::Decrypt)?;
+
+    // --- Build outer header bytes (signature + TLVs) ---------------------
+    let mut header_bytes = Vec::with_capacity(256);
+    header_bytes.extend_from_slice(&SIGNATURE_1);
+    header_bytes.extend_from_slice(&SIGNATURE_2);
+    header_bytes.extend_from_slice(&signature.minor.to_le_bytes());
+    header_bytes.extend_from_slice(&signature.major.to_le_bytes());
+    let tlv_bytes = header
+        .write()
+        .map_err(|_| FormatError::MalformedHeader("failed to write outer header"))?;
+    header_bytes.extend_from_slice(&tlv_bytes);
+
+    // --- Header hash + HMAC + HMAC block stream of ciphertext ------------
+    let header_hash = compute_header_hash(&header_bytes);
+    let header_hmac = compute_header_hmac(&header_bytes, &hmac_base);
+    let block_stream = write_hmac_block_stream(&ciphertext, &hmac_base, HMAC_BLOCK_DEFAULT_SIZE)
+        .map_err(FormatError::from)?;
+
+    // --- Final assembly --------------------------------------------------
+    let mut out = Vec::with_capacity(header_bytes.len() + 64 + block_stream.len());
+    out.extend_from_slice(&header_bytes);
+    out.extend_from_slice(&header_hash);
+    out.extend_from_slice(&header_hmac);
+    out.extend_from_slice(&block_stream);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

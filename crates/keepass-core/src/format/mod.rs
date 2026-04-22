@@ -19,8 +19,14 @@ pub mod v4;
 pub mod var_dictionary;
 
 pub use hashed_block_stream::{HashedBlockError, read_hashed_block_stream};
-pub use header_hmac::{HeaderAuthError, verify_header_hash, verify_header_hmac};
-pub use hmac_block_stream::{HEADER_HMAC_BLOCK_INDEX, HmacBlockError, read_hmac_block_stream};
+pub use header_hmac::{
+    HeaderAuthError, compute_header_hash, compute_header_hmac, verify_header_hash,
+    verify_header_hmac,
+};
+pub use hmac_block_stream::{
+    DEFAULT_BLOCK_SIZE as HMAC_BLOCK_DEFAULT_SIZE, HEADER_HMAC_BLOCK_INDEX, HmacBlockError,
+    read_hmac_block_stream, write_hmac_block_stream,
+};
 pub use inner_header::{InnerBinary, InnerHeader, InnerHeaderError, InnerHeaderWriteError};
 
 pub use header::{

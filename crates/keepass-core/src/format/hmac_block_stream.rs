@@ -112,6 +112,80 @@ pub fn read_hmac_block_stream(
     }
 }
 
+/// Default on-disk block size for [`write_hmac_block_stream`]: 1 MiB.
+///
+/// Matches the block size KeePass (the reference C# implementation) and
+/// KeePassXC emit. The reader accepts any block size up to `u32::MAX`
+/// bytes; 1 MiB is a good default trade-off between verification
+/// granularity (smaller blocks catch corruption earlier) and framing
+/// overhead (32-byte tag + 4-byte size per block).
+pub const DEFAULT_BLOCK_SIZE: usize = 1024 * 1024;
+
+/// Encode a payload as a KDBX4 `HmacBlockStream` — the inverse of
+/// [`read_hmac_block_stream`].
+///
+/// Splits `payload` into blocks of at most `block_size` bytes, emits a
+/// 32-byte HMAC-SHA-256 tag before each block (and before a final
+/// zero-size end marker), and returns the whole stream as a fresh
+/// `Vec<u8>`.
+///
+/// Use [`DEFAULT_BLOCK_SIZE`] for the block size unless you have a
+/// specific reason to change it.
+///
+/// # Errors
+///
+/// Returns [`HmacBlockError::BlockSizeZero`] if `block_size` is zero
+/// (otherwise a non-empty payload would loop forever).
+///
+/// # Panics
+///
+/// Does not panic under any input. Each block is smaller than
+/// `block_size`, so its length fits in a `u32` as long as `block_size`
+/// does — which the caller controls.
+pub fn write_hmac_block_stream(
+    payload: &[u8],
+    hmac_base: &HmacBaseKey,
+    block_size: usize,
+) -> Result<Vec<u8>, HmacBlockError> {
+    if block_size == 0 {
+        return Err(HmacBlockError::BlockSizeZero);
+    }
+
+    // Pre-size: payload + 36 bytes (tag + size) per block + end marker.
+    let block_count = payload.len().div_ceil(block_size).max(1);
+    let mut out = Vec::with_capacity(payload.len() + 36 * (block_count + 1));
+
+    let mut block_index: u64 = 0;
+    for chunk in payload.chunks(block_size) {
+        let size = u32::try_from(chunk.len()).expect("chunks are bounded by block_size ≤ u32::MAX");
+        let key = per_block_hmac_key(hmac_base, block_index);
+        let mut mac =
+            <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+        mac.update(&block_index.to_le_bytes());
+        mac.update(&size.to_le_bytes());
+        mac.update(chunk);
+        let tag = mac.finalize().into_bytes();
+
+        out.extend_from_slice(&tag);
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(chunk);
+
+        block_index = block_index.wrapping_add(1);
+    }
+
+    // End marker: same shape as a block but with size = 0 and no data.
+    let key = per_block_hmac_key(hmac_base, block_index);
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+    mac.update(&block_index.to_le_bytes());
+    mac.update(&0u32.to_le_bytes());
+    let tag = mac.finalize().into_bytes();
+    out.extend_from_slice(&tag);
+    out.extend_from_slice(&0u32.to_le_bytes());
+
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Low-level byte-reading helpers
 // ---------------------------------------------------------------------------
@@ -155,6 +229,10 @@ pub enum HmacBlockError {
         /// The declared size of the failing block's data.
         size: u32,
     },
+
+    /// [`write_hmac_block_stream`] was called with a zero block size.
+    #[error("HMAC block stream writer requires a non-zero block size")]
+    BlockSizeZero,
 }
 
 impl From<HmacBlockError> for FormatError {
@@ -162,6 +240,7 @@ impl From<HmacBlockError> for FormatError {
         Self::MalformedHeader(match err {
             HmacBlockError::Truncated => "HMAC-block stream truncated",
             HmacBlockError::HmacMismatch { .. } => "HMAC-block tag mismatch",
+            HmacBlockError::BlockSizeZero => "HMAC-block writer given zero block size",
         })
     }
 }
@@ -315,6 +394,75 @@ mod tests {
         let decoded = read_hmac_block_stream(&stream, &base).unwrap();
         assert_eq!(decoded.len(), 1_000_000);
         assert_eq!(decoded[0], 0xCD);
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn writer_matches_test_encoder_for_single_block() {
+        let base = fixed_base();
+        let payload = b"hello-world";
+        let expected = encode(&[payload], &base);
+        let got = write_hmac_block_stream(payload, &base, 1024).unwrap();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn writer_chunks_large_payload() {
+        let base = fixed_base();
+        let payload: Vec<u8> = (0..5_000u32).map(|i| (i & 0xFF) as u8).collect();
+        // 1024-byte chunks → 5 blocks.
+        let bytes = write_hmac_block_stream(&payload, &base, 1024).unwrap();
+        let decoded = read_hmac_block_stream(&bytes, &base).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn writer_round_trips_empty_payload() {
+        let base = fixed_base();
+        let bytes = write_hmac_block_stream(&[], &base, 1024).unwrap();
+        // Only the end marker: 32-byte tag + 4-byte size = 36 bytes.
+        assert_eq!(bytes.len(), 36);
+        let decoded = read_hmac_block_stream(&bytes, &base).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn writer_round_trips_payload_exactly_one_block() {
+        let base = fixed_base();
+        let payload = vec![0x99u8; 1024];
+        let bytes = write_hmac_block_stream(&payload, &base, 1024).unwrap();
+        let decoded = read_hmac_block_stream(&bytes, &base).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn writer_round_trips_default_block_size() {
+        let base = fixed_base();
+        // ~2.5 MiB so we get 3 chunks at 1 MiB each.
+        let payload = vec![0x77u8; 2 * 1024 * 1024 + 1024];
+        let bytes = write_hmac_block_stream(&payload, &base, DEFAULT_BLOCK_SIZE).unwrap();
+        let decoded = read_hmac_block_stream(&bytes, &base).unwrap();
+        assert_eq!(decoded.len(), payload.len());
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn writer_rejects_zero_block_size() {
+        let base = fixed_base();
+        let err = write_hmac_block_stream(b"any", &base, 0).unwrap_err();
+        assert!(matches!(err, HmacBlockError::BlockSizeZero));
+    }
+
+    #[test]
+    fn writer_output_is_deterministic() {
+        let base = fixed_base();
+        let payload = b"same input, same output";
+        let a = write_hmac_block_stream(payload, &base, 8).unwrap();
+        let b = write_hmac_block_stream(payload, &base, 8).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]
