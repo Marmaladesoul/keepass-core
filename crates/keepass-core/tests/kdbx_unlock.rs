@@ -82,6 +82,16 @@ fn check_entry_against_sidecar(actual: &Entry, expected: &Value) -> Result<(), S
             }
         }
     }
+    if let Some(Value::Number(n)) = expected.get("history_count") {
+        if let Some(expected_count) = n.as_u64() {
+            let got_count = actual.history.len() as u64;
+            if got_count != expected_count {
+                return Err(format!(
+                    "history_count {got_count} ≠ expected {expected_count}"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 

@@ -7,7 +7,6 @@
 //!
 //! Deferred to follow-up PRs:
 //!
-//! - Entry history (`<History>`)
 //! - Deleted objects (`<DeletedObjects>`)
 //! - `<Meta>` fields beyond the basic name/description/generator set
 //!   (memory protection flags, recycle-bin config, custom icons,
@@ -249,6 +248,7 @@ fn read_entry<R: std::io::BufRead>(
         notes: String::new(),
         custom_fields: Vec::new(),
         tags: Vec::new(),
+        history: Vec::new(),
         times: Timestamps::default(),
     };
 
@@ -284,11 +284,10 @@ fn read_entry<R: std::io::BufRead>(
                             // KeePass stores previous snapshots of an entry
                             // as <Entry> children inside <History>. Their
                             // protected values share the same document-
-                            // continuous keystream, so we MUST recurse into
+                            // continuous keystream, so we recurse into
                             // them to keep the inner-stream cipher in sync
-                            // for every following entry — even though we
-                            // currently discard the snapshot data.
-                            read_history_entries(reader, buf, cipher)?;
+                            // for every following entry.
+                            entry.history = read_history_entries(reader, buf, cipher)?;
                             continue;
                         }
                         _ => {
@@ -318,15 +317,22 @@ fn read_entry<R: std::io::BufRead>(
     }
 }
 
-/// Consume a `<History>` block, reading each child `<Entry>` through the
-/// full entry parser so the inner-stream cipher keystream advances for
-/// every protected value inside the snapshot. The parsed snapshots are
-/// discarded — history storage in the model is a future slice.
+/// Consume a `<History>` block, reading each child `<Entry>` through
+/// the full entry parser so the inner-stream cipher keystream advances
+/// for every protected value inside the snapshot. Returns the snapshots
+/// in source order (typically oldest → newest).
+///
+/// KeePass does not nest history (a history snapshot does not itself
+/// have a `<History>` child in any writer we've observed), but the
+/// decoder does not enforce this — if a snapshot does carry its own
+/// `<History>`, that nested history lands on the snapshot's `history`
+/// field like any other.
 fn read_history_entries<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
     cipher: &mut InnerStreamCipher,
-) -> Result<(), XmlError> {
+) -> Result<Vec<Entry>, XmlError> {
+    let mut snapshots = Vec::new();
     let mut depth: i32 = 0;
     loop {
         match reader.read_event_into(buf) {
@@ -334,14 +340,14 @@ fn read_history_entries<R: std::io::BufRead>(
             Ok(Event::Start(e)) => {
                 let name = tag_name(&e)?;
                 if depth == 0 && name == "Entry" {
-                    let _snapshot = read_entry(reader, buf, cipher)?;
+                    snapshots.push(read_entry(reader, buf, cipher)?);
                     continue;
                 }
                 depth += 1;
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
-                    return Ok(());
+                    return Ok(snapshots);
                 }
                 depth -= 1;
             }
@@ -1507,5 +1513,123 @@ mod tests {
         let vault = decode_vault(tags_fixture("").as_bytes()).unwrap();
         let e = vault.iter_entries().next().unwrap();
         assert!(e.tags.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // <History>
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn history_snapshots_are_collected_in_order() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>Current</Value></String>
+        <History>
+          <Entry>
+            <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+            <String><Key>Title</Key><Value>Oldest</Value></String>
+          </Entry>
+          <Entry>
+            <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+            <String><Key>Title</Key><Value>Middle</Value></String>
+          </Entry>
+          <Entry>
+            <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+            <String><Key>Title</Key><Value>Newest</Value></String>
+          </Entry>
+        </History>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.title, "Current");
+        let hist_titles: Vec<_> = e.history.iter().map(|h| h.title.clone()).collect();
+        assert_eq!(hist_titles, ["Oldest", "Middle", "Newest"]);
+    }
+
+    #[test]
+    fn empty_history_yields_empty_vec() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <History/>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(e.history.is_empty());
+    }
+
+    #[test]
+    fn history_keeps_inner_stream_cipher_in_sync() {
+        // Two protected values: one in a history snapshot, one on the
+        // current entry that follows. If the decoder skipped the
+        // snapshot's <Value>, the keystream would desynchronise and the
+        // current entry's password would decrypt to garbage.
+        use crate::crypto::InnerStreamCipher;
+        use crate::format::InnerStreamAlgorithm;
+
+        // Derive a known 64-byte keystream we can XOR against.
+        let key = [0x33u8; 32];
+        let mut stream = [0u8; 64];
+        let mut ks = InnerStreamCipher::new(InnerStreamAlgorithm::Salsa20, &key).unwrap();
+        ks.process(&mut stream);
+
+        let pw_hist = b"history-pw";
+        let pw_current = b"current-pw";
+        let (head, rest) = stream.split_at_mut(pw_hist.len());
+        let hist_cipher = BASE64.encode(xor(pw_hist, head));
+        let (mid, _) = rest.split_at_mut(pw_current.len());
+        let cur_cipher = BASE64.encode(xor(pw_current, mid));
+
+        let xml = format!(
+            r#"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <History>
+          <Entry>
+            <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+            <String><Key>Title</Key><Value>T-old</Value></String>
+            <String><Key>Password</Key><Value Protected="True">{hist_cipher}</Value></String>
+          </Entry>
+        </History>
+        <String><Key>Password</Key><Value Protected="True">{cur_cipher}</Value></String>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#
+        );
+        let mut cipher = InnerStreamCipher::new(InnerStreamAlgorithm::Salsa20, &key).unwrap();
+        let vault = decode_vault_with_cipher(xml.as_bytes(), &mut cipher).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.password, "current-pw");
+        assert_eq!(e.history.len(), 1);
+        assert_eq!(e.history[0].password, "history-pw");
+    }
+
+    fn xor(plain: &[u8], keystream: &[u8]) -> Vec<u8> {
+        plain.iter().zip(keystream).map(|(p, k)| p ^ k).collect()
     }
 }
