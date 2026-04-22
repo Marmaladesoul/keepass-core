@@ -159,6 +159,14 @@ fn unlock_one(path: &Path) -> Result<(), String> {
         }
     }
 
+    // Recycle bin flag.
+    if let Some(expected) = sidecar.get("recycle_bin_present").and_then(Value::as_bool) {
+        let got = vault.meta.recycle_bin_enabled && vault.meta.recycle_bin_uuid.is_some();
+        if got != expected {
+            return Err(format!("recycle_bin_present {got} ≠ expected {expected}"));
+        }
+    }
+
     // Per-entry assertions when the sidecar lists entries.
     if let Some(entries) = sidecar.get("entries").and_then(Value::as_array) {
         // Index actual entries by title for order-independent matching.
