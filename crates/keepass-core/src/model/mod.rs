@@ -288,6 +288,54 @@ pub struct Meta {
     /// `<RecycleBinChanged>` — last time the recycle-bin
     /// configuration was edited.
     pub recycle_bin_changed: Option<chrono::DateTime<Utc>>,
+    /// `<MemoryProtection>` — which canonical entry fields the writer
+    /// marks as in-memory-protected in the host KeePass client.
+    /// Semantic hint only; entry-level `Protected` XML attributes are
+    /// what actually matter on disk.
+    pub memory_protection: MemoryProtection,
+}
+
+/// `<MemoryProtection>` flags — whether a given canonical entry
+/// field should be kept in protected memory by the host KeePass
+/// client (masked on screen, stored in a SecureString, etc.).
+///
+/// These are UI/memory-hygiene hints, **not** an on-disk encryption
+/// signal. The actual "protect this value's bytes with the
+/// inner-stream cipher" signal is the per-value `Protected="True"`
+/// XML attribute on individual `<Value>` elements.
+///
+/// Defaults reflect the KeePass 2.x convention: only the Password
+/// field is protected by default. Missing `<MemoryProtection>`
+/// blocks in the XML round-trip to this default.
+// The five booleans are dictated by the KeePass spec (one per canonical
+// entry field), so collapsing into a bitflags or enum-set would just add
+// indirection without meaningful benefit.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemoryProtection {
+    /// `<ProtectTitle>` — default `false`.
+    pub protect_title: bool,
+    /// `<ProtectUserName>` — default `false`.
+    pub protect_username: bool,
+    /// `<ProtectPassword>` — default `true`.
+    pub protect_password: bool,
+    /// `<ProtectURL>` — default `false`.
+    pub protect_url: bool,
+    /// `<ProtectNotes>` — default `false`.
+    pub protect_notes: bool,
+}
+
+impl Default for MemoryProtection {
+    fn default() -> Self {
+        Self {
+            protect_title: false,
+            protect_username: false,
+            protect_password: true,
+            protect_url: false,
+            protect_notes: false,
+        }
+    }
 }
 
 impl Vault {
