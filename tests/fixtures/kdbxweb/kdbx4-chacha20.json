@@ -1,0 +1,55 @@
+{
+  "database_name": "kdbxweb ChaCha20 Fixture",
+  "description": "KDBX4 vault written by kdbxweb with ChaCha20 as the outer cipher (default is AES-256-CBC; overridden via db.header.dataCipherUuid). Independently-produced fixture for the ChaCha20 save/unlock round-trip.",
+  "entries": [
+    {
+      "title": "Acme Banking",
+      "username": "charlie@example.net",
+      "url": "https://bank.acme.example",
+      "tags": [
+        "banking",
+        "personal"
+      ]
+    },
+    {
+      "title": "Contoso Mail",
+      "username": "alice@example.com",
+      "url": "https://mail.contoso.example",
+      "tags": [
+        "email",
+        "work"
+      ]
+    },
+    {
+      "title": "Fabrikam VPN",
+      "username": "bob@example.org",
+      "url": "https://vpn.fabrikam.example",
+      "tags": [
+        "vpn",
+        "work"
+      ]
+    },
+    {
+      "title": "Tailspin Toys",
+      "username": "dave@example.com",
+      "url": "https://toys.tailspin.example",
+      "tags": [
+        "personal"
+      ]
+    }
+  ],
+  "entry_count": 4,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/.node/gen-kdbxweb.js",
+  "generator": "KdbxWeb",
+  "group_count": 4,
+  "group_paths": [
+    "/Personal",
+    "/Recycle Bin",
+    "/Work"
+  ],
+  "key_file": null,
+  "master_password": "test-keeweb-203",
+  "outer_cipher": "ChaCha20",
+  "source": "kdbxweb (node)"
+}
