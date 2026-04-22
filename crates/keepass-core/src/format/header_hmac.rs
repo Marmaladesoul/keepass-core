@@ -46,6 +46,51 @@ type HmacSha256 = Hmac<Sha256>;
 #[allow(dead_code)]
 const _: u64 = hmac_block_stream::HEADER_HMAC_BLOCK_INDEX;
 
+/// Compute the SHA-256 header hash — the value that
+/// [`verify_header_hash`] later checks against.
+///
+/// This is a plain, unkeyed SHA-256 of the header bytes. It detects
+/// accidental corruption but not deliberate tampering — the header
+/// HMAC (see [`compute_header_hmac`]) is what authenticates against
+/// the master key.
+#[must_use]
+pub fn compute_header_hash(header_bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(header_bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// Compute the KDBX4 header HMAC-SHA-256 tag — the value that
+/// [`verify_header_hmac`] later checks against.
+///
+/// Computed as:
+///
+/// ```text
+///   key = per_block_hmac_key(hmac_base, HEADER_HMAC_BLOCK_INDEX)
+///   tag = HMAC-SHA-256(key, header_bytes)
+/// ```
+///
+/// The per-block key uses the sentinel index `u64::MAX` as documented
+/// on [`HEADER_HMAC_BLOCK_INDEX`]; payload-block HMACs use `0, 1, 2, …`.
+///
+/// # Panics
+///
+/// Does not panic under any input. The internal
+/// `HmacSha256::new_from_slice` call receives a 64-byte key derived
+/// from SHA-512, always a valid HMAC key length.
+#[must_use]
+pub fn compute_header_hmac(header_bytes: &[u8], hmac_base: &HmacBaseKey) -> [u8; 32] {
+    let key = per_block_hmac_key(hmac_base, HEADER_HMAC_BLOCK_INDEX);
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+    mac.update(header_bytes);
+    let digest = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 /// Verify the SHA-256 header hash.
 ///
 /// The hash lives immediately after the end-of-header record in the
@@ -261,5 +306,48 @@ mod tests {
         let key = per_block_hmac_key(&base, HEADER_HMAC_BLOCK_INDEX);
         let tag = hmac_tag(&key, &[]);
         assert!(verify_header_hmac(&[], &tag, &base).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_* round-trip with verify_*
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compute_header_hash_matches_verify() {
+        let header = b"this is a realistic-ish KDBX4 header";
+        let hash = compute_header_hash(header);
+        assert!(verify_header_hash(header, &hash).is_ok());
+    }
+
+    #[test]
+    fn compute_header_hash_equals_sha256() {
+        let header = b"input";
+        assert_eq!(compute_header_hash(header), sha256(header));
+    }
+
+    #[test]
+    fn compute_header_hmac_matches_verify() {
+        let base = fixed_base();
+        let header = b"header bytes to be signed";
+        let tag = compute_header_hmac(header, &base);
+        assert!(verify_header_hmac(header, &tag, &base).is_ok());
+    }
+
+    #[test]
+    fn compute_header_hmac_is_deterministic_for_same_inputs() {
+        let base = fixed_base();
+        let header = b"same inputs must yield the same tag";
+        assert_eq!(
+            compute_header_hmac(header, &base),
+            compute_header_hmac(header, &base),
+        );
+    }
+
+    #[test]
+    fn compute_header_hmac_differs_for_different_bases() {
+        let header = b"header";
+        let t1 = compute_header_hmac(header, &HmacBaseKey::from_raw_bytes([0x11; 64]));
+        let t2 = compute_header_hmac(header, &HmacBaseKey::from_raw_bytes([0x22; 64]));
+        assert_ne!(t1, t2);
     }
 }
