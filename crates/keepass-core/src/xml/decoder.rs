@@ -7,7 +7,6 @@
 //!
 //! Deferred to follow-up PRs:
 //!
-//! - Timestamps (`<Times>` blocks)
 //! - Entry history (`<History>`)
 //! - Deleted objects (`<DeletedObjects>`)
 //! - `<Meta>` fields beyond `<Generator>` (database name, memory
@@ -35,13 +34,19 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use chrono::{DateTime, TimeZone as _, Utc};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use uuid::Uuid;
 
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
-use crate::model::{CustomField, Entry, EntryId, Group, GroupId, Vault};
+use crate::model::{CustomField, Entry, EntryId, Group, GroupId, Timestamps, Vault};
+
+/// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
+/// `1970-01-01T00:00:00Z` (the Unix epoch). Used to convert KDBX4
+/// base64-encoded tick counts into `DateTime<Utc>`.
+const TICKS_FROM_YEAR_ONE_TO_UNIX_EPOCH: i64 = 621_355_968_000_000_000;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -177,6 +182,7 @@ fn read_group<R: std::io::BufRead>(
         notes: String::new(),
         groups: Vec::new(),
         entries: Vec::new(),
+        times: Timestamps::default(),
     };
 
     // Depth 0 = directly inside <Group>; we only act on depth-0 tags.
@@ -213,6 +219,10 @@ fn read_group<R: std::io::BufRead>(
                         }
                         "Notes" => {
                             group.notes = read_text(reader, buf)?;
+                            continue;
+                        }
+                        "Times" => {
+                            group.times = read_times(reader, buf)?;
                             continue;
                         }
                         _ => {
@@ -257,6 +267,7 @@ fn read_entry<R: std::io::BufRead>(
         url: String::new(),
         notes: String::new(),
         custom_fields: Vec::new(),
+        times: Timestamps::default(),
     };
 
     let mut depth: i32 = 0;
@@ -278,9 +289,13 @@ fn read_entry<R: std::io::BufRead>(
                             assign_well_known_field(&mut entry, &key, value, protected);
                             continue;
                         }
+                        "Times" => {
+                            entry.times = read_times(reader, buf)?;
+                            continue;
+                        }
                         _ => {
                             // Unknown child of <Entry>: History, AutoType,
-                            // Times, Binary, etc. Skip for now.
+                            // Binary, etc. Skip for now.
                             depth += 1;
                         }
                     }
@@ -462,6 +477,141 @@ fn has_protected_attribute(e: &BytesStart<'_>) -> Result<bool, XmlError> {
         }
     }
     Ok(false)
+}
+
+/// Read a `<Times>` block into a [`Timestamps`]. Assumes the opening
+/// `<Times>` tag has just been consumed; reads up to and including the
+/// matching `</Times>`.
+///
+/// Unknown children are skipped silently — KeePass writers occasionally
+/// emit extensions we don't recognise.
+fn read_times<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Timestamps, XmlError> {
+    let mut times = Timestamps::default();
+    let mut depth: i32 = 0;
+
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 {
+                    let text = read_text(reader, buf)?;
+                    assign_times_field(&mut times, &name, &text)?;
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(times);
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <Times>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn assign_times_field(times: &mut Timestamps, field: &str, text: &str) -> Result<(), XmlError> {
+    match field {
+        "CreationTime" => times.creation_time = Some(parse_timestamp(text, "CreationTime")?),
+        "LastModificationTime" => {
+            times.last_modification_time = Some(parse_timestamp(text, "LastModificationTime")?);
+        }
+        "LastAccessTime" => {
+            times.last_access_time = Some(parse_timestamp(text, "LastAccessTime")?);
+        }
+        "LocationChanged" => {
+            times.location_changed = Some(parse_timestamp(text, "LocationChanged")?);
+        }
+        "ExpiryTime" => times.expiry_time = Some(parse_timestamp(text, "ExpiryTime")?),
+        "Expires" => times.expires = parse_bool(text, "Expires")?,
+        "UsageCount" => {
+            times.usage_count = text
+                .trim()
+                .parse::<u64>()
+                .map_err(|e| XmlError::InvalidValue {
+                    element: "UsageCount",
+                    detail: format!("not a non-negative integer: {e}"),
+                })?;
+        }
+        _ => { /* unknown <Times> child — ignore */ }
+    }
+    Ok(())
+}
+
+/// Parse a KeePass timestamp.
+///
+/// KDBX3 uses ISO-8601 (`2024-03-01T12:34:56Z`). KDBX4 uses a base64
+/// encoding of a little-endian `i64` tick count since
+/// `0001-01-01T00:00:00Z`, with 100-nanosecond resolution. We
+/// auto-detect: if the trimmed text contains `T` or `-`, treat it as
+/// ISO-8601; otherwise try base64.
+fn parse_timestamp(text: &str, element: &'static str) -> Result<DateTime<Utc>, XmlError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(XmlError::InvalidValue {
+            element,
+            detail: "empty timestamp".to_owned(),
+        });
+    }
+    if trimmed.contains(['T', '-']) {
+        return DateTime::parse_from_rfc3339(trimmed)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| XmlError::InvalidValue {
+                element,
+                detail: format!("not a valid ISO-8601 timestamp: {e}"),
+            });
+    }
+    let bytes = BASE64.decode(trimmed).map_err(|e| XmlError::InvalidValue {
+        element,
+        detail: format!("not valid base64: {e}"),
+    })?;
+    let arr: [u8; 8] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| XmlError::InvalidValue {
+            element,
+            detail: format!("expected 8 bytes of ticks, got {}", bytes.len()),
+        })?;
+    let ticks = i64::from_le_bytes(arr);
+    ticks_to_datetime(ticks).ok_or(XmlError::InvalidValue {
+        element,
+        detail: "tick count out of representable UTC range".to_owned(),
+    })
+}
+
+fn ticks_to_datetime(ticks: i64) -> Option<DateTime<Utc>> {
+    // ticks are 100-ns units since year-1 AD. Convert to Unix-epoch
+    // seconds + sub-second nanoseconds, then let chrono assemble the
+    // DateTime.
+    let from_unix = ticks.checked_sub(TICKS_FROM_YEAR_ONE_TO_UNIX_EPOCH)?;
+    let secs = from_unix.div_euclid(10_000_000);
+    let subsec_ticks = from_unix.rem_euclid(10_000_000);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let nanos = (subsec_ticks * 100) as u32; // 0..=999_999_900 fits in u32
+    match Utc.timestamp_opt(secs, nanos) {
+        chrono::LocalResult::Single(dt) => Some(dt),
+        _ => None,
+    }
+}
+
+fn parse_bool(text: &str, element: &'static str) -> Result<bool, XmlError> {
+    match text.trim() {
+        "True" | "true" => Ok(true),
+        "False" | "false" => Ok(false),
+        other => Err(XmlError::InvalidValue {
+            element,
+            detail: format!("expected True/False, got {other:?}"),
+        }),
+    }
 }
 
 /// Parse a KeePass UUID. KeePass always stores UUIDs as base64-encoded
@@ -900,5 +1050,163 @@ mod tests {
         let mut none = InnerStreamCipher::None;
         let b = decode_vault_with_cipher(xml, &mut none).unwrap();
         assert_eq!(a, b);
+    }
+
+    // -----------------------------------------------------------------
+    // <Times> block
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_kdbx3_iso8601_timestamps_on_entry() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <Times>
+          <CreationTime>2026-04-21T10:11:12Z</CreationTime>
+          <LastModificationTime>2026-04-22T13:14:15Z</LastModificationTime>
+          <LastAccessTime>2026-04-22T13:14:16Z</LastAccessTime>
+          <LocationChanged>2026-04-22T13:14:17Z</LocationChanged>
+          <ExpiryTime>2026-04-22T13:14:18Z</ExpiryTime>
+          <Expires>True</Expires>
+          <UsageCount>7</UsageCount>
+        </Times>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        let t = &e.times;
+        assert_eq!(
+            t.creation_time,
+            Some(Utc.with_ymd_and_hms(2026, 4, 21, 10, 11, 12).unwrap())
+        );
+        assert_eq!(
+            t.last_modification_time,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 13, 14, 15).unwrap())
+        );
+        assert_eq!(
+            t.last_access_time,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 13, 14, 16).unwrap())
+        );
+        assert_eq!(
+            t.location_changed,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 13, 14, 17).unwrap())
+        );
+        assert_eq!(
+            t.expiry_time,
+            Some(Utc.with_ymd_and_hms(2026, 4, 22, 13, 14, 18).unwrap())
+        );
+        assert!(t.expires);
+        assert_eq!(t.usage_count, 7);
+    }
+
+    #[test]
+    fn parses_kdbx4_base64_tick_timestamp_on_group() {
+        // Derive the ticks for a known UTC instant and round-trip it.
+        let expected = Utc.with_ymd_and_hms(2026, 4, 21, 10, 11, 12).unwrap();
+        let ticks = expected.timestamp() * 10_000_000 + TICKS_FROM_YEAR_ONE_TO_UNIX_EPOCH;
+        let b64 = BASE64.encode(ticks.to_le_bytes());
+        let xml = format!(
+            r"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Times>
+        <CreationTime>{b64}</CreationTime>
+      </Times>
+    </Group>
+  </Root>
+</KeePassFile>"
+        );
+        let vault = decode_vault(xml.as_bytes()).unwrap();
+        assert_eq!(vault.root.times.creation_time, Some(expected));
+    }
+
+    #[test]
+    fn missing_times_block_gives_default() {
+        let vault = decode_vault(sample_xml()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.times, Timestamps::default());
+        assert_eq!(vault.root.times, Timestamps::default());
+    }
+
+    #[test]
+    fn unknown_times_children_are_ignored() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Times>
+        <CreationTime>2026-01-01T00:00:00Z</CreationTime>
+        <FutureExtension>some value</FutureExtension>
+      </Times>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(
+            vault.root.times.creation_time,
+            Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_iso8601_timestamp() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Times>
+        <CreationTime>2026-bad-date</CreationTime>
+      </Times>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let err = decode_vault(xml).unwrap_err();
+        assert!(matches!(
+            err,
+            XmlError::InvalidValue {
+                element: "CreationTime",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_length_tick_timestamp() {
+        // Valid base64 that doesn't give 8 bytes.
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Times>
+        <CreationTime>aGVsbG8=</CreationTime>
+      </Times>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let err = decode_vault(xml).unwrap_err();
+        assert!(matches!(
+            err,
+            XmlError::InvalidValue {
+                element: "CreationTime",
+                ..
+            }
+        ));
     }
 }
