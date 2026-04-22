@@ -82,10 +82,7 @@ pub fn read_hashed_block_stream(input: &[u8]) -> Result<Vec<u8>, HashedBlockErro
         // SHA-256 the data and compare in constant time.
         let computed = Sha256::digest(data);
         if computed.as_slice().ct_eq(declared_hash).unwrap_u8() == 0 {
-            return Err(HashedBlockError::HashMismatch {
-                block_index,
-                size,
-            });
+            return Err(HashedBlockError::HashMismatch { block_index, size });
         }
 
         output.extend_from_slice(data);
@@ -261,12 +258,23 @@ mod tests {
         // More precisely: first block header is 40 bytes, then 1 byte of data.
         // Second block's index starts at offset 41.
         let pos = 4 + 32 + 4 + 1; // = 41
-        assert_eq!(u32::from_le_bytes([stream[pos], stream[pos + 1], stream[pos + 2], stream[pos + 3]]), 1);
+        assert_eq!(
+            u32::from_le_bytes([
+                stream[pos],
+                stream[pos + 1],
+                stream[pos + 2],
+                stream[pos + 3]
+            ]),
+            1
+        );
         stream[pos] = 42;
         let err = read_hashed_block_stream(&stream).unwrap_err();
         assert!(matches!(
             err,
-            HashedBlockError::BlockIndexOutOfOrder { expected: 1, got: 42 }
+            HashedBlockError::BlockIndexOutOfOrder {
+                expected: 1,
+                got: 42
+            }
         ));
     }
 
@@ -276,7 +284,10 @@ mod tests {
         // The data lives at offset 40 (after the first header).
         stream[40] ^= 0x01;
         let err = read_hashed_block_stream(&stream).unwrap_err();
-        assert!(matches!(err, HashedBlockError::HashMismatch { block_index: 0, .. }));
+        assert!(matches!(
+            err,
+            HashedBlockError::HashMismatch { block_index: 0, .. }
+        ));
     }
 
     #[test]
@@ -285,7 +296,10 @@ mod tests {
         // The hash lives at offset 4 (after the index).
         stream[4] ^= 0x01;
         let err = read_hashed_block_stream(&stream).unwrap_err();
-        assert!(matches!(err, HashedBlockError::HashMismatch { block_index: 0, .. }));
+        assert!(matches!(
+            err,
+            HashedBlockError::HashMismatch { block_index: 0, .. }
+        ));
     }
 
     #[test]
