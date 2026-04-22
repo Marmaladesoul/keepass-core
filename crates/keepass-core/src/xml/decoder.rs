@@ -42,7 +42,8 @@ use uuid::Uuid;
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
 use crate::model::{
-    Attachment, Binary, CustomField, Entry, EntryId, Group, GroupId, Meta, Timestamps, Vault,
+    Attachment, Binary, CustomField, Entry, EntryId, Group, GroupId, MemoryProtection, Meta,
+    Timestamps, Vault,
 };
 
 /// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
@@ -647,6 +648,10 @@ fn read_meta<R: std::io::BufRead>(
                         read_binaries_pool(reader, buf, binaries)?;
                         continue;
                     }
+                    if name == "MemoryProtection" {
+                        meta.memory_protection = read_memory_protection(reader, buf)?;
+                        continue;
+                    }
                     let text = read_text(reader, buf)?;
                     assign_meta_field(&mut meta, &name, text)?;
                     continue;
@@ -661,6 +666,55 @@ fn read_meta<R: std::io::BufRead>(
             }
             Ok(Event::Eof) => {
                 return Err(XmlError::Malformed("EOF inside <Meta>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Read a `<MemoryProtection>` block into a [`MemoryProtection`].
+/// Unknown children are silently ignored; known flags that are absent
+/// keep their default values (see [`MemoryProtection::default`]).
+fn read_memory_protection<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<MemoryProtection, XmlError> {
+    let mut mp = MemoryProtection::default();
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 {
+                    let text = read_text(reader, buf)?;
+                    match name.as_str() {
+                        "ProtectTitle" => mp.protect_title = parse_bool(&text, "ProtectTitle")?,
+                        "ProtectUserName" => {
+                            mp.protect_username = parse_bool(&text, "ProtectUserName")?;
+                        }
+                        "ProtectPassword" => {
+                            mp.protect_password = parse_bool(&text, "ProtectPassword")?;
+                        }
+                        "ProtectURL" => mp.protect_url = parse_bool(&text, "ProtectURL")?,
+                        "ProtectNotes" => mp.protect_notes = parse_bool(&text, "ProtectNotes")?,
+                        _ => { /* unknown flag — ignore */ }
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(mp);
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed(
+                    "EOF inside <MemoryProtection>".to_owned(),
+                ));
             }
             _ => {}
         }
@@ -1716,6 +1770,76 @@ mod tests {
             vault.meta.recycle_bin_changed,
             Some(Utc.with_ymd_and_hms(2026, 4, 22, 11, 22, 33).unwrap())
         );
+    }
+
+    #[test]
+    fn parses_memory_protection_flags() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <MemoryProtection>
+      <ProtectTitle>True</ProtectTitle>
+      <ProtectUserName>False</ProtectUserName>
+      <ProtectPassword>True</ProtectPassword>
+      <ProtectURL>True</ProtectURL>
+      <ProtectNotes>True</ProtectNotes>
+    </MemoryProtection>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let mp = vault.meta.memory_protection;
+        assert!(mp.protect_title);
+        assert!(!mp.protect_username);
+        assert!(mp.protect_password);
+        assert!(mp.protect_url);
+        assert!(mp.protect_notes);
+    }
+
+    #[test]
+    fn missing_memory_protection_keeps_keepass_defaults() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        let mp = vault.meta.memory_protection;
+        assert!(!mp.protect_title);
+        assert!(!mp.protect_username);
+        assert!(mp.protect_password); // KeePass default
+        assert!(!mp.protect_url);
+        assert!(!mp.protect_notes);
+    }
+
+    #[test]
+    fn unknown_memory_protection_children_are_ignored() {
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <MemoryProtection>
+      <ProtectPassword>False</ProtectPassword>
+      <FutureExtension>anything</FutureExtension>
+    </MemoryProtection>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert!(!vault.meta.memory_protection.protect_password);
     }
 
     #[test]
