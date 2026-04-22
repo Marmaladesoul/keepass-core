@@ -32,9 +32,9 @@ sha2   = "0.10"                     # SHA-256, SHA-512
 aes    = "0.8"                      # AES-256 block cipher (used ECB-style by AES-KDF)
 cbc    = { version = "0.1", features = ["block-padding"] }  # AES-256-CBC with PKCS7
 argon2 = "0.5"                      # Argon2d / Argon2id KDFs
+hmac   = "0.12"                     # HMAC-SHA-256 for KDBX4 block verification
 # chacha20    = "0.9"
 # salsa20     = "0.10"
-# hmac        = "0.12"
 # blake2      = "0.10"
 
 # Compression.
