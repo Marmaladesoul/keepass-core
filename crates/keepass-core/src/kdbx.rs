@@ -34,8 +34,8 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::crypto::{
-    CryptoError, InnerStreamCipher, aes_256_cbc_decrypt, decompress, derive_cipher_key,
-    derive_hmac_base_key, derive_transformed_key,
+    CryptoError, InnerStreamCipher, aes_256_cbc_decrypt, chacha20_decrypt, decompress,
+    derive_cipher_key, derive_hmac_base_key, derive_transformed_key,
 };
 use crate::error::Error;
 use crate::format::{
@@ -295,17 +295,12 @@ fn do_unlock(
 ) -> Result<Vault, Error> {
     let header = &header_state.header;
 
-    // We currently only support AES-256-CBC as the outer cipher. ChaCha20
-    // and Twofish-CBC are deliberately deferred — every fixture in the
-    // current corpus uses AES, and wiring the remaining two is a one-file
-    // addition once the test harness is in place.
-    match header.cipher_id.well_known() {
-        Some(KnownCipher::Aes256Cbc) => {}
-        Some(KnownCipher::ChaCha20) => {
-            return Err(Error::Format(FormatError::MalformedHeader(
-                "outer cipher ChaCha20 is not yet supported",
-            )));
-        }
+    // Twofish-CBC is deliberately deferred — no fixture in the current
+    // corpus uses it and the RustCrypto ecosystem's Twofish crate is less
+    // audited than AES / ChaCha20. AES-256-CBC and ChaCha20 cover every
+    // modern KDBX writer.
+    let outer_cipher = match header.cipher_id.well_known() {
+        Some(c @ (KnownCipher::Aes256Cbc | KnownCipher::ChaCha20)) => c,
         Some(KnownCipher::TwofishCbc) => {
             return Err(Error::Format(FormatError::MalformedHeader(
                 "outer cipher Twofish-CBC is not yet supported",
@@ -316,7 +311,7 @@ fn do_unlock(
                 "unrecognised outer cipher UUID",
             )));
         }
-    }
+    };
 
     // --- KDF → transformed key → cipher key -------------------------------
     let kdf_params = header
@@ -362,8 +357,15 @@ fn do_unlock(
     };
 
     // --- Outer-cipher decrypt ---------------------------------------------
-    let plaintext = aes_256_cbc_decrypt(&cipher_key, &header.encryption_iv, &ciphertext)
-        .map_err(|_| CryptoError::Decrypt)?;
+    let plaintext = match outer_cipher {
+        KnownCipher::Aes256Cbc => {
+            aes_256_cbc_decrypt(&cipher_key, &header.encryption_iv, &ciphertext)
+                .map_err(|_| CryptoError::Decrypt)?
+        }
+        KnownCipher::ChaCha20 => chacha20_decrypt(&cipher_key, &header.encryption_iv, &ciphertext)
+            .map_err(|_| CryptoError::Decrypt)?,
+        KnownCipher::TwofishCbc => unreachable!("rejected above"),
+    };
 
     // --- Version-specific plaintext framing --------------------------------
     let (xml_bytes, inner_stream_algorithm, inner_stream_key): (Vec<u8>, _, Vec<u8>) =
