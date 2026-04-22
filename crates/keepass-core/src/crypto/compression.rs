@@ -183,7 +183,9 @@ mod tests {
     #[test]
     fn round_trips_gzip_large() {
         // 1 MiB of repeating 0..255 pattern — gzip will compress heavily.
-        let original: Vec<u8> = (0..(1024 * 1024)).map(|i| u8::try_from(i & 0xFF).unwrap()).collect();
+        let original: Vec<u8> = (0..(1024 * 1024))
+            .map(|i| u8::try_from(i & 0xFF).unwrap())
+            .collect();
         let compressed = gzip(&original);
         assert!(
             compressed.len() < original.len(),
