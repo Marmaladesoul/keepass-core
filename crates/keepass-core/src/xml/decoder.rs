@@ -182,6 +182,10 @@ fn read_group<R: std::io::BufRead>(
         notes: String::new(),
         groups: Vec::new(),
         entries: Vec::new(),
+        is_expanded: true,
+        default_auto_type_sequence: String::new(),
+        enable_auto_type: None,
+        enable_searching: None,
         times: Timestamps::default(),
     };
 
@@ -223,6 +227,25 @@ fn read_group<R: std::io::BufRead>(
                         }
                         "Times" => {
                             group.times = read_times(reader, buf)?;
+                            continue;
+                        }
+                        "IsExpanded" => {
+                            let text = read_text(reader, buf)?;
+                            group.is_expanded = parse_bool(&text, "IsExpanded")?;
+                            continue;
+                        }
+                        "DefaultAutoTypeSequence" => {
+                            group.default_auto_type_sequence = read_text(reader, buf)?;
+                            continue;
+                        }
+                        "EnableAutoType" => {
+                            let text = read_text(reader, buf)?;
+                            group.enable_auto_type = parse_tristate(&text);
+                            continue;
+                        }
+                        "EnableSearching" => {
+                            let text = read_text(reader, buf)?;
+                            group.enable_searching = parse_tristate(&text);
                             continue;
                         }
                         _ => {
@@ -1100,6 +1123,22 @@ fn ticks_to_datetime(ticks: i64) -> Option<DateTime<Utc>> {
     let nanos = (subsec_ticks * 100) as u32; // 0..=999_999_900 fits in u32
     match Utc.timestamp_opt(secs, nanos) {
         chrono::LocalResult::Single(dt) => Some(dt),
+        _ => None,
+    }
+}
+
+/// Parse a KeePass tri-state boolean as written in `<EnableAutoType>` and
+/// `<EnableSearching>`:
+///
+/// - `"null"` (case-insensitive) → `None` (inherit from parent)
+/// - `"True"` / `"true"` → `Some(true)`
+/// - `"False"` / `"false"` → `Some(false)`
+/// - Anything else → `None` (treat as inherit; tri-state has no error
+///   channel by spec)
+fn parse_tristate(text: &str) -> Option<bool> {
+    match text.trim() {
+        "True" | "true" => Some(true),
+        "False" | "false" => Some(false),
         _ => None,
     }
 }
@@ -2374,5 +2413,70 @@ mod tests {
     fn missing_deleted_objects_block_is_empty() {
         let vault = decode_vault(sample_xml()).unwrap();
         assert!(vault.deleted_objects.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Group-level UI / auto-type / search fields
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_group_ui_and_auto_type_fields() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>Work</Name>
+      <IsExpanded>False</IsExpanded>
+      <DefaultAutoTypeSequence>{USERNAME}{TAB}{PASSWORD}{ENTER}</DefaultAutoTypeSequence>
+      <EnableAutoType>True</EnableAutoType>
+      <EnableSearching>False</EnableSearching>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert!(!vault.root.is_expanded);
+        assert_eq!(
+            vault.root.default_auto_type_sequence,
+            "{USERNAME}{TAB}{PASSWORD}{ENTER}"
+        );
+        assert_eq!(vault.root.enable_auto_type, Some(true));
+        assert_eq!(vault.root.enable_searching, Some(false));
+    }
+
+    #[test]
+    fn missing_group_ui_fields_use_defaults() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>Default</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert!(vault.root.is_expanded); // KeePass default: true
+        assert!(vault.root.default_auto_type_sequence.is_empty());
+        assert_eq!(vault.root.enable_auto_type, None);
+        assert_eq!(vault.root.enable_searching, None);
+    }
+
+    #[test]
+    fn tristate_null_inherits() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <EnableAutoType>null</EnableAutoType>
+      <EnableSearching>NULL</EnableSearching>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.root.enable_auto_type, None);
+        assert_eq!(vault.root.enable_searching, None);
     }
 }
