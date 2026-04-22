@@ -13,7 +13,9 @@
 //! [`quick-xml`]: https://docs.rs/quick-xml
 
 pub mod decoder;
+pub mod encoder;
 pub mod reader;
 
 pub use decoder::{decode_vault, decode_vault_with_cipher};
+pub use encoder::encode_vault;
 pub use reader::{XmlError, extract_generator, extract_text_at_path};
