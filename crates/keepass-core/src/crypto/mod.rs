@@ -10,10 +10,12 @@
 //! [`RustCrypto`]: https://github.com/RustCrypto
 
 pub mod cipher;
+pub mod compression;
 pub mod kdf;
 pub mod master_keys;
 
 pub use cipher::{CipherError, aes_256_cbc_decrypt};
+pub use compression::{CompressionError, decompress, decompress_with_limit};
 pub use kdf::{KdfError, derive_transformed_key};
 pub use master_keys::{derive_cipher_key, derive_hmac_base_key, per_block_hmac_key};
 

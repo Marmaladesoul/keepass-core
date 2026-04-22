@@ -38,7 +38,7 @@ hmac   = "0.12"                     # HMAC-SHA-256 for KDBX4 block verification
 # blake2      = "0.10"
 
 # Compression.
-# flate2 = "1"
+flate2 = "1"                        # gzip decompression (both KDBX3 and KDBX4 payloads)
 
 # Parsing.
 # quick-xml  = { version = "0.36", features = ["serialize"] }  # inner XML
