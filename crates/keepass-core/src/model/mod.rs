@@ -101,6 +101,11 @@ pub struct Entry {
     /// The values here follow the same "may be base64 ciphertext"
     /// caveat as [`Self::password`].
     pub custom_fields: Vec<CustomField>,
+    /// `<Tags>` — free-form labels. KeePass stores these as a single
+    /// delimited string; the decoder splits on `;` and `,` so that
+    /// writers from either convention are handled. Empty segments
+    /// are dropped.
+    pub tags: Vec<String>,
     /// `<Times>` block — creation, modification, expiry, etc. Absent
     /// blocks deserialise to [`Timestamps::default`].
     pub times: Timestamps,
@@ -252,6 +257,7 @@ mod tests {
             url: String::new(),
             notes: String::new(),
             custom_fields: Vec::new(),
+            tags: Vec::new(),
             times: Timestamps::default(),
         }
     }

@@ -248,6 +248,7 @@ fn read_entry<R: std::io::BufRead>(
         url: String::new(),
         notes: String::new(),
         custom_fields: Vec::new(),
+        tags: Vec::new(),
         times: Timestamps::default(),
     };
 
@@ -272,6 +273,11 @@ fn read_entry<R: std::io::BufRead>(
                         }
                         "Times" => {
                             entry.times = read_times(reader, buf)?;
+                            continue;
+                        }
+                        "Tags" => {
+                            let raw = read_text(reader, buf)?;
+                            entry.tags = parse_tags(&raw);
                             continue;
                         }
                         "History" => {
@@ -704,6 +710,21 @@ fn parse_bool(text: &str, element: &'static str) -> Result<bool, XmlError> {
             detail: format!("expected True/False, got {other:?}"),
         }),
     }
+}
+
+/// Split a raw `<Tags>` string into individual tag values.
+///
+/// KeePass writers are inconsistent: the reference KeePass 2.x source
+/// uses `;` as the canonical separator, but some clients (KeePassXC
+/// among them) emit `,`. We accept either interchangeably. Empty and
+/// whitespace-only segments are dropped; surrounding whitespace on each
+/// tag is trimmed.
+fn parse_tags(raw: &str) -> Vec<String> {
+    raw.split([';', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// Parse a KeePass UUID. KeePass always stores UUIDs as base64-encoded
@@ -1409,5 +1430,82 @@ mod tests {
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
         assert_eq!(vault.meta, Meta::default());
+    }
+
+    // -----------------------------------------------------------------
+    // <Tags> parsing
+    // -----------------------------------------------------------------
+
+    fn tags_fixture(tags_xml: &str) -> String {
+        format!(
+            r"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        {tags_xml}
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"
+        )
+    }
+
+    #[test]
+    fn parses_semicolon_separated_tags() {
+        let vault =
+            decode_vault(tags_fixture("<Tags>work;vpn;personal</Tags>").as_bytes()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.tags, vec!["work", "vpn", "personal"]);
+    }
+
+    #[test]
+    fn parses_comma_separated_tags() {
+        let vault =
+            decode_vault(tags_fixture("<Tags>work,vpn,personal</Tags>").as_bytes()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.tags, vec!["work", "vpn", "personal"]);
+    }
+
+    #[test]
+    fn parses_mixed_separator_tags() {
+        // Some clients emit a mix when migrating between tools.
+        let vault = decode_vault(tags_fixture("<Tags>a;b,c</Tags>").as_bytes()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.tags, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn trims_whitespace_around_tag_values() {
+        let vault =
+            decode_vault(tags_fixture("<Tags>  work ;  vpn  ; personal </Tags>").as_bytes())
+                .unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.tags, vec!["work", "vpn", "personal"]);
+    }
+
+    #[test]
+    fn drops_empty_tag_segments() {
+        let vault = decode_vault(tags_fixture("<Tags>;;work;;;vpn;</Tags>").as_bytes()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert_eq!(e.tags, vec!["work", "vpn"]);
+    }
+
+    #[test]
+    fn empty_tags_element_yields_empty_vec() {
+        let vault = decode_vault(tags_fixture("<Tags></Tags>").as_bytes()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(e.tags.is_empty());
+    }
+
+    #[test]
+    fn missing_tags_element_yields_empty_vec() {
+        let vault = decode_vault(tags_fixture("").as_bytes()).unwrap();
+        let e = vault.iter_entries().next().unwrap();
+        assert!(e.tags.is_empty());
     }
 }
