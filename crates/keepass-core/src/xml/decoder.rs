@@ -274,9 +274,22 @@ fn read_entry<R: std::io::BufRead>(
                             entry.times = read_times(reader, buf)?;
                             continue;
                         }
+                        "History" => {
+                            // KeePass stores previous snapshots of an entry
+                            // as <Entry> children inside <History>. Their
+                            // protected values share the same document-
+                            // continuous keystream, so we MUST recurse into
+                            // them to keep the inner-stream cipher in sync
+                            // for every following entry — even though we
+                            // currently discard the snapshot data.
+                            read_history_entries(reader, buf, cipher)?;
+                            continue;
+                        }
                         _ => {
-                            // Unknown child of <Entry>: History, AutoType,
-                            // Binary, etc. Skip for now.
+                            // Unknown child of <Entry>: AutoType, Binary,
+                            // CustomData, etc. None of these carry
+                            // protected values in practice, so skipping is
+                            // safe for keystream sync.
                             depth += 1;
                         }
                     }
@@ -292,6 +305,42 @@ fn read_entry<R: std::io::BufRead>(
             }
             Ok(Event::Eof) => {
                 return Err(XmlError::Malformed("EOF inside <Entry>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Consume a `<History>` block, reading each child `<Entry>` through the
+/// full entry parser so the inner-stream cipher keystream advances for
+/// every protected value inside the snapshot. The parsed snapshots are
+/// discarded — history storage in the model is a future slice.
+fn read_history_entries<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+    cipher: &mut InnerStreamCipher,
+) -> Result<(), XmlError> {
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 && name == "Entry" {
+                    let _snapshot = read_entry(reader, buf, cipher)?;
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(());
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <History>".to_owned()));
             }
             _ => {}
         }

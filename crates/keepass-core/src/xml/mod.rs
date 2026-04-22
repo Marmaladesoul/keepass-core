@@ -15,5 +15,5 @@
 pub mod decoder;
 pub mod reader;
 
-pub use decoder::decode_vault;
+pub use decoder::{decode_vault, decode_vault_with_cipher};
 pub use reader::{XmlError, extract_generator, extract_text_at_path};

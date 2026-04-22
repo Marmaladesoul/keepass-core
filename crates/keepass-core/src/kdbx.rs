@@ -23,15 +23,29 @@
 //!   yet been applied. The only legal operation is `unlock`.
 //! - [`Unlocked`] — the master key has been derived, block HMACs verified
 //!   (on KDBX4), payload decrypted, decompressed, and the inner XML parsed
-//!   into the [`crate::model::Vault`] tree. Read and write operations are
-//!   available. **Not yet implemented.**
+//!   into the [`crate::model::Vault`] tree. Read operations are available;
+//!   write-back lands in a follow-up.
 
 use std::fs;
 use std::marker::PhantomData;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
+use crate::crypto::{
+    CryptoError, InnerStreamCipher, aes_256_cbc_decrypt, decompress, derive_cipher_key,
+    derive_hmac_base_key, derive_transformed_key,
+};
 use crate::error::Error;
-use crate::format::{FileSignature, FormatError, OuterHeader, Version, read_header_fields};
+use crate::format::{
+    FileSignature, FormatError, InnerHeader, KnownCipher, OuterHeader, Version,
+    read_hashed_block_stream, read_header_fields, read_hmac_block_stream, verify_header_hash,
+    verify_header_hmac,
+};
+use crate::model::Vault;
+use crate::secret::CompositeKey;
+use crate::xml::decode_vault_with_cipher;
 
 // ---------------------------------------------------------------------------
 // State markers
@@ -56,12 +70,11 @@ pub struct HeaderRead {
     header_end: usize,
 }
 
-/// State marker: the vault has been fully decrypted and parsed.
-///
-/// Not yet populated — the unlock pipeline lands in a follow-up PR.
+/// State marker: the vault has been fully decrypted, parsed, and is ready
+/// for read-only access. Write-back support lands in a follow-up.
 #[derive(Debug)]
 pub struct Unlocked {
-    _private: PhantomData<()>,
+    vault: Vault,
 }
 
 // ---------------------------------------------------------------------------
@@ -73,8 +86,8 @@ pub struct Unlocked {
 ///
 /// Create a [`Kdbx<Sealed>`] from bytes via [`Kdbx::open_from_bytes`] or from
 /// a path via [`Kdbx::open`]. Transition to [`Kdbx<HeaderRead>`] by calling
-/// [`Kdbx::<Sealed>::read_header`]. The transition to [`Kdbx<Unlocked>`] is
-/// pending.
+/// [`Kdbx::<Sealed>::read_header`], and to [`Kdbx<Unlocked>`] by supplying
+/// a composite key to [`Kdbx::<HeaderRead>::unlock`].
 #[derive(Debug)]
 pub struct Kdbx<State> {
     /// The full file bytes. Held across state transitions so that later
@@ -204,6 +217,211 @@ impl Kdbx<HeaderRead> {
     pub fn header_bytes(&self) -> &[u8] {
         &self.bytes[..self.state.header_end]
     }
+
+    /// Apply the composite key to unlock the vault.
+    ///
+    /// Runs the full KDBX decryption pipeline:
+    ///
+    /// 1. Derive the transformed key via the KDF (AES-KDF on KDBX3,
+    ///    Argon2d/Argon2id on KDBX4).
+    /// 2. Derive the cipher key (and, on KDBX4, the HMAC base key).
+    /// 3. KDBX4 only: verify the header SHA-256 and HMAC-SHA-256 tags
+    ///    against the caller's key.
+    /// 4. Assemble the ciphertext — from the HMAC-block stream (KDBX4)
+    ///    or directly from the raw payload (KDBX3).
+    /// 5. Decrypt with the outer cipher (currently AES-256-CBC only;
+    ///    ChaCha20 and Twofish-CBC land in follow-up PRs).
+    /// 6. KDBX3: verify the 32-byte stream-start-bytes sentinel and
+    ///    reassemble the hashed-block stream.
+    /// 7. Decompress if the header declared gzip.
+    /// 8. KDBX4: parse the inner header to pick up the inner-stream
+    ///    cipher parameters.
+    ///    KDBX3: read the inner-stream parameters from the outer header.
+    /// 9. Decode the inner XML into a typed [`Vault`], decrypting
+    ///    protected values against the inner-stream cipher in document
+    ///    order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Crypto`] on any key-stage failure (wrong
+    /// password, tampered payload, HMAC mismatch, bad padding, inner-
+    /// stream cipher construction failure). Returns [`Error::Format`]
+    /// on structural failures (malformed block stream, malformed inner
+    /// header, unsupported cipher). Returns [`Error::Xml`] on
+    /// malformed inner XML.
+    ///
+    /// The crypto vs format split follows the error-collapse discipline
+    /// from §4.8.7 of the design doc: we deliberately do **not**
+    /// distinguish "wrong key" from "corrupt ciphertext" — both surface
+    /// as a generic decryption failure, so an attacker cannot learn
+    /// anything about the key from the error variant alone.
+    pub fn unlock(self, composite: &CompositeKey) -> Result<Kdbx<Unlocked>, Error> {
+        let vault = do_unlock(&self.bytes, &self.state, composite)?;
+        Ok(Kdbx {
+            bytes: self.bytes,
+            signature: self.signature,
+            version: self.version,
+            state: Unlocked { vault },
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unlocked: vault access
+// ---------------------------------------------------------------------------
+
+impl Kdbx<Unlocked> {
+    /// The decoded vault.
+    #[must_use]
+    pub fn vault(&self) -> &Vault {
+        &self.state.vault
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unlock pipeline — all the crypto wiring lives here, off the public impl.
+// ---------------------------------------------------------------------------
+
+// The pipeline is intentionally a single linear function: breaking it up by
+// version or stage tends to spread error-handling across helpers that each
+// know only a slice of the context, which makes error-collapse discipline
+// harder to audit than a single straight-line function with clearly labelled
+// sections.
+#[allow(clippy::too_many_lines)]
+fn do_unlock(
+    bytes: &[u8],
+    header_state: &HeaderRead,
+    composite: &CompositeKey,
+) -> Result<Vault, Error> {
+    let header = &header_state.header;
+
+    // We currently only support AES-256-CBC as the outer cipher. ChaCha20
+    // and Twofish-CBC are deliberately deferred — every fixture in the
+    // current corpus uses AES, and wiring the remaining two is a one-file
+    // addition once the test harness is in place.
+    match header.cipher_id.well_known() {
+        Some(KnownCipher::Aes256Cbc) => {}
+        Some(KnownCipher::ChaCha20) => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "outer cipher ChaCha20 is not yet supported",
+            )));
+        }
+        Some(KnownCipher::TwofishCbc) => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "outer cipher Twofish-CBC is not yet supported",
+            )));
+        }
+        None => {
+            return Err(Error::Format(FormatError::MalformedHeader(
+                "unrecognised outer cipher UUID",
+            )));
+        }
+    }
+
+    // --- KDF → transformed key → cipher key -------------------------------
+    let kdf_params = header
+        .decode_kdf_params()
+        .map_err(|_| FormatError::MalformedHeader("malformed KDF parameters"))?;
+    let transformed =
+        derive_transformed_key(composite, &kdf_params).map_err(|_| CryptoError::Kdf)?;
+    let cipher_key = derive_cipher_key(&header.master_seed, &transformed);
+
+    // --- Assemble ciphertext + verify integrity ---------------------------
+    let header_bytes = &bytes[..header_state.header_end];
+    let payload = &bytes[header_state.header_end..];
+
+    let ciphertext: Vec<u8> = match header.version {
+        Version::V4 => {
+            // Layout: [32-byte header SHA-256][32-byte header HMAC][HMAC blocks].
+            if payload.len() < 64 {
+                return Err(FormatError::Truncated {
+                    needed: 64,
+                    got: payload.len(),
+                }
+                .into());
+            }
+            let (header_hash, rest) = payload.split_at(32);
+            let (header_hmac, blocks) = rest.split_at(32);
+
+            let hmac_base = derive_hmac_base_key(&header.master_seed, &transformed);
+            verify_header_hash(
+                header_bytes,
+                header_hash.try_into().expect("split_at guarantees 32"),
+            )
+            .map_err(|_| CryptoError::Decrypt)?;
+            verify_header_hmac(
+                header_bytes,
+                header_hmac.try_into().expect("split_at guarantees 32"),
+                &hmac_base,
+            )
+            .map_err(|_| CryptoError::Decrypt)?;
+
+            read_hmac_block_stream(blocks, &hmac_base).map_err(FormatError::from)?
+        }
+        Version::V3 => payload.to_vec(),
+    };
+
+    // --- Outer-cipher decrypt ---------------------------------------------
+    let plaintext = aes_256_cbc_decrypt(&cipher_key, &header.encryption_iv, &ciphertext)
+        .map_err(|_| CryptoError::Decrypt)?;
+
+    // --- Version-specific plaintext framing --------------------------------
+    let (xml_bytes, inner_stream_algorithm, inner_stream_key): (Vec<u8>, _, Vec<u8>) =
+        match header.version {
+            Version::V3 => {
+                let sentinel =
+                    header
+                        .stream_start_bytes
+                        .as_ref()
+                        .ok_or(FormatError::MalformedHeader(
+                            "KDBX3 missing StreamStartBytes",
+                        ))?;
+                if plaintext.len() < 32 {
+                    return Err(CryptoError::Decrypt.into());
+                }
+                let (got_sentinel, rest) = plaintext.split_at(32);
+                // Constant-time compare avoids leaking the "password correct,
+                // but ciphertext after this point is garbled" partial oracle.
+                if got_sentinel.ct_eq(&sentinel.0).unwrap_u8() == 0 {
+                    return Err(CryptoError::Decrypt.into());
+                }
+                let framed = read_hashed_block_stream(rest).map_err(FormatError::from)?;
+                let decompressed = decompress(header.compression, &framed)
+                    .map_err(|_| FormatError::MalformedHeader("payload failed to decompress"))?;
+                let algo = header
+                    .inner_stream_algorithm
+                    .ok_or(FormatError::MalformedHeader(
+                        "KDBX3 missing InnerRandomStreamID",
+                    ))?;
+                let raw = &header
+                    .protected_stream_key
+                    .as_ref()
+                    .ok_or(FormatError::MalformedHeader(
+                        "KDBX3 missing ProtectedStreamKey",
+                    ))?
+                    .0;
+                // KDBX3 quirk: the inner-stream key on disk is hashed with
+                // SHA-256 before it becomes the Salsa20 key. KDBX4 skips
+                // this step (ChaCha20's SHA-512 derivation in
+                // InnerStreamCipher::new does the equivalent internally).
+                let hashed = Sha256::digest(raw);
+                (decompressed, algo, hashed.to_vec())
+            }
+            Version::V4 => {
+                let decompressed = decompress(header.compression, &plaintext)
+                    .map_err(|_| FormatError::MalformedHeader("payload failed to decompress"))?;
+                let inner = InnerHeader::parse(&decompressed)
+                    .map_err(|_| FormatError::MalformedHeader("malformed inner header"))?;
+                let xml = decompressed[inner.consumed_bytes..].to_vec();
+                (xml, inner.inner_stream_algorithm, inner.inner_stream_key)
+            }
+        };
+
+    // --- Inner-stream cipher + XML decode ---------------------------------
+    let mut cipher = InnerStreamCipher::new(inner_stream_algorithm, &inner_stream_key)
+        .map_err(|_| CryptoError::Decrypt)?;
+    let vault = decode_vault_with_cipher(&xml_bytes, &mut cipher)?;
+    Ok(vault)
 }
 
 // ---------------------------------------------------------------------------
