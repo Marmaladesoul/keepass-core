@@ -35,7 +35,8 @@ use subtle::ConstantTimeEq;
 
 use crate::crypto::{
     CryptoError, InnerStreamCipher, aes_256_cbc_decrypt, aes_256_cbc_encrypt, chacha20_decrypt,
-    compress, decompress, derive_cipher_key, derive_hmac_base_key, derive_transformed_key,
+    chacha20_encrypt, compress, decompress, derive_cipher_key, derive_hmac_base_key,
+    derive_transformed_key,
 };
 use crate::error::Error;
 use crate::format::{
@@ -562,14 +563,10 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Err
             "KDBX4 save_to_bytes requires inner-stream parameters from unlock",
         ))?;
 
-    // Only AES-256-CBC is wired up for writes at present.
-    match header.cipher_id.well_known() {
-        Some(KnownCipher::Aes256Cbc) => {}
-        Some(KnownCipher::ChaCha20) => {
-            return Err(Error::Format(FormatError::MalformedHeader(
-                "KDBX4 save_to_bytes does not yet support ChaCha20",
-            )));
-        }
+    // AES-256-CBC and ChaCha20 are wired up for writes; Twofish-CBC is
+    // still deferred, matching the decrypt side.
+    let outer_cipher = match header.cipher_id.well_known() {
+        Some(c @ (KnownCipher::Aes256Cbc | KnownCipher::ChaCha20)) => c,
         Some(KnownCipher::TwofishCbc) => {
             return Err(Error::Format(FormatError::MalformedHeader(
                 "KDBX4 save_to_bytes does not support Twofish-CBC",
@@ -580,7 +577,7 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Err
                 "KDBX4 save_to_bytes: unrecognised outer cipher",
             )));
         }
-    }
+    };
 
     // --- Inner-stream cipher + inner header binaries ---------------------
     let mut inner_cipher = InnerStreamCipher::new(inner_params.algorithm, &inner_params.key)
@@ -626,8 +623,15 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Err
     let hmac_base = derive_hmac_base_key(&header.master_seed, &state.transformed_key);
 
     // --- Outer-cipher encrypt --------------------------------------------
-    let ciphertext = aes_256_cbc_encrypt(&cipher_key, &header.encryption_iv, &plaintext)
-        .map_err(|_| CryptoError::Decrypt)?;
+    let ciphertext = match outer_cipher {
+        KnownCipher::Aes256Cbc => {
+            aes_256_cbc_encrypt(&cipher_key, &header.encryption_iv, &plaintext)
+                .map_err(|_| CryptoError::Decrypt)?
+        }
+        KnownCipher::ChaCha20 => chacha20_encrypt(&cipher_key, &header.encryption_iv, &plaintext)
+            .map_err(|_| CryptoError::Decrypt)?,
+        KnownCipher::TwofishCbc => unreachable!("rejected above"),
+    };
 
     // --- Build outer header bytes (signature + TLVs) ---------------------
     let mut header_bytes = Vec::with_capacity(256);
@@ -713,5 +717,94 @@ mod tests {
             err,
             Error::Format(crate::format::FormatError::Truncated { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // ChaCha20 save round-trip (synthetic)
+    //
+    // No fixture in the current corpus emits a ChaCha20 outer cipher, so the
+    // end-to-end save path for ChaCha20 cannot be exercised by the standard
+    // fixture round-trip test. Instead we: unlock an AES-256-CBC fixture,
+    // rewrite its outer header's cipher_id + encryption_iv to ChaCha20 shape,
+    // save_to_bytes, re-open with the same composite key, and assert the
+    // round-tripped vault equals the original. The test has crate-private
+    // access to the `Unlocked` state and so can mutate the retained outer
+    // header directly.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn chacha20_save_round_trips_on_synthetic_reconfiguration() {
+        use std::{fs, path::Path};
+
+        use crate::CompositeKey;
+        use crate::format::{CipherId, EncryptionIv};
+        use uuid::Uuid;
+
+        // Anchor the fixture path relative to this crate.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/kdbxweb/kdbx4-basic.kdbx");
+        assert!(fixture.exists(), "fixture missing: {fixture:?}");
+
+        // Sidecar password.
+        let sidecar_path = fixture.with_extension("json");
+        let sidecar_text = fs::read_to_string(&sidecar_path).unwrap();
+        // Minimal parse: find "master_password": "...".
+        let password = sidecar_text
+            .split("\"master_password\"")
+            .nth(1)
+            .and_then(|s| s.split('"').nth(1))
+            .unwrap()
+            .to_owned();
+        let composite = CompositeKey::from_password(password.as_bytes());
+
+        // Leg 1: unlock.
+        let bytes = fs::read(&fixture).unwrap();
+        let unlocked = Kdbx::<Sealed>::open_from_bytes(bytes)
+            .unwrap()
+            .read_header()
+            .unwrap()
+            .unlock(&composite)
+            .unwrap();
+        let vault_before = unlocked.vault().clone();
+
+        // Mutate cipher_id and encryption_iv to ChaCha20 shape. The IV is
+        // deterministic garbage for reproducibility; ChaCha20 accepts any
+        // 12-byte nonce.
+        let mut patched = unlocked;
+        patched.state.outer_header.cipher_id = CipherId(Uuid::from_bytes([
+            0xd6, 0x03, 0x8a, 0x2b, 0x8b, 0x6f, 0x4c, 0xb5, 0xa5, 0x24, 0x33, 0x9a, 0x31, 0xdb,
+            0xb5, 0x9a,
+        ]));
+        patched.state.outer_header.encryption_iv = EncryptionIv(vec![0x77u8; 12]);
+
+        // Save.
+        let saved = patched.save_to_bytes().expect("save with ChaCha20 cipher");
+
+        // Leg 2: re-open and unlock.
+        let reopened = Kdbx::<Sealed>::open_from_bytes(saved)
+            .unwrap()
+            .read_header()
+            .unwrap()
+            .unlock(&composite)
+            .unwrap();
+        let vault_after = reopened.vault();
+
+        // Compare the encoder-covered subset.
+        assert_eq!(vault_before.meta.generator, vault_after.meta.generator);
+        assert_eq!(
+            vault_before.meta.database_name,
+            vault_after.meta.database_name
+        );
+        assert_eq!(vault_before.total_entries(), vault_after.total_entries());
+        for (a, b) in vault_before.iter_entries().zip(vault_after.iter_entries()) {
+            assert_eq!(a.title, b.title);
+            assert_eq!(a.username, b.username);
+            assert_eq!(a.password, b.password);
+            assert_eq!(a.url, b.url);
+        }
     }
 }
