@@ -101,8 +101,8 @@ pub fn verify_header_hmac(
     hmac_base: &HmacBaseKey,
 ) -> Result<(), HeaderAuthError> {
     let key = per_block_hmac_key(hmac_base, HEADER_HMAC_BLOCK_INDEX);
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(&key)
-        .expect("HMAC-SHA-256 accepts any key length");
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(header_bytes);
     let computed = mac.finalize().into_bytes();
 
