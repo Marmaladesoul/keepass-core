@@ -399,6 +399,31 @@ pub struct Meta {
     /// `<MaintenanceHistoryDays>` — how long to keep entry snapshots
     /// before the client prunes them.
     pub maintenance_history_days: u32,
+    /// `<CustomIcons>` — pool of custom entry / group icons,
+    /// referenced by [`Entry::custom_icon_uuid`] (and the not-yet-
+    /// modelled group-level equivalent). Each icon carries its own
+    /// UUID plus the decoded image bytes.
+    pub custom_icons: Vec<CustomIcon>,
+}
+
+/// One icon in the vault's [`Meta::custom_icons`] pool.
+///
+/// KeePass stores custom icons as a base64-encoded image payload
+/// (typically PNG, but the format doesn't constrain — a consumer is
+/// free to hand the bytes to an image decoder and see what happens).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CustomIcon {
+    /// Identifier referenced by [`Entry::custom_icon_uuid`].
+    pub uuid: Uuid,
+    /// Decoded image bytes, typically PNG.
+    pub data: Vec<u8>,
+    /// `<Name>` — optional human-readable label. Empty for icons
+    /// that carry no name.
+    pub name: String,
+    /// `<LastModificationTime>` — when the icon was last edited.
+    /// Many KDBX3 writers omit this element.
+    pub last_modified: Option<DateTime<Utc>>,
 }
 
 impl Default for Meta {
@@ -426,6 +451,7 @@ impl Default for Meta {
             history_max_items: 10,
             history_max_size: 6 * 1024 * 1024,
             maintenance_history_days: 365,
+            custom_icons: Vec::new(),
         }
     }
 }
