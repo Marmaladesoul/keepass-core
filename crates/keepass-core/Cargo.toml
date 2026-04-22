@@ -41,8 +41,8 @@ salsa20  = "0.10"                   # inner-stream cipher for KDBX3 protected XM
 flate2 = "1"                        # gzip decompression (both KDBX3 and KDBX4 payloads)
 
 # Parsing.
-# quick-xml  = { version = "0.36", features = ["serialize"] }  # inner XML
-winnow = "0.6"                                                 # binary header TLVs
+quick-xml = "0.36"                  # streaming XML reader for KeePass inner document
+winnow    = "0.6"                   # binary header TLVs
 
 # Timestamps.
 # chrono = { version = "0.4", features = ["serde"] }
