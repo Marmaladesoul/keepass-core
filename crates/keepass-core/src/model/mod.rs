@@ -111,9 +111,32 @@ pub struct Entry {
     /// is itself a full [`Entry`]; its own `history` field is always
     /// empty (KeePass does not nest history).
     pub history: Vec<Entry>,
+    /// Binary attachments referenced from this entry. Each attachment
+    /// carries a user-visible filename and an index into
+    /// [`Vault::binaries`] where the bytes live. Resolving the
+    /// reference is a vault-level lookup — entries don't own their
+    /// payload bytes, because KeePass deduplicates identical payloads
+    /// across entries.
+    pub attachments: Vec<Attachment>,
     /// `<Times>` block — creation, modification, expiry, etc. Absent
     /// blocks deserialise to [`Timestamps::default`].
     pub times: Timestamps,
+}
+
+/// Reference from an [`Entry`] to a binary in [`Vault::binaries`].
+///
+/// On disk, KeePass writes this as
+/// `<Binary><Key>filename</Key><Value Ref="N"/></Binary>` inside the
+/// entry's `<String>` children list. The decoder splits it out into
+/// its own dedicated collection so that a caller can iterate an
+/// entry's attachments without walking its custom fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Attachment {
+    /// User-visible filename, from the `<Key>`.
+    pub name: String,
+    /// Index into [`Vault::binaries`].
+    pub ref_id: u32,
 }
 
 /// One custom string field on an [`Entry`].
@@ -198,6 +221,27 @@ pub struct Vault {
     pub root: Group,
     /// `<Meta>` block — database-level metadata.
     pub meta: Meta,
+    /// Binary payloads, indexed by the `Ref` attribute on
+    /// `<Binary Ref="…"/>` references inside entries. KeePass
+    /// deduplicates identical payloads across entries, so the same
+    /// entry in [`Vault::binaries`] may be referenced by multiple
+    /// attachments.
+    pub binaries: Vec<Binary>,
+}
+
+/// One binary payload — either an attachment or an embedded image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Binary {
+    /// The raw, fully-decoded payload bytes (decompressed on KDBX3 if
+    /// the `Compressed="True"` attribute was set, decrypted on KDBX4
+    /// if the inner-header flags byte had bit 0 set).
+    pub data: Vec<u8>,
+    /// `true` if this payload was stored encrypted under the
+    /// inner-stream cipher on disk — i.e. the `flags & 0x01` bit on
+    /// the KDBX4 inner-header binary record. Preserved for
+    /// round-trip write-back.
+    pub protected: bool,
 }
 
 /// Contents of the KeePass `<Meta>` element.
@@ -279,6 +323,7 @@ mod tests {
             custom_fields: Vec::new(),
             tags: Vec::new(),
             history: Vec::new(),
+            attachments: Vec::new(),
             times: Timestamps::default(),
         }
     }
