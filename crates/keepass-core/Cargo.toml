@@ -45,8 +45,11 @@ flate2 = "1"                        # gzip decompression (both KDBX3 and KDBX4 p
 quick-xml = "0.36"                  # streaming XML reader for KeePass inner document
 winnow    = "0.6"                   # binary header TLVs
 
-# Timestamps.
-# chrono = { version = "0.4", features = ["serde"] }
+# Timestamps. Default features disabled — we don't need `clock`
+# (wall-clock access, which pulls in platform bindings) or `wasmbind`.
+# `alloc` is on implicitly via `std`; that's all we need for DateTime<Utc>
+# parsing and arithmetic.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 # Randomness.
 # getrandom = "0.2"

@@ -11,10 +11,11 @@
 //! ones.
 //!
 //! The model is intentionally a **minimum viable slice** for now: core
-//! fields on entries and groups, plus the hierarchy. Timestamps, history,
-//! custom icons, binaries, deleted objects, and auto-type settings will
-//! land in follow-up PRs.
+//! fields, timestamps, and the group/entry hierarchy. History, custom
+//! icons, binaries, deleted objects, and auto-type settings will land
+//! in follow-up PRs.
 
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,45 @@ pub struct EntryId(pub Uuid);
 /// Identifier of a [`Group`] within a vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GroupId(pub Uuid);
+
+// ---------------------------------------------------------------------------
+// Timestamps
+// ---------------------------------------------------------------------------
+
+/// Timestamps attached to an [`Entry`] or [`Group`].
+///
+/// Fields mirror the KeePass `<Times>` block. All times are UTC; the
+/// on-disk representation is either ISO-8601 (KDBX3) or base64 of a
+/// little-endian `i64` tick count since `0001-01-01T00:00:00Z` with
+/// 100-nanosecond resolution (KDBX4).
+///
+/// Every field is `Option` because KeePass writers are permissive:
+/// old files, hand-crafted XML, and partial migrations may omit any
+/// subset. A missing `<Times>` block produces [`Self::default`] (all
+/// `None`, `expires == false`, `usage_count == 0`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Timestamps {
+    /// `<CreationTime>` — when the record was first created.
+    pub creation_time: Option<DateTime<Utc>>,
+    /// `<LastModificationTime>` — last field edit.
+    pub last_modification_time: Option<DateTime<Utc>>,
+    /// `<LastAccessTime>` — last time the record was read (KeePass
+    /// clients update this opportunistically; its value is of limited
+    /// forensic use).
+    pub last_access_time: Option<DateTime<Utc>>,
+    /// `<LocationChanged>` — last time the record was moved between
+    /// groups.
+    pub location_changed: Option<DateTime<Utc>>,
+    /// `<ExpiryTime>` — expiration timestamp. Only meaningful when
+    /// [`Self::expires`] is `true`.
+    pub expiry_time: Option<DateTime<Utc>>,
+    /// `<Expires>` — whether this record has an expiration at all.
+    pub expires: bool,
+    /// `<UsageCount>` — number of times a password field has been
+    /// copied / displayed. Writers often leave this at 0.
+    pub usage_count: u64,
+}
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -61,6 +101,9 @@ pub struct Entry {
     /// The values here follow the same "may be base64 ciphertext"
     /// caveat as [`Self::password`].
     pub custom_fields: Vec<CustomField>,
+    /// `<Times>` block — creation, modification, expiry, etc. Absent
+    /// blocks deserialise to [`Timestamps::default`].
+    pub times: Timestamps,
 }
 
 /// One custom string field on an [`Entry`].
@@ -95,6 +138,8 @@ pub struct Group {
     /// Entries directly inside this group, in the order they appeared in
     /// the XML.
     pub entries: Vec<Entry>,
+    /// `<Times>` block for the group itself.
+    pub times: Timestamps,
 }
 
 impl Group {
@@ -177,6 +222,7 @@ mod tests {
             url: String::new(),
             notes: String::new(),
             custom_fields: Vec::new(),
+            times: Timestamps::default(),
         }
     }
 
@@ -187,6 +233,7 @@ mod tests {
             notes: String::new(),
             groups: Vec::new(),
             entries: Vec::new(),
+            times: Timestamps::default(),
         }
     }
 
