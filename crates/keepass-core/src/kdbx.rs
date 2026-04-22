@@ -43,7 +43,7 @@ use crate::format::{
     read_hashed_block_stream, read_header_fields, read_hmac_block_stream, verify_header_hash,
     verify_header_hmac,
 };
-use crate::model::Vault;
+use crate::model::{Binary, Vault};
 use crate::secret::CompositeKey;
 use crate::xml::decode_vault_with_cipher;
 
@@ -368,6 +368,10 @@ fn do_unlock(
     };
 
     // --- Version-specific plaintext framing --------------------------------
+    // Binaries come out of the KDBX4 inner header. KDBX3 stores them
+    // under Meta/Binaries which this pipeline does not yet read, so
+    // the pool is empty there.
+    let mut binaries: Vec<Binary> = Vec::new();
     let (xml_bytes, inner_stream_algorithm, inner_stream_key): (Vec<u8>, _, Vec<u8>) =
         match header.version {
             Version::V3 => {
@@ -415,14 +419,35 @@ fn do_unlock(
                 let inner = InnerHeader::parse(&decompressed)
                     .map_err(|_| FormatError::MalformedHeader("malformed inner header"))?;
                 let xml = decompressed[inner.consumed_bytes..].to_vec();
-                (xml, inner.inner_stream_algorithm, inner.inner_stream_key)
+                // Inner-stream cipher is shared between inner-header
+                // binaries and XML protected values: binaries consume
+                // keystream first (in inner-header order), then XML
+                // values pick up where they left off. We build the
+                // cipher here so that we can pre-decrypt the protected
+                // binaries, then hand the (advanced) cipher on to the
+                // XML decoder.
+                let mut c =
+                    InnerStreamCipher::new(inner.inner_stream_algorithm, &inner.inner_stream_key)
+                        .map_err(|_| CryptoError::Decrypt)?;
+                for inner_bin in inner.binaries {
+                    let protected = inner_bin.is_protected();
+                    let mut data = inner_bin.data;
+                    if protected {
+                        c.process(&mut data);
+                    }
+                    binaries.push(Binary { data, protected });
+                }
+                let mut vault = decode_vault_with_cipher(&xml, &mut c)?;
+                vault.binaries = binaries;
+                return Ok(vault);
             }
         };
 
-    // --- Inner-stream cipher + XML decode ---------------------------------
+    // --- Inner-stream cipher + XML decode (KDBX3) --------------------------
     let mut cipher = InnerStreamCipher::new(inner_stream_algorithm, &inner_stream_key)
         .map_err(|_| CryptoError::Decrypt)?;
-    let vault = decode_vault_with_cipher(&xml_bytes, &mut cipher)?;
+    let mut vault = decode_vault_with_cipher(&xml_bytes, &mut cipher)?;
+    vault.binaries = binaries;
     Ok(vault)
 }
 
