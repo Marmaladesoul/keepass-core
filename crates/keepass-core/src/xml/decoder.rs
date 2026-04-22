@@ -42,8 +42,8 @@ use uuid::Uuid;
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
 use crate::model::{
-    Attachment, Binary, CustomField, Entry, EntryId, Group, GroupId, MemoryProtection, Meta,
-    Timestamps, Vault,
+    Attachment, Binary, CustomField, DeletedObject, Entry, EntryId, Group, GroupId,
+    MemoryProtection, Meta, Timestamps, Vault,
 };
 
 /// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
@@ -112,6 +112,7 @@ pub fn decode_vault_with_cipher(
     // the unlock pipeline attaches the inner-header binaries after
     // decode_vault_with_cipher returns.
     let mut binaries: Vec<Binary> = Vec::new();
+    let mut deleted_objects: Vec<DeletedObject> = Vec::new();
 
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
@@ -124,13 +125,17 @@ pub fn decode_vault_with_cipher(
                 stack.push(name.clone());
 
                 // Dispatch top-level children of KeePassFile:
-                //   KeePassFile/Meta → read_meta (consumes through </Meta>)
-                //   KeePassFile/Root/Group → read_group (consumes through </Group>)
+                //   KeePassFile/Meta → read_meta
+                //   KeePassFile/Root/Group → read_group
+                //   KeePassFile/Root/DeletedObjects → read_deleted_objects
                 if stack == ["KeePassFile", "Meta"] {
                     meta = read_meta(&mut reader, &mut buf, &mut binaries)?;
                     stack.pop();
                 } else if stack == ["KeePassFile", "Root", "Group"] && root.is_none() {
                     root = Some(read_group(&mut reader, &mut buf, cipher)?);
+                    stack.pop();
+                } else if stack == ["KeePassFile", "Root", "DeletedObjects"] {
+                    deleted_objects = read_deleted_objects(&mut reader, &mut buf)?;
                     stack.pop();
                 }
             }
@@ -155,6 +160,7 @@ pub fn decode_vault_with_cipher(
         root,
         meta,
         binaries,
+        deleted_objects,
     })
 }
 
@@ -621,6 +627,93 @@ fn has_protected_attribute(e: &BytesStart<'_>) -> Result<bool, XmlError> {
         }
     }
     Ok(false)
+}
+
+/// Read a `<DeletedObjects>` block into a list of [`DeletedObject`].
+/// Assumes the opening `<DeletedObjects>` tag has just been consumed;
+/// reads up to and including the matching `</DeletedObjects>`.
+///
+/// Each child is a `<DeletedObject>` with a `<UUID>` and an optional
+/// `<DeletionTime>`. Unknown children are silently ignored, and a
+/// `<DeletedObject>` missing a UUID is silently skipped — tombstones
+/// with no identity are meaningless.
+fn read_deleted_objects<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Vec<DeletedObject>, XmlError> {
+    let mut out = Vec::new();
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 && name == "DeletedObject" {
+                    if let Some(obj) = read_one_deleted_object(reader, buf)? {
+                        out.push(obj);
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(out);
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed(
+                    "EOF inside <DeletedObjects>".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+fn read_one_deleted_object<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    buf: &mut Vec<u8>,
+) -> Result<Option<DeletedObject>, XmlError> {
+    let mut uuid: Option<Uuid> = None;
+    let mut deleted_at: Option<DateTime<Utc>> = None;
+    let mut depth: i32 = 0;
+    loop {
+        match reader.read_event_into(buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                let name = tag_name(&e)?;
+                if depth == 0 {
+                    let text = read_text(reader, buf)?;
+                    match name.as_str() {
+                        "UUID" => uuid = Some(parse_uuid(&text)?),
+                        "DeletionTime" => {
+                            deleted_at = Some(parse_timestamp(&text, "DeletionTime")?);
+                        }
+                        _ => { /* unknown child — ignore */ }
+                    }
+                    continue;
+                }
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Ok(uuid.map(|u| DeletedObject {
+                        uuid: u,
+                        deleted_at,
+                    }));
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed("EOF inside <DeletedObject>".to_owned()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// Read a `<Meta>` block into a [`Meta`]. Assumes the opening `<Meta>`
@@ -2195,5 +2288,91 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // <DeletedObjects>
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_deleted_objects_in_source_order() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+    <DeletedObjects>
+      <DeletedObject>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <DeletionTime>2026-04-21T10:00:00Z</DeletionTime>
+      </DeletedObject>
+      <DeletedObject>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAg==</UUID>
+        <DeletionTime>2026-04-22T11:00:00Z</DeletionTime>
+      </DeletedObject>
+    </DeletedObjects>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.deleted_objects.len(), 2);
+        let mut expected_u1 = [0u8; 16];
+        expected_u1[15] = 1;
+        assert_eq!(vault.deleted_objects[0].uuid, Uuid::from_bytes(expected_u1));
+        assert_eq!(
+            vault.deleted_objects[0].deleted_at,
+            Some(Utc.with_ymd_and_hms(2026, 4, 21, 10, 0, 0).unwrap())
+        );
+        let mut expected_u2 = [0u8; 16];
+        expected_u2[15] = 2;
+        assert_eq!(vault.deleted_objects[1].uuid, Uuid::from_bytes(expected_u2));
+    }
+
+    #[test]
+    fn missing_deletion_time_is_tolerated() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+    <DeletedObjects>
+      <DeletedObject>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+      </DeletedObject>
+    </DeletedObjects>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.deleted_objects.len(), 1);
+        assert_eq!(vault.deleted_objects[0].deleted_at, None);
+    }
+
+    #[test]
+    fn deleted_object_without_uuid_is_skipped() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+    <DeletedObjects>
+      <DeletedObject>
+        <DeletionTime>2026-04-21T10:00:00Z</DeletionTime>
+      </DeletedObject>
+    </DeletedObjects>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert!(vault.deleted_objects.is_empty());
+    }
+
+    #[test]
+    fn missing_deleted_objects_block_is_empty() {
+        let vault = decode_vault(sample_xml()).unwrap();
+        assert!(vault.deleted_objects.is_empty());
     }
 }

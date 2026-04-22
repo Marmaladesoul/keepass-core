@@ -227,6 +227,27 @@ pub struct Vault {
     /// entry in [`Vault::binaries`] may be referenced by multiple
     /// attachments.
     pub binaries: Vec<Binary>,
+    /// `<DeletedObjects>` — tombstones for deleted entries or groups,
+    /// recorded so that merging against a peer replica can tell a
+    /// never-seen record apart from one the local side has deleted.
+    /// Preserved verbatim for lossless round-trip.
+    pub deleted_objects: Vec<DeletedObject>,
+}
+
+/// A tombstone for a deleted entry or group, recorded under
+/// `<Root><DeletedObjects>`.
+///
+/// The UUID is deliberately a raw [`Uuid`] rather than an [`EntryId`]
+/// or [`GroupId`] — at the format layer we can't tell which kind of
+/// object the tombstone refers to without cross-referencing another
+/// replica. Downstream merge code is free to classify it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeletedObject {
+    /// The 16-byte UUID of the deleted entry or group.
+    pub uuid: Uuid,
+    /// `<DeletionTime>` — when the deletion was recorded.
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 /// One binary payload — either an attachment or an embedded image.
