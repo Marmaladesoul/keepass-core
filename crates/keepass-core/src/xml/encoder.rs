@@ -127,6 +127,41 @@ fn write_meta<W: std::io::Write>(w: &mut Writer<W>, meta: &Meta) -> Result<(), X
     )?;
     write_optional_text_element(w, "DefaultUserName", &meta.default_username)?;
     write_optional_timestamp(w, "DefaultUserNameChanged", meta.default_username_changed)?;
+    if !meta.color.is_empty() {
+        write_text_element(w, "Color", &meta.color)?;
+    }
+    write_text_element(
+        w,
+        "MaintenanceHistoryDays",
+        &meta.maintenance_history_days.to_string(),
+    )?;
+    write_text_element(
+        w,
+        "RecycleBinEnabled",
+        if meta.recycle_bin_enabled {
+            "True"
+        } else {
+            "False"
+        },
+    )?;
+    if let Some(g) = meta.recycle_bin_uuid {
+        write_text_element(w, "RecycleBinUUID", &uuid_to_base64(g.0))?;
+    }
+    write_optional_timestamp(w, "RecycleBinChanged", meta.recycle_bin_changed)?;
+    write_optional_timestamp(w, "SettingsChanged", meta.settings_changed)?;
+    write_optional_timestamp(w, "MasterKeyChanged", meta.master_key_changed)?;
+    write_text_element(
+        w,
+        "MasterKeyChangeRec",
+        &meta.master_key_change_rec.to_string(),
+    )?;
+    write_text_element(
+        w,
+        "MasterKeyChangeForce",
+        &meta.master_key_change_force.to_string(),
+    )?;
+    write_text_element(w, "HistoryMaxItems", &meta.history_max_items.to_string())?;
+    write_text_element(w, "HistoryMaxSize", &meta.history_max_size.to_string())?;
     close(w, "Meta")
 }
 

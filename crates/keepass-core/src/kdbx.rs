@@ -811,6 +811,91 @@ impl Kdbx<Unlocked> {
         group.times.last_modification_time = Some(now);
         Ok(result)
     }
+
+    // -----------------------------------------------------------------
+    // Meta setters
+    // -----------------------------------------------------------------
+    //
+    // Each setter writes the requested field on `vault.meta` and
+    // stamps `meta.settings_changed = clock.now()`. The library never
+    // touches the per-field `*Changed` timestamps (e.g.
+    // `database_name_changed`) — those are KeePass's own field-level
+    // history and are out of scope for this slice.
+
+    /// Set the user-visible vault name.
+    pub fn set_database_name(&mut self, name: impl Into<String>) {
+        self.state.vault.meta.database_name = name.into();
+        self.stamp_settings_changed();
+    }
+
+    /// Set the user-visible free-text vault description.
+    pub fn set_database_description(&mut self, description: impl Into<String>) {
+        self.state.vault.meta.database_description = description.into();
+        self.stamp_settings_changed();
+    }
+
+    /// Set the default username used for new entries.
+    pub fn set_default_username(&mut self, username: impl Into<String>) {
+        self.state.vault.meta.default_username = username.into();
+        self.stamp_settings_changed();
+    }
+
+    /// Set the vault-level colour swatch (hex `"#RRGGBB"`). Empty
+    /// string falls back to the host client's default colour.
+    pub fn set_color(&mut self, hex: impl Into<String>) {
+        self.state.vault.meta.color = hex.into();
+        self.stamp_settings_changed();
+    }
+
+    /// Configure the recycle bin: whether soft-delete is enabled, and
+    /// which group acts as the bin. Pass `None` to clear the bin
+    /// reference (the on-disk encoding then surfaces as either an
+    /// absent or all-zero UUID).
+    pub fn set_recycle_bin(&mut self, enabled: bool, group: Option<GroupId>) {
+        self.state.vault.meta.recycle_bin_enabled = enabled;
+        self.state.vault.meta.recycle_bin_uuid = group;
+        self.stamp_settings_changed();
+    }
+
+    /// Cap entry-history length. `-1` means unlimited.
+    pub fn set_history_max_items(&mut self, max: i32) {
+        self.state.vault.meta.history_max_items = max;
+        self.stamp_settings_changed();
+    }
+
+    /// Cap entry-history byte size. `-1` means unlimited.
+    pub fn set_history_max_size(&mut self, max: i64) {
+        self.state.vault.meta.history_max_size = max;
+        self.stamp_settings_changed();
+    }
+
+    /// Set how long to keep entry snapshots before the host client
+    /// prunes them, in days.
+    pub fn set_maintenance_history_days(&mut self, days: u32) {
+        self.state.vault.meta.maintenance_history_days = days;
+        self.stamp_settings_changed();
+    }
+
+    /// Set the recommended-master-key-change interval, in days.
+    /// `-1` disables the recommendation.
+    pub fn set_master_key_change_rec(&mut self, days: i64) {
+        self.state.vault.meta.master_key_change_rec = days;
+        self.stamp_settings_changed();
+    }
+
+    /// Set the forced-master-key-change interval, in days.
+    /// `-1` disables the force policy.
+    pub fn set_master_key_change_force(&mut self, days: i64) {
+        self.state.vault.meta.master_key_change_force = days;
+        self.stamp_settings_changed();
+    }
+
+    /// Stamp [`crate::model::Meta::settings_changed`] from the
+    /// injected clock. Shared by every setter above so a single
+    /// place owns the side-effect.
+    fn stamp_settings_changed(&mut self) {
+        self.state.vault.meta.settings_changed = Some(self.state.clock.now());
+    }
 }
 
 // ---------------------------------------------------------------------------
