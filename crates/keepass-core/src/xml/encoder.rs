@@ -185,6 +185,12 @@ fn write_entry<W: std::io::Write>(
     if !entry.tags.is_empty() {
         write_text_element(w, "Tags", &entry.tags.join(";"))?;
     }
+    // Binary references: <Binary><Key>name</Key><Value Ref="N"/></Binary>.
+    // Bytes themselves live in the KDBX4 inner header (or, on KDBX3,
+    // under <Meta><Binaries>) — entries only carry the index.
+    for att in &entry.attachments {
+        write_binary_ref(w, &att.name, att.ref_id)?;
+    }
     // Decorative fields — emit only when non-default so a vanilla
     // entry stays minimal. The decoder treats absent and present-but-
     // empty as the same, so elision is safe.
@@ -263,6 +269,23 @@ fn write_times<W: std::io::Write>(
     write_text_element(w, "Expires", if times.expires { "True" } else { "False" })?;
     write_text_element(w, "UsageCount", &times.usage_count.to_string())?;
     close(w, "Times")
+}
+
+/// Emit a single `<Binary><Key>name</Key><Value Ref="N"/></Binary>`
+/// reference. The `<Value>` is empty — the actual bytes live in the
+/// KDBX4 inner-header binaries pool (or, on KDBX3, under
+/// `<Meta><Binaries>`), keyed by the same `N`.
+fn write_binary_ref<W: std::io::Write>(
+    w: &mut Writer<W>,
+    name: &str,
+    ref_id: u32,
+) -> Result<(), XmlError> {
+    open(w, "Binary")?;
+    write_text_element(w, "Key", name)?;
+    let mut value = BytesStart::new("Value");
+    value.push_attribute(("Ref", ref_id.to_string().as_str()));
+    w.write_event(Event::Empty(value)).map_err(xml_err)?;
+    close(w, "Binary")
 }
 
 fn is_default_auto_type(at: &AutoType) -> bool {
