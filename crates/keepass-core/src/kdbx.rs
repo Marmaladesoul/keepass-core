@@ -41,11 +41,11 @@ use crate::crypto::{
 };
 use crate::error::Error;
 use crate::format::{
-    FileSignature, FormatError, HASHED_BLOCK_DEFAULT_SIZE, HMAC_BLOCK_DEFAULT_SIZE, InnerBinary,
-    InnerHeader, InnerStreamAlgorithm, KnownCipher, OuterHeader, SIGNATURE_1, SIGNATURE_2, Version,
-    compute_header_hash, compute_header_hmac, read_hashed_block_stream, read_header_fields,
-    read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hashed_block_stream,
-    write_hmac_block_stream,
+    EncryptionIv, FileSignature, FormatError, HASHED_BLOCK_DEFAULT_SIZE, HMAC_BLOCK_DEFAULT_SIZE,
+    InnerBinary, InnerHeader, InnerStreamAlgorithm, KnownCipher, MasterSeed, OuterHeader,
+    SIGNATURE_1, SIGNATURE_2, TransformSeed, VarDictionary, VarValue, Version, compute_header_hash,
+    compute_header_hmac, read_hashed_block_stream, read_header_fields, read_hmac_block_stream,
+    verify_header_hash, verify_header_hmac, write_hashed_block_stream, write_hmac_block_stream,
 };
 use crate::model::entry_editor::PendingBinaryOps;
 use crate::model::{
@@ -895,6 +895,118 @@ impl Kdbx<Unlocked> {
     /// place owns the side-effect.
     fn stamp_settings_changed(&mut self) {
         self.state.vault.meta.settings_changed = Some(self.state.clock.now());
+    }
+
+    /// Replace the master key.
+    ///
+    /// Rotates everything that participates in deriving the cipher
+    /// and HMAC keys from the composite key, so an attacker who
+    /// captured the previous file can't decrypt the new one even if
+    /// they later learn the new password:
+    ///
+    /// - Fresh [`MasterSeed`] (32 bytes from `getrandom`).
+    /// - Fresh [`EncryptionIv`] (length-matched to the configured
+    ///   outer cipher: 16 bytes for AES-256-CBC, 12 bytes for
+    ///   ChaCha20).
+    /// - KDBX3: fresh [`TransformSeed`] (32 bytes) for the AES-KDF.
+    /// - KDBX4: fresh `S` value in the KDF parameter VarDictionary
+    ///   — Argon2 salt or AES-KDF seed depending on which KDF the
+    ///   header configured. The original size is preserved (writers
+    ///   commonly emit 32 bytes for both, but the spec only requires
+    ///   ≥ 8 for Argon2 salt, so we honour whatever size was there).
+    ///
+    /// The transformed key is then re-derived against `new_key` +
+    /// the new KDF parameters and cached on the [`Unlocked`] state,
+    /// so the next `save_to_bytes` re-uses it without paying the
+    /// (expensive) KDF cost again.
+    ///
+    /// Bookkeeping side-effects: `Meta::master_key_changed` and
+    /// `Meta::settings_changed` are both stamped from
+    /// [`Self::clock`].
+    ///
+    /// **Does not touch entries.** Stored protected values were
+    /// XOR-encoded against the inner-stream cipher (whose key is the
+    /// `protected_stream_key` / inner-header key, *not* the master
+    /// key); rotating the master key has no effect on them.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Crypto`] if the KDF rejects the new key (e.g. the
+    ///   Argon2 implementation returns an internal error).
+    /// - [`Error::Format`] if the existing KDF-parameters blob is
+    ///   malformed beyond what `parse` already accepts (effectively
+    ///   unreachable from a successfully unlocked file).
+    pub fn rekey(&mut self, new_key: &CompositeKey) -> Result<(), Error> {
+        // --- Fresh seeds ---------------------------------------------
+        let mut new_master_seed = [0u8; 32];
+        getrandom::fill(&mut new_master_seed).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
+
+        let iv_len = self.state.outer_header.encryption_iv.0.len();
+        let mut new_iv = vec![0u8; iv_len];
+        getrandom::fill(&mut new_iv).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
+
+        // --- Update outer header in-place ----------------------------
+        self.state.outer_header.master_seed = MasterSeed(new_master_seed);
+        self.state.outer_header.encryption_iv = EncryptionIv(new_iv);
+
+        match self.version {
+            Version::V3 => {
+                // KDBX3 keeps the AES-KDF transform seed in the outer
+                // header. Refresh it; rounds are unchanged.
+                let mut new_transform_seed = [0u8; 32];
+                getrandom::fill(&mut new_transform_seed)
+                    .map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
+                self.state.outer_header.transform_seed = Some(TransformSeed(new_transform_seed));
+            }
+            Version::V4 => {
+                // KDBX4 keeps KDF parameters as a VarDictionary blob.
+                // Reparse, replace the `S` value (Argon2 salt or
+                // AES-KDF seed — same key in both shapes), reserialise.
+                let blob = self
+                    .state
+                    .outer_header
+                    .kdf_parameters
+                    .as_ref()
+                    .ok_or(Error::Format(FormatError::MalformedHeader(
+                        "KDBX4 missing KdfParameters",
+                    )))?;
+                let mut dict = VarDictionary::parse(blob)
+                    .map_err(|_| FormatError::MalformedHeader("malformed KDF parameters"))?;
+                let salt_len = match dict.get("S") {
+                    Some(VarValue::Bytes(b)) => b.len(),
+                    _ => {
+                        return Err(Error::Format(FormatError::MalformedHeader(
+                            "KDF parameters missing salt/seed key 'S'",
+                        )));
+                    }
+                };
+                let mut new_salt = vec![0u8; salt_len];
+                getrandom::fill(&mut new_salt).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
+                dict.entries
+                    .insert("S".to_owned(), VarValue::Bytes(new_salt));
+                let new_blob = dict
+                    .write()
+                    .map_err(|_| FormatError::MalformedHeader("failed to encode KDF parameters"))?;
+                self.state.outer_header.kdf_parameters = Some(new_blob);
+            }
+        }
+
+        // --- Re-derive the transformed key against the rotated KDF ---
+        let kdf_params = self
+            .state
+            .outer_header
+            .decode_kdf_params()
+            .map_err(|_| FormatError::MalformedHeader("malformed KDF parameters"))?;
+        let new_transformed =
+            derive_transformed_key(new_key, &kdf_params).map_err(|_| CryptoError::Kdf)?;
+        self.state.transformed_key = new_transformed;
+
+        // --- Bookkeeping ---------------------------------------------
+        let now = self.state.clock.now();
+        self.state.vault.meta.master_key_changed = Some(now);
+        self.state.vault.meta.settings_changed = Some(now);
+
+        Ok(())
     }
 }
 
