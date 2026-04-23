@@ -31,3 +31,7 @@ Cargo.lock.bak
 
 # Local agent state (Claude Code, Cursor, etc.)
 .claude/
+
+# Author-only design notes, scratch work, and future-work scratchpads.
+# Referenced by AGENTS.md as "git-ignored, author-only".
+_design/
