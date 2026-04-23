@@ -6,8 +6,9 @@
 //! 3. Open those bytes fresh, unlock with the same composite key, and
 //!    assert that the user-facing entry fields match the original.
 //!
-//! Skips ChaCha20 / Twofish / KDBX3 fixtures — `save_to_bytes` rejects
-//! them with a typed error for now.
+//! Skips Twofish fixtures — `save_to_bytes` rejects them with a typed
+//! error for now. AES-256-CBC and ChaCha20 (on both KDBX3 and KDBX4)
+//! are exercised.
 //!
 //! ## Scope of the equality assertion
 //!
@@ -146,9 +147,8 @@ fn composite_for(sidecar: &Value, path: &Path) -> Result<CompositeKey, String> {
 
 /// `true` if the fixture uses an outer cipher the save path can write.
 ///
-/// Currently AES-256-CBC on KDBX3 and KDBX4. ChaCha20 is wired in on
-/// the KDBX4 save path too, but no fixture emits it (see the synthetic
-/// test in `kdbx::tests`). Twofish-CBC is still deferred on both.
+/// Currently AES-256-CBC and ChaCha20 on both KDBX3 and KDBX4.
+/// Twofish-CBC is still deferred.
 fn is_writable_cipher(path: &Path) -> bool {
     let Ok(bytes) = fs::read(path) else {
         return false;
@@ -170,7 +170,7 @@ fn is_writable_cipher(path: &Path) -> bool {
     };
     matches!(
         header_read.header().cipher_id.well_known(),
-        Some(KnownCipher::Aes256Cbc)
+        Some(KnownCipher::Aes256Cbc | KnownCipher::ChaCha20)
     )
 }
 
