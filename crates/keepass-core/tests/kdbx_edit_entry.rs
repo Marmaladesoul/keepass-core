@@ -320,10 +320,19 @@ fn snapshot_if_older_than_takes_new_snapshot_past_the_window() {
 
 #[test]
 fn edit_entry_truncates_history_to_max_items() {
-    // Force a small history_max_items budget by editing the meta
-    // before a burst of edits. Each edit with Snapshot policy adds
-    // one history entry; after N edits total history length should
-    // be min(N, max_items).
+    // Each edit with `Snapshot` policy pushes one history entry. After
+    // N edits history length should be min(N, meta.history_max_items).
+    // The fixture file ships with KeePass's stock default of 10; we
+    // exercise the cap by doing 15 edits — the first 5 snapshots get
+    // evicted from the front and history stabilises at 10 items.
+    //
+    // Deliberately does *not* override `meta.history_max_items` — no
+    // public setter exists for that field yet (it lands with the rest
+    // of the Meta setters in slice 8 of MUTATION.md), and the library
+    // offers no escape hatch for direct `Vault` mutation. Testing
+    // against the real default is also a tighter regression guard.
+    const EDITS: usize = 15;
+
     let path = kdbx4_basic();
     let password = password_from_sidecar(&path);
     let composite = CompositeKey::from_password(password.as_bytes());
@@ -336,13 +345,17 @@ fn edit_entry_truncates_history_to_max_items() {
         .unlock_with_clock(&composite, Box::new(FixedClock(at)))
         .unwrap();
 
-    // Cap at 3 history items. Shrink via public vault_mut.
-    kdbx.vault_mut().meta.history_max_items = 3;
+    let cap_i32 = kdbx.vault().meta.history_max_items;
+    assert_eq!(
+        cap_i32, 10,
+        "fixture's meta.history_max_items is the stock 10"
+    );
+    let cap = usize::try_from(cap_i32).expect("positive cap fits in usize");
 
     let root = kdbx.vault().root.id;
     let id = kdbx.add_entry(root, NewEntry::new("Truncate")).unwrap();
 
-    for i in 0..10 {
+    for i in 0..EDITS {
         kdbx.edit_entry(id, HistoryPolicy::Snapshot, |e| {
             e.set_title(format!("v{i}"));
         })
@@ -352,16 +365,19 @@ fn edit_entry_truncates_history_to_max_items() {
     let e = kdbx.vault().iter_entries().find(|e| e.id == id).unwrap();
     assert_eq!(
         e.history.len(),
-        3,
-        "history should be capped at history_max_items = 3"
+        cap,
+        "history should be capped at meta.history_max_items ({cap})"
     );
-    // Oldest-dropped ordering: we should keep the three most-recent
-    // snapshots. With 10 edits the snapshots pushed (chronologically)
-    // are the pre-edit states of each iteration. The pre-edit state
-    // before the Nth iteration has title "v{N-1}" (or "Truncate"
-    // before iteration 0). Final three should be v6 / v7 / v8.
-    let titles: Vec<&str> = e.history.iter().map(|h| h.title.as_str()).collect();
-    assert_eq!(titles, ["v6", "v7", "v8"]);
+    // Oldest-dropped ordering: after EDITS edits the final `cap`
+    // snapshots should be the most recent ones. Snapshot N captures
+    // the pre-edit title — which is "v{N-1}" for N >= 1, or
+    // "Truncate" for N == 0. After truncation the retained snapshot
+    // titles are v{EDITS-cap-1} .. v{EDITS-2}, i.e. v4 .. v13.
+    let titles: Vec<String> = e.history.iter().map(|h| h.title.clone()).collect();
+    let expected: Vec<String> = (EDITS - cap - 1..EDITS - 1)
+        .map(|i| format!("v{i}"))
+        .collect();
+    assert_eq!(titles, expected);
 }
 
 #[test]

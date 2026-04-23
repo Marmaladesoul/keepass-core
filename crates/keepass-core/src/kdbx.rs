@@ -341,12 +341,6 @@ impl Kdbx<Unlocked> {
         &self.state.vault
     }
 
-    /// Mutable access to the decoded vault — for in-place edits before
-    /// a save.
-    pub fn vault_mut(&mut self) -> &mut Vault {
-        &mut self.state.vault
-    }
-
     /// The [`Clock`] this unlocked database uses to stamp timestamps
     /// during mutations. Either [`SystemClock`] (default, from
     /// [`Kdbx::<HeaderRead>::unlock`]) or whatever was passed to
