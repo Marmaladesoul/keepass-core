@@ -43,7 +43,7 @@ use crate::error::Error;
 use crate::format::{
     EncryptionIv, FileSignature, FormatError, HASHED_BLOCK_DEFAULT_SIZE, HMAC_BLOCK_DEFAULT_SIZE,
     InnerBinary, InnerHeader, InnerStreamAlgorithm, KnownCipher, MasterSeed, OuterHeader,
-    SIGNATURE_1, SIGNATURE_2, TransformSeed, Version, VarDictionary, VarValue, compute_header_hash,
+    SIGNATURE_1, SIGNATURE_2, TransformSeed, VarDictionary, VarValue, Version, compute_header_hash,
     compute_header_hmac, read_hashed_block_stream, read_header_fields, read_hmac_block_stream,
     verify_header_hash, verify_header_hmac, write_hashed_block_stream, write_hmac_block_stream,
 };
@@ -939,8 +939,7 @@ impl Kdbx<Unlocked> {
     pub fn rekey(&mut self, new_key: &CompositeKey) -> Result<(), Error> {
         // --- Fresh seeds ---------------------------------------------
         let mut new_master_seed = [0u8; 32];
-        getrandom::fill(&mut new_master_seed)
-            .map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
+        getrandom::fill(&mut new_master_seed).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
 
         let iv_len = self.state.outer_header.encryption_iv.0.len();
         let mut new_iv = vec![0u8; iv_len];
@@ -982,8 +981,7 @@ impl Kdbx<Unlocked> {
                     }
                 };
                 let mut new_salt = vec![0u8; salt_len];
-                getrandom::fill(&mut new_salt)
-                    .map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
+                getrandom::fill(&mut new_salt).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
                 dict.entries
                     .insert("S".to_owned(), VarValue::Bytes(new_salt));
                 let new_blob = dict
