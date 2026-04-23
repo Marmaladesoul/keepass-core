@@ -199,6 +199,58 @@ async function genKeewebAttachments() {
   console.log(`wrote kdbxweb/${name}`);
 }
 
+async function genKeewebChaCha20() {
+  const name = 'kdbx4-chacha20';
+  const pw = 'test-keeweb-203';
+
+  const cred = new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(pw));
+  const db = kdbxweb.Kdbx.create(cred, 'kdbxweb ChaCha20 Fixture');
+  // Switch outer cipher from default AES-256-CBC to ChaCha20.
+  db.header.dataCipherUuid = new kdbxweb.KdbxUuid(kdbxweb.Consts.CipherId.ChaCha20);
+  setFastArgon2(db);
+
+  const root = db.getDefaultGroup();
+  const work = db.createGroup(root, 'Work');
+  const pers = db.createGroup(root, 'Personal');
+
+  const entries = [];
+  entries.push(addEntry(db, work, 'Contoso Mail', 'alice@example.com',
+    'https://mail.contoso.example', 'p4ss-cc-01', 'Primary work email.', ['work', 'email']));
+  entries.push(addEntry(db, work, 'Fabrikam VPN', 'bob@example.org',
+    'https://vpn.fabrikam.example', 'p4ss-cc-02', '', ['work', 'vpn']));
+  entries.push(addEntry(db, pers, 'Acme Banking', 'charlie@example.net',
+    'https://bank.acme.example', 'p4ss-cc-03', '', ['personal', 'banking']));
+  entries.push(addEntry(db, pers, 'Tailspin Toys', 'dave@example.com',
+    'https://toys.tailspin.example', 'p4ss-cc-04', '', ['personal']));
+
+  const buf = await db.save();
+  const outPath = path.join(OUT_DIR, `${name}.kdbx`);
+  await fs.mkdir(OUT_DIR, { recursive: true });
+  await fs.writeFile(outPath, Buffer.from(buf));
+
+  await writeSidecar(outPath, {
+    description: 'KDBX4 vault written by kdbxweb with ChaCha20 as the outer cipher (default is AES-256-CBC; overridden via db.header.dataCipherUuid). Independently-produced fixture for the ChaCha20 save/unlock round-trip.',
+    format: 'KDBX4',
+    source: 'kdbxweb (node)',
+    generated_by: 'tests/fixtures/.node/gen-kdbxweb.js',
+    master_password: pw,
+    key_file: null,
+    database_name: 'kdbxweb ChaCha20 Fixture',
+    generator: 'KdbxWeb',
+    outer_cipher: 'ChaCha20',
+    entry_count: 4,
+    group_count: 4,
+    group_paths: ['/Personal', '/Recycle Bin', '/Work'],
+    entries: entries.map(e => ({
+      title: e.fields.get('Title'),
+      username: e.fields.get('UserName'),
+      url: e.fields.get('URL'),
+      tags: Array.isArray(e.tags) ? [...e.tags].sort() : [],
+    })).sort((a, b) => a.title.localeCompare(b.title)),
+  });
+  console.log(`wrote kdbxweb/${name}`);
+}
+
 // -----------------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------------
@@ -207,6 +259,7 @@ async function genKeewebAttachments() {
   try {
     await genKeewebBasic();
     await genKeewebAttachments();
+    await genKeewebChaCha20();
     console.log('done');
   } catch (e) {
     console.error('FAILED:', e);
