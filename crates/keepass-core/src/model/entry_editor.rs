@@ -20,6 +20,28 @@ use uuid::Uuid;
 
 use super::{AutoType, CustomField, Entry};
 
+/// Attach intents staged inside an `edit_entry` closure that
+/// [`crate::kdbx::Kdbx::edit_entry`] applies to the shared
+/// [`crate::model::Vault::binaries`] pool once the closure
+/// returns.
+///
+/// Detaches don't appear here because they only touch
+/// [`Entry::attachments`] and so can run in-place inside the editor;
+/// the pool's garbage collection runs once at the end of
+/// `edit_entry` regardless.
+#[derive(Debug, Default)]
+pub(crate) struct PendingBinaryOps {
+    pub attaches: Vec<PendingAttach>,
+}
+
+/// One staged `attach` from inside an `edit_entry` closure.
+#[derive(Debug)]
+pub(crate) struct PendingAttach {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub protected: bool,
+}
+
 /// Value supplied to [`EntryEditor::set_custom_field`].
 ///
 /// Routes [`CustomField::protected`]: a [`Self::Plain`] payload writes
@@ -49,6 +71,10 @@ pub enum CustomFieldValue {
 #[non_exhaustive]
 pub struct EntryEditor<'a> {
     inner: &'a mut Entry,
+    /// Attach intents staged for the `Kdbx::edit_entry` post-pass.
+    /// Detaches don't go here — they touch only
+    /// [`Entry::attachments`] and run in-place inside `detach`.
+    binary_ops: PendingBinaryOps,
 }
 
 impl<'a> EntryEditor<'a> {
@@ -56,7 +82,17 @@ impl<'a> EntryEditor<'a> {
     /// [`crate::kdbx::Kdbx::edit_entry`] with a `&mut Entry` freshly
     /// looked up under the target id.
     pub(crate) fn new(inner: &'a mut Entry) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            binary_ops: PendingBinaryOps::default(),
+        }
+    }
+
+    /// Crate-internal accessor: pull the staged attach intents out of
+    /// the editor so `Kdbx::edit_entry` can apply them with full
+    /// vault access once the closure returns.
+    pub(crate) fn take_pending_binary_ops(&mut self) -> PendingBinaryOps {
+        std::mem::take(&mut self.binary_ops)
     }
 
     // -----------------------------------------------------------------
@@ -218,12 +254,58 @@ impl<'a> EntryEditor<'a> {
     pub fn set_auto_type(&mut self, auto_type: AutoType) {
         self.inner.auto_type = auto_type;
     }
+
+    // -----------------------------------------------------------------
+    // Attachments
+    // -----------------------------------------------------------------
+
+    /// Stage a new attachment for this entry.
+    ///
+    /// The bytes are deduplicated against
+    /// [`crate::model::Vault::binaries`] when `edit_entry` applies
+    /// the staged ops: if the pool already holds a binary with
+    /// identical content **and** the same `protected` flag, the
+    /// existing pool entry is reused; otherwise a new pool entry is
+    /// appended. The dedup key is the SHA-256 of the payload paired
+    /// with the `protected` flag — content hash (rather than UUID)
+    /// is the right key because KeePass writers themselves coalesce
+    /// identical payloads across entries at save time, and a
+    /// UUID-keyed dedup would silently produce duplicate pool
+    /// entries the first time the same bytes are attached from two
+    /// different sources.
+    //
+    // Pool insertion and refcounted GC happen in `Kdbx::edit_entry`
+    // after the closure returns — the editor only sees `&mut Entry`
+    // and so cannot touch `vault.binaries` directly.
+    pub fn attach(&mut self, name: impl Into<String>, data: Vec<u8>, protected: bool) {
+        self.binary_ops.attaches.push(PendingAttach {
+            name: name.into(),
+            data,
+            protected,
+        });
+    }
+
+    /// Remove an attachment from this entry by filename. Returns
+    /// `true` if a matching attachment was removed, `false` if none
+    /// existed.
+    ///
+    /// The pool entry the detached attachment pointed at is **not**
+    /// removed by this call alone: pool garbage-collection runs once
+    /// at the end of `edit_entry` and only drops a binary when the
+    /// last reference (in any entry, this one or another) is gone.
+    /// A binary shared with another entry therefore survives a
+    /// detach here.
+    pub fn detach(&mut self, name: &str) -> bool {
+        let before = self.inner.attachments.len();
+        self.inner.attachments.retain(|a| a.name != name);
+        self.inner.attachments.len() != before
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AutoType, AutoTypeAssociation, EntryId, Timestamps};
+    use crate::model::{Attachment, AutoType, AutoTypeAssociation, EntryId, Timestamps};
     use uuid::Uuid;
 
     fn fresh_entry() -> Entry {
@@ -366,6 +448,41 @@ mod tests {
         EntryEditor::new(&mut e).set_expiry(None);
         assert!(!e.times.expires);
         assert_eq!(e.times.expiry_time, None);
+    }
+
+    #[test]
+    fn attach_stages_pending_op_without_touching_entry() {
+        let mut e = fresh_entry();
+        let mut editor = EntryEditor::new(&mut e);
+        editor.attach("note.txt", b"hello".to_vec(), false);
+        editor.attach("secret.bin", b"shh".to_vec(), true);
+        let pending = editor.take_pending_binary_ops();
+        assert_eq!(pending.attaches.len(), 2);
+        assert_eq!(pending.attaches[0].name, "note.txt");
+        assert_eq!(pending.attaches[0].data, b"hello");
+        assert!(!pending.attaches[0].protected);
+        assert!(pending.attaches[1].protected);
+        // attachments aren't applied to the entry until edit_entry
+        // runs the post-pass.
+        assert!(e.attachments.is_empty());
+    }
+
+    #[test]
+    fn detach_removes_in_place_and_signals_whether_anything_was_dropped() {
+        let mut e = fresh_entry();
+        e.attachments.push(Attachment {
+            name: "a.txt".into(),
+            ref_id: 0,
+        });
+        e.attachments.push(Attachment {
+            name: "b.txt".into(),
+            ref_id: 1,
+        });
+        let mut editor = EntryEditor::new(&mut e);
+        assert!(editor.detach("a.txt"));
+        assert!(!editor.detach("a.txt"));
+        assert!(editor.detach("b.txt"));
+        assert!(e.attachments.is_empty());
     }
 
     #[test]
