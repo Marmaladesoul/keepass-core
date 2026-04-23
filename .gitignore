@@ -28,3 +28,6 @@ Cargo.lock.bak
 # Node deps for kdbxweb fixture generator
 /tests/fixtures/.node/node_modules/
 /tests/fixtures/.node/package-lock.json
+
+# Local agent state (Claude Code, Cursor, etc.)
+.claude/
