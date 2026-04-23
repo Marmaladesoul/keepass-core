@@ -365,6 +365,7 @@ dependencies = [
  "chacha20",
  "chrono",
  "flate2",
+ "getrandom",
  "hmac",
  "quick-xml",
  "salsa20",

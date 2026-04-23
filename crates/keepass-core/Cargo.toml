@@ -50,8 +50,10 @@ winnow    = "0.6"                   # binary header TLVs
 # off because we don't target browser wasm.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
-# Randomness.
-# getrandom = "0.2"
+# Randomness — fresh seeds for `Kdbx::rekey`. The same crate is
+# already in the dep tree transitively via uuid; we depend on it
+# directly here so the import is explicit at our use site.
+getrandom = "0.4"
 
 [dev-dependencies]
 # Fixture-sidecar parsing in integration tests. Only the tests need JSON;
