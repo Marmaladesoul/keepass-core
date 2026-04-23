@@ -24,9 +24,11 @@ use chrono::{DateTime, Utc};
 /// The source of "now" for all mutation bookkeeping.
 ///
 /// Implementations should be cheap and non-blocking. The mutation API
-/// calls [`Self::now`] multiple times per operation (e.g. one stamp
-/// per field a mutation touches), so heavy per-call work would show
-/// up in profiles.
+/// calls [`Self::now`] exactly once per operation and hoists the
+/// result above any long-lived borrow, so there's no hot-loop access;
+/// the "cheap" guidance is about avoiding surprises in `add_entry` /
+/// `delete_entry` / `move_entry`, which are in the caller's hot path
+/// if they're scripting bulk edits.
 pub trait Clock: std::fmt::Debug + Send + Sync {
     /// Return the current [`DateTime<Utc>`].
     fn now(&self) -> DateTime<Utc>;
