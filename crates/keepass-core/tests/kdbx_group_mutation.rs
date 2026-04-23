@@ -113,7 +113,9 @@ fn delete_group_tombstones_every_descendant_recursively() {
     let child_group = kdbx
         .add_group(parent, NewGroup::new("Child Group"))
         .unwrap();
-    let child_entry = kdbx.add_entry(parent, NewEntry::new("Child Entry")).unwrap();
+    let child_entry = kdbx
+        .add_entry(parent, NewEntry::new("Child Entry"))
+        .unwrap();
 
     let tombstones_before = kdbx.vault().deleted_objects.len();
     kdbx.delete_group(parent).unwrap();
@@ -134,12 +136,7 @@ fn delete_group_tombstones_every_descendant_recursively() {
     let bytes = kdbx.save_to_bytes().unwrap();
     let reopened = reopen(bytes);
     assert!(
-        reopened
-            .vault()
-            .root
-            .groups
-            .iter()
-            .all(|g| g.id != parent),
+        reopened.vault().root.groups.iter().all(|g| g.id != parent),
         "deleted group must not survive round-trip"
     );
     assert!(
@@ -218,10 +215,7 @@ fn move_group_into_own_subtree_returns_circular_move_and_does_not_move() {
     // own subtree, so the result would be a cycle.
     let err = kdbx.move_group(parent, leaf).unwrap_err();
     match err {
-        ModelError::CircularMove {
-            moving,
-            new_parent,
-        } => {
+        ModelError::CircularMove { moving, new_parent } => {
             assert_eq!(moving, parent);
             assert_eq!(new_parent, leaf);
         }
