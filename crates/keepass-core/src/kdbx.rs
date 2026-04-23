@@ -46,7 +46,10 @@ use crate::format::{
     read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hashed_block_stream,
     write_hmac_block_stream,
 };
-use crate::model::{Binary, Clock, SystemClock, Vault};
+use crate::model::{
+    AutoType, Binary, Clock, DeletedObject, Entry, EntryId, Group, GroupId, ModelError, NewEntry,
+    SystemClock, Timestamps, Vault,
+};
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{decode_vault_with_cipher, encode_vault_with_cipher};
 
@@ -353,6 +356,103 @@ impl Kdbx<Unlocked> {
         &*self.state.clock
     }
 
+    /// Insert a new [`Entry`] under the group identified by `parent`.
+    ///
+    /// The library owns UUID generation (unless the builder set one
+    /// via [`NewEntry::with_uuid`]), fills in every
+    /// [`Timestamps`] field from [`Self::clock`], sets
+    /// `previous_parent_group = None`, and appends the entry to the
+    /// parent's child list. Returns the new entry's [`EntryId`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::GroupNotFound`] if `parent` is not in the vault.
+    /// - [`ModelError::DuplicateUuid`] if the builder supplied a UUID
+    ///   that is already in use anywhere in the vault.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic under any input. The second `find_group_mut`
+    /// call is `.expect()`ed because the first call has already
+    /// proved the group exists.
+    pub fn add_entry(
+        &mut self,
+        parent: GroupId,
+        template: NewEntry,
+    ) -> Result<EntryId, ModelError> {
+        let uuid = match template.uuid {
+            Some(u) => {
+                if uuid_in_use(&self.state.vault, u) {
+                    return Err(ModelError::DuplicateUuid(u));
+                }
+                u
+            }
+            None => fresh_uuid(&self.state.vault),
+        };
+
+        // Locate the target parent up front so we fail early.
+        if find_group_mut(&mut self.state.vault.root, parent).is_none() {
+            return Err(ModelError::GroupNotFound(parent));
+        }
+
+        let now = self.state.clock.now();
+        let entry = Entry {
+            id: EntryId(uuid),
+            title: template.title,
+            username: template.username,
+            password: template.password,
+            url: template.url,
+            notes: template.notes,
+            custom_fields: Vec::new(),
+            tags: template.tags,
+            history: Vec::new(),
+            attachments: Vec::new(),
+            foreground_color: String::new(),
+            background_color: String::new(),
+            override_url: String::new(),
+            custom_icon_uuid: None,
+            custom_data: Vec::new(),
+            quality_check: true,
+            previous_parent_group: None,
+            auto_type: AutoType::default(),
+            times: Timestamps {
+                creation_time: Some(now),
+                last_modification_time: Some(now),
+                last_access_time: Some(now),
+                location_changed: Some(now),
+                expiry_time: None,
+                expires: false,
+                usage_count: 0,
+            },
+        };
+
+        // Re-locate under &mut; infallible because we just checked.
+        let target = find_group_mut(&mut self.state.vault.root, parent)
+            .expect("group existence checked above");
+        target.entries.push(entry);
+        Ok(EntryId(uuid))
+    }
+
+    /// Remove the entry with the given id, recording a tombstone in
+    /// `vault.deleted_objects`.
+    ///
+    /// The tombstone's `deleted_at` is stamped from [`Self::clock`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if no entry with that id exists
+    ///   anywhere in the vault.
+    pub fn delete_entry(&mut self, id: EntryId) -> Result<(), ModelError> {
+        let removed =
+            remove_entry(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let now = self.state.clock.now();
+        self.state.vault.deleted_objects.push(DeletedObject {
+            uuid: removed.id.0,
+            deleted_at: Some(now),
+        });
+        Ok(())
+    }
+
     /// Serialise this unlocked database back to a KDBX byte stream —
     /// the byte-level inverse of [`Kdbx::<HeaderRead>::unlock`].
     ///
@@ -393,6 +493,69 @@ impl Kdbx<Unlocked> {
     /// header always emits tags in ascending numeric order.
     pub fn save_to_bytes(&self) -> Result<Vec<u8>, Error> {
         do_save(self.signature, self.version, &self.state)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vault-tree helpers used by the mutation API.
+// ---------------------------------------------------------------------------
+
+/// Walk the tree rooted at `root` looking for a group with the given id.
+/// Returns a mutable reference to the first match, or `None`.
+fn find_group_mut(root: &mut Group, id: GroupId) -> Option<&mut Group> {
+    if root.id == id {
+        return Some(root);
+    }
+    for child in &mut root.groups {
+        if let Some(hit) = find_group_mut(child, id) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// Remove the entry with the given id from wherever it lives in the
+/// tree rooted at `root`. Returns the removed entry, or `None` if no
+/// entry with that id exists anywhere in the subtree.
+fn remove_entry(root: &mut Group, id: EntryId) -> Option<Entry> {
+    if let Some(pos) = root.entries.iter().position(|e| e.id == id) {
+        return Some(root.entries.remove(pos));
+    }
+    for child in &mut root.groups {
+        if let Some(entry) = remove_entry(child, id) {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+/// `true` if `candidate` matches any existing entry id, group id, or
+/// the root group id. Used by [`Kdbx::add_entry`] to reject
+/// caller-supplied UUIDs that would collide.
+fn uuid_in_use(vault: &Vault, candidate: uuid::Uuid) -> bool {
+    group_uuid_in_use(&vault.root, candidate)
+}
+
+fn group_uuid_in_use(group: &Group, candidate: uuid::Uuid) -> bool {
+    if group.id.0 == candidate {
+        return true;
+    }
+    if group.entries.iter().any(|e| e.id.0 == candidate) {
+        return true;
+    }
+    group.groups.iter().any(|g| group_uuid_in_use(g, candidate))
+}
+
+/// Generate a fresh v4 UUID that doesn't collide with any existing
+/// entry or group in the vault. In practice `Uuid::new_v4()` is
+/// globally unique and the loop is belt-and-braces, but the loop
+/// makes the "never collide" invariant explicit.
+fn fresh_uuid(vault: &Vault) -> uuid::Uuid {
+    loop {
+        let candidate = uuid::Uuid::new_v4();
+        if !uuid_in_use(vault, candidate) {
+            return candidate;
+        }
     }
 }
 

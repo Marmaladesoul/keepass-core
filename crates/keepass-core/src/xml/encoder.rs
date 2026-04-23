@@ -102,6 +102,9 @@ pub fn encode_vault_with_cipher(
     write_meta(&mut writer, &vault.meta)?;
     open(&mut writer, "Root")?;
     write_group(&mut writer, &vault.root, cipher)?;
+    if !vault.deleted_objects.is_empty() {
+        write_deleted_objects(&mut writer, &vault.deleted_objects)?;
+    }
     close(&mut writer, "Root")?;
     close(&mut writer, "KeePassFile")?;
     Ok(writer.into_inner().into_inner())
@@ -142,6 +145,7 @@ fn write_group<W: std::io::Write>(
     if !group.notes.is_empty() {
         write_text_element(w, "Notes", &group.notes)?;
     }
+    write_times(w, &group.times)?;
     for entry in &group.entries {
         write_entry(w, entry, cipher)?;
     }
@@ -181,7 +185,52 @@ fn write_entry<W: std::io::Write>(
     if !entry.tags.is_empty() {
         write_text_element(w, "Tags", &entry.tags.join(";"))?;
     }
+    write_times(w, &entry.times)?;
     close(w, "Entry")
+}
+
+fn write_times<W: std::io::Write>(
+    w: &mut Writer<W>,
+    times: &crate::model::Timestamps,
+) -> Result<(), XmlError> {
+    // Emit `<Times>` whenever any sub-field is set. An all-default
+    // Timestamps (no timestamps, expires=false, usage_count=0) is
+    // indistinguishable from "no <Times> block at all" to the
+    // decoder, so skip emission in that case to keep round-tripped
+    // XML minimal.
+    let any_set = times.creation_time.is_some()
+        || times.last_modification_time.is_some()
+        || times.last_access_time.is_some()
+        || times.location_changed.is_some()
+        || times.expiry_time.is_some()
+        || times.expires
+        || times.usage_count != 0;
+    if !any_set {
+        return Ok(());
+    }
+    open(w, "Times")?;
+    write_optional_timestamp(w, "CreationTime", times.creation_time)?;
+    write_optional_timestamp(w, "LastModificationTime", times.last_modification_time)?;
+    write_optional_timestamp(w, "LastAccessTime", times.last_access_time)?;
+    write_optional_timestamp(w, "LocationChanged", times.location_changed)?;
+    write_optional_timestamp(w, "ExpiryTime", times.expiry_time)?;
+    write_text_element(w, "Expires", if times.expires { "True" } else { "False" })?;
+    write_text_element(w, "UsageCount", &times.usage_count.to_string())?;
+    close(w, "Times")
+}
+
+fn write_deleted_objects<W: std::io::Write>(
+    w: &mut Writer<W>,
+    objects: &[crate::model::DeletedObject],
+) -> Result<(), XmlError> {
+    open(w, "DeletedObjects")?;
+    for obj in objects {
+        open(w, "DeletedObject")?;
+        write_text_element(w, "UUID", &uuid_to_base64(obj.uuid))?;
+        write_optional_timestamp(w, "DeletionTime", obj.deleted_at)?;
+        close(w, "DeletedObject")?;
+    }
+    close(w, "DeletedObjects")
 }
 
 /// Write a plain `<String><Key>…</Key><Value>…</Value></String>` pair.
