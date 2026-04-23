@@ -878,7 +878,10 @@ fn remove_group_with_parent_pair(root: &mut Group, id: GroupId) -> Option<(Group
 /// in depth-first order. Used by `delete_group` so a peer replica
 /// merging against this vault can distinguish deleted records from
 /// never-seen ones.
-fn collect_subtree_tombstones(group: &Group, at: chrono::DateTime<chrono::Utc>) -> Vec<DeletedObject> {
+fn collect_subtree_tombstones(
+    group: &Group,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Vec<DeletedObject> {
     let mut out = Vec::new();
     push_subtree_tombstones(group, at, &mut out);
     out
