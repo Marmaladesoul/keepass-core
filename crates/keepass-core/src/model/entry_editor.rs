@@ -205,15 +205,12 @@ impl<'a> EntryEditor<'a> {
     /// the deadline; `None` disables expiry entirely (clearing both
     /// the `Expires` flag and the stored `ExpiryTime`).
     pub fn set_expiry(&mut self, at: Option<DateTime<Utc>>) {
-        match at {
-            Some(t) => {
-                self.inner.times.expires = true;
-                self.inner.times.expiry_time = Some(t);
-            }
-            None => {
-                self.inner.times.expires = false;
-                self.inner.times.expiry_time = None;
-            }
+        if let Some(t) = at {
+            self.inner.times.expires = true;
+            self.inner.times.expiry_time = Some(t);
+        } else {
+            self.inner.times.expires = false;
+            self.inner.times.expiry_time = None;
         }
     }
 
