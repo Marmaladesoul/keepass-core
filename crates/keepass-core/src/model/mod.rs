@@ -20,7 +20,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod clock;
+pub mod new_entry;
 pub use clock::{Clock, FixedClock, SystemClock};
+pub use new_entry::NewEntry;
 
 // ---------------------------------------------------------------------------
 // Mutation-API errors
