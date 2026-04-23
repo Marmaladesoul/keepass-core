@@ -46,7 +46,7 @@ use crate::format::{
     read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hashed_block_stream,
     write_hmac_block_stream,
 };
-use crate::model::{Binary, Vault};
+use crate::model::{Binary, Clock, SystemClock, Vault};
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{decode_vault_with_cipher, encode_vault_with_cipher};
 
@@ -82,6 +82,12 @@ pub struct HeaderRead {
 #[derive(Debug)]
 pub struct Unlocked {
     vault: Vault,
+    /// The clock used to stamp timestamps during mutations. Set at
+    /// unlock time via [`Kdbx::<HeaderRead>::unlock`] (`SystemClock`)
+    /// or [`Kdbx::<HeaderRead>::unlock_with_clock`] (caller-supplied).
+    /// Not swappable after unlock — mid-session clock changes would
+    /// let timestamps travel backwards, which breaks history ordering.
+    clock: Box<dyn Clock>,
     /// Outer header as parsed at unlock time. `save_to_bytes` reuses
     /// every field — same cipher, same master seed, same KDF params —
     /// so `unlock → save → re-open → unlock` produces the same vault
@@ -286,7 +292,32 @@ impl Kdbx<HeaderRead> {
     /// as a generic decryption failure, so an attacker cannot learn
     /// anything about the key from the error variant alone.
     pub fn unlock(self, composite: &CompositeKey) -> Result<Kdbx<Unlocked>, Error> {
-        let state = do_unlock(&self.bytes, &self.state, composite)?;
+        self.unlock_with_clock(composite, Box::new(SystemClock))
+    }
+
+    /// Like [`Self::unlock`] but uses the caller-supplied [`Clock`]
+    /// for any timestamps stamped during later mutations.
+    ///
+    /// Production callers should use [`Self::unlock`], which hands in
+    /// a [`SystemClock`]. Tests use this entry point to pin the
+    /// mutation clock to a deterministic value (e.g. a
+    /// [`crate::model::FixedClock`]) so assertions on
+    /// `entry.times.*` can be exact.
+    ///
+    /// The clock is stored on the resulting [`Kdbx<Unlocked>`] and is
+    /// not swappable afterwards. A mid-session clock change would
+    /// break history ordering invariants.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::unlock`].
+    pub fn unlock_with_clock(
+        self,
+        composite: &CompositeKey,
+        clock: Box<dyn Clock>,
+    ) -> Result<Kdbx<Unlocked>, Error> {
+        let mut state = do_unlock(&self.bytes, &self.state, composite)?;
+        state.clock = clock;
         Ok(Kdbx {
             bytes: self.bytes,
             signature: self.signature,
@@ -311,6 +342,15 @@ impl Kdbx<Unlocked> {
     /// a save.
     pub fn vault_mut(&mut self) -> &mut Vault {
         &mut self.state.vault
+    }
+
+    /// The [`Clock`] this unlocked database uses to stamp timestamps
+    /// during mutations. Either [`SystemClock`] (default, from
+    /// [`Kdbx::<HeaderRead>::unlock`]) or whatever was passed to
+    /// [`Kdbx::<HeaderRead>::unlock_with_clock`].
+    #[must_use]
+    pub fn clock(&self) -> &dyn Clock {
+        &*self.state.clock
     }
 
     /// Serialise this unlocked database back to a KDBX byte stream —
@@ -525,6 +565,7 @@ fn do_unlock(
                         key: inner.inner_stream_key,
                     }),
                     transformed_key: transformed,
+                    clock: Box::new(SystemClock),
                 });
             }
         };
@@ -546,6 +587,7 @@ fn do_unlock(
             key: inner_stream_key,
         }),
         transformed_key: transformed,
+        clock: Box::new(SystemClock),
     })
 }
 

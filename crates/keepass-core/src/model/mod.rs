@@ -16,7 +16,59 @@
 //! in follow-up PRs.
 
 use chrono::{DateTime, Utc};
+use thiserror::Error;
 use uuid::Uuid;
+
+pub mod clock;
+pub use clock::{Clock, FixedClock, SystemClock};
+
+// ---------------------------------------------------------------------------
+// Mutation-API errors
+// ---------------------------------------------------------------------------
+
+/// Errors returned by the [`crate::kdbx::Kdbx`] mutation API.
+///
+/// Tree-level operations (add / delete / move) can fail for
+/// well-defined, caller-visible reasons: a UUID isn't in the vault,
+/// a move would create a cycle, the root group can't be deleted, etc.
+/// These each get their own variant so callers can pattern-match
+/// rather than string-match. Wrapped at the top level via
+/// [`crate::error::Error::Model`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ModelError {
+    /// The requested [`EntryId`] is not present anywhere in the vault.
+    #[error("entry {0:?} not found")]
+    EntryNotFound(EntryId),
+
+    /// The requested [`GroupId`] is not present anywhere in the vault.
+    #[error("group {0:?} not found")]
+    GroupNotFound(GroupId),
+
+    /// A `Kdbx::move_group` call would make `moving` a descendant
+    /// of itself through `new_parent`.
+    #[error(
+        "move would create a cycle: group {moving:?} cannot become a descendant of itself via {new_parent:?}"
+    )]
+    CircularMove {
+        /// The group being moved.
+        moving: GroupId,
+        /// The proposed new parent, which is itself in `moving`'s subtree.
+        new_parent: GroupId,
+    },
+
+    /// A caller-supplied UUID collides with one already in the vault.
+    ///
+    /// Hit during `Kdbx::add_entry` / `Kdbx::add_group` when the
+    /// builder's `with_uuid` is used and the chosen UUID is already
+    /// taken.
+    #[error("UUID {0} already in use in this vault")]
+    DuplicateUuid(Uuid),
+
+    /// The root group cannot be deleted — every vault has exactly one.
+    #[error("cannot delete the root group")]
+    CannotDeleteRoot,
+}
 
 // ---------------------------------------------------------------------------
 // Newtype identifiers
