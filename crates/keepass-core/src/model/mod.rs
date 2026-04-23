@@ -21,10 +21,14 @@ use uuid::Uuid;
 
 pub mod clock;
 pub mod entry_editor;
+pub mod group_editor;
 pub mod new_entry;
+pub mod new_group;
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use entry_editor::{CustomFieldValue, EntryEditor};
+pub use group_editor::GroupEditor;
 pub use new_entry::NewEntry;
+pub use new_group::NewGroup;
 
 // ---------------------------------------------------------------------------
 // HistoryPolicy

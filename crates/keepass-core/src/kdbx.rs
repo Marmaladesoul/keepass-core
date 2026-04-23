@@ -50,7 +50,8 @@ use crate::format::{
 use crate::model::entry_editor::PendingBinaryOps;
 use crate::model::{
     Attachment, AutoType, Binary, Clock, DeletedObject, Entry, EntryEditor, EntryId, Group,
-    GroupId, HistoryPolicy, ModelError, NewEntry, SystemClock, Timestamps, Vault,
+    GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, SystemClock, Timestamps,
+    Vault,
 };
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{decode_vault_with_cipher, encode_vault_with_cipher};
@@ -627,11 +628,284 @@ impl Kdbx<Unlocked> {
     pub fn save_to_bytes(&self) -> Result<Vec<u8>, Error> {
         do_save(self.signature, self.version, &self.state)
     }
+
+    /// Insert a new [`Group`] under the parent identified by
+    /// `parent`.
+    ///
+    /// Mirrors [`Self::add_entry`]: the library owns UUID generation
+    /// (unless the builder set one via [`NewGroup::with_uuid`]),
+    /// fills in every [`Timestamps`] field from [`Self::clock`],
+    /// sets `previous_parent_group = None`, and appends the group to
+    /// the parent's child list. Returns the new group's [`GroupId`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::GroupNotFound`] if `parent` is not in the vault.
+    /// - [`ModelError::DuplicateUuid`] if the builder supplied a UUID
+    ///   that is already in use anywhere in the vault.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic under any input. The second `find_group_mut`
+    /// call is `.expect()`ed because the first call has already
+    /// proved the parent exists.
+    pub fn add_group(
+        &mut self,
+        parent: GroupId,
+        template: NewGroup,
+    ) -> Result<GroupId, ModelError> {
+        let uuid = match template.uuid {
+            Some(u) => {
+                if uuid_in_use(&self.state.vault, u) {
+                    return Err(ModelError::DuplicateUuid(u));
+                }
+                u
+            }
+            None => fresh_uuid(&self.state.vault),
+        };
+
+        if find_group_mut(&mut self.state.vault.root, parent).is_none() {
+            return Err(ModelError::GroupNotFound(parent));
+        }
+
+        let now = self.state.clock.now();
+        let group = Group {
+            id: GroupId(uuid),
+            name: template.name,
+            notes: template.notes,
+            groups: Vec::new(),
+            entries: Vec::new(),
+            is_expanded: true,
+            default_auto_type_sequence: String::new(),
+            enable_auto_type: None,
+            enable_searching: None,
+            custom_data: Vec::new(),
+            previous_parent_group: None,
+            last_top_visible_entry: None,
+            custom_icon_uuid: None,
+            times: Timestamps {
+                creation_time: Some(now),
+                last_modification_time: Some(now),
+                last_access_time: Some(now),
+                location_changed: Some(now),
+                expiry_time: None,
+                expires: false,
+                usage_count: 0,
+            },
+        };
+
+        let target = find_group_mut(&mut self.state.vault.root, parent)
+            .expect("parent existence checked above");
+        target.groups.push(group);
+        Ok(GroupId(uuid))
+    }
+
+    /// Recursively delete the group with the given id.
+    ///
+    /// Every entry and every subgroup under the target gets its own
+    /// [`DeletedObject`] tombstone (stamped from [`Self::clock`])
+    /// before the subtree is removed, so a peer replica merging
+    /// against this vault can tell deleted records apart from
+    /// never-seen ones.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::CannotDeleteRoot`] if `id` is the root group's id.
+    /// - [`ModelError::GroupNotFound`] if `id` is not in the vault.
+    pub fn delete_group(&mut self, id: GroupId) -> Result<(), ModelError> {
+        if self.state.vault.root.id == id {
+            return Err(ModelError::CannotDeleteRoot);
+        }
+        let now = self.state.clock.now();
+        let removed = remove_group_with_parent(&mut self.state.vault.root, id)
+            .ok_or(ModelError::GroupNotFound(id))?;
+        // Tombstone every entry and subgroup recursively, in addition
+        // to the group itself.
+        let tombstones = collect_subtree_tombstones(&removed, now);
+        self.state.vault.deleted_objects.extend(tombstones);
+        Ok(())
+    }
+
+    /// Move a group from its current parent to `new_parent`.
+    ///
+    /// Bookkeeping applied automatically:
+    /// - `group.times.location_changed = self.clock().now()`
+    /// - `group.previous_parent_group = Some(old_parent)`
+    /// - **Cycle rejection.** A move that would make `id` a descendant
+    ///   of itself (i.e. `new_parent` is `id` or anywhere under `id`'s
+    ///   subtree) returns [`ModelError::CircularMove`] and leaves the
+    ///   tree untouched.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::CannotDeleteRoot`] if `id` is the root group's
+    ///   id (the root has no parent and cannot be moved).
+    /// - [`ModelError::GroupNotFound`] if either `id` or `new_parent`
+    ///   is missing.
+    /// - [`ModelError::CircularMove`] if the move would create a cycle.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic under any input. The final `find_group_mut`
+    /// call is `.expect()`ed because the destination's existence was
+    /// already proved earlier in the function.
+    pub fn move_group(&mut self, id: GroupId, new_parent: GroupId) -> Result<(), ModelError> {
+        if self.state.vault.root.id == id {
+            // Root has no parent and reparenting it would orphan the
+            // whole vault.
+            return Err(ModelError::CannotDeleteRoot);
+        }
+
+        // Check the destination exists before touching anything.
+        if find_group(&self.state.vault.root, new_parent).is_none() {
+            return Err(ModelError::GroupNotFound(new_parent));
+        }
+
+        // Cycle check: walk `id`'s subtree (including `id` itself)
+        // and reject if `new_parent` lives inside it.
+        let Some(source_subtree) = find_group(&self.state.vault.root, id) else {
+            return Err(ModelError::GroupNotFound(id));
+        };
+        if subtree_contains(source_subtree, new_parent) {
+            return Err(ModelError::CircularMove {
+                moving: id,
+                new_parent,
+            });
+        }
+
+        let (mut group, old_parent) = remove_group_with_parent_pair(&mut self.state.vault.root, id)
+            .ok_or(ModelError::GroupNotFound(id))?;
+        let now = self.state.clock.now();
+        group.previous_parent_group = Some(old_parent);
+        group.times.location_changed = Some(now);
+
+        let target = find_group_mut(&mut self.state.vault.root, new_parent)
+            .expect("destination existence checked above");
+        target.groups.push(group);
+        Ok(())
+    }
+
+    /// Field-level edit on a single group, with one automatic
+    /// `last_modification_time` stamp after the closure returns.
+    ///
+    /// Groups don't carry history, so there is no `HistoryPolicy`
+    /// parameter and no snapshot logic — the closure just gets a
+    /// [`GroupEditor`], the library stamps the timestamp, and the
+    /// edit is committed.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::GroupNotFound`] if `id` is not in the vault.
+    pub fn edit_group<R>(
+        &mut self,
+        id: GroupId,
+        f: impl FnOnce(&mut GroupEditor<'_>) -> R,
+    ) -> Result<R, ModelError> {
+        let now = self.state.clock.now();
+        let group =
+            find_group_mut(&mut self.state.vault.root, id).ok_or(ModelError::GroupNotFound(id))?;
+        let result = {
+            let mut editor = GroupEditor::new(group);
+            f(&mut editor)
+        };
+        group.times.last_modification_time = Some(now);
+        Ok(result)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Vault-tree helpers used by the mutation API.
 // ---------------------------------------------------------------------------
+
+/// Read-only sibling of [`find_group_mut`] used by `move_group`'s
+/// cycle check, where mutating the source subtree before the check
+/// passes would be wrong.
+fn find_group(root: &Group, id: GroupId) -> Option<&Group> {
+    if root.id == id {
+        return Some(root);
+    }
+    for child in &root.groups {
+        if let Some(hit) = find_group(child, id) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// Whether `target` exists anywhere in the subtree rooted at `root`,
+/// including at `root` itself. Used by `move_group` to reject moves
+/// that would make a group a descendant of itself.
+fn subtree_contains(root: &Group, target: GroupId) -> bool {
+    if root.id == target {
+        return true;
+    }
+    root.groups.iter().any(|g| subtree_contains(g, target))
+}
+
+/// Remove the group with the given id from wherever it lives in the
+/// tree rooted at `root`, returning the removed subtree. Used by
+/// `delete_group`. The root group cannot be removed this way — its
+/// id check happens before this is called.
+fn remove_group_with_parent(root: &mut Group, id: GroupId) -> Option<Group> {
+    if let Some(pos) = root.groups.iter().position(|g| g.id == id) {
+        return Some(root.groups.remove(pos));
+    }
+    for child in &mut root.groups {
+        if let Some(g) = remove_group_with_parent(child, id) {
+            return Some(g);
+        }
+    }
+    None
+}
+
+/// Variant of [`remove_group_with_parent`] that also returns the
+/// [`GroupId`] of the parent the removed subtree came out of, used by
+/// `move_group` to populate `previous_parent_group`.
+fn remove_group_with_parent_pair(root: &mut Group, id: GroupId) -> Option<(Group, GroupId)> {
+    if let Some(pos) = root.groups.iter().position(|g| g.id == id) {
+        return Some((root.groups.remove(pos), root.id));
+    }
+    for child in &mut root.groups {
+        if let Some(pair) = remove_group_with_parent_pair(child, id) {
+            return Some(pair);
+        }
+    }
+    None
+}
+
+/// Build a [`DeletedObject`] tombstone (stamped `at`) for the group
+/// itself plus every entry and every subgroup recursively under it,
+/// in depth-first order. Used by `delete_group` so a peer replica
+/// merging against this vault can distinguish deleted records from
+/// never-seen ones.
+fn collect_subtree_tombstones(
+    group: &Group,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Vec<DeletedObject> {
+    let mut out = Vec::new();
+    push_subtree_tombstones(group, at, &mut out);
+    out
+}
+
+fn push_subtree_tombstones(
+    group: &Group,
+    at: chrono::DateTime<chrono::Utc>,
+    out: &mut Vec<DeletedObject>,
+) {
+    for e in &group.entries {
+        out.push(DeletedObject {
+            uuid: e.id.0,
+            deleted_at: Some(at),
+        });
+    }
+    for child in &group.groups {
+        push_subtree_tombstones(child, at, out);
+    }
+    out.push(DeletedObject {
+        uuid: group.id.0,
+        deleted_at: Some(at),
+    });
+}
 
 /// Walk the tree rooted at `root` looking for a group with the given id.
 /// Returns a mutable reference to the first match, or `None`.
