@@ -193,6 +193,19 @@ fn write_entry<W: std::io::Write>(
     if let Some(prev) = entry.previous_parent_group {
         write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
     }
+    // `<History>` — prior snapshots of this entry. Emitted before the
+    // closing `</Entry>` (matching KeePassXC's output) and recursively
+    // rendered through `write_entry` so protected values in history
+    // consume the same inner-stream keystream the decoder expects on
+    // read. Elided entirely when history is empty to keep the XML
+    // minimal.
+    if !entry.history.is_empty() {
+        open(w, "History")?;
+        for snap in &entry.history {
+            write_entry(w, snap, cipher)?;
+        }
+        close(w, "History")?;
+    }
     close(w, "Entry")
 }
 

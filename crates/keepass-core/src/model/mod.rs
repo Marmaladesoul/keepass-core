@@ -20,9 +20,48 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod clock;
+pub mod entry_editor;
 pub mod new_entry;
 pub use clock::{Clock, FixedClock, SystemClock};
+pub use entry_editor::EntryEditor;
 pub use new_entry::NewEntry;
+
+// ---------------------------------------------------------------------------
+// HistoryPolicy
+// ---------------------------------------------------------------------------
+
+/// Caller-supplied policy for whether (and when) an
+/// `edit_entry` call snapshots the pre-edit [`Entry`] into its own
+/// history.
+///
+/// The library does not impose a global default — different hosts
+/// want different behaviour, and coalescing rapid saves is a
+/// legitimate policy, so [`HistoryPolicy`] is a parameter on every
+/// `edit_entry` call, not state on the `Kdbx`.
+///
+/// After a snapshot is taken the history list is truncated to
+/// [`Meta::history_max_items`] entries (value < 0 means unlimited);
+/// [`Meta::history_max_size`] is treated as an approximate soft
+/// byte budget based on the serialised canonical-field lengths.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum HistoryPolicy {
+    /// Always snapshot before the edit runs. The canonical KeePass
+    /// behaviour.
+    Snapshot,
+
+    /// Never snapshot. Use for cosmetic fixups the caller doesn't
+    /// want to appear in the entry's history — e.g. correcting a
+    /// typo immediately after the original save, or a bulk re-
+    /// encode after a model migration.
+    NoSnapshot,
+
+    /// Snapshot only if the most recent history entry is older than
+    /// `since`. Implements "coalesce edits within a window" — e.g.
+    /// `chrono::Duration::hours(24)` means at most one snapshot per
+    /// day. If there is no prior history, always snapshots.
+    SnapshotIfOlderThan(chrono::Duration),
+}
 
 // ---------------------------------------------------------------------------
 // Mutation-API errors
