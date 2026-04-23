@@ -186,6 +186,13 @@ fn write_entry<W: std::io::Write>(
         write_text_element(w, "Tags", &entry.tags.join(";"))?;
     }
     write_times(w, &entry.times)?;
+    // `<PreviousParentGroup>` — only emitted when the entry has been
+    // moved at least once. The decoder accepts either an empty string
+    // or a nil UUID as "no previous parent"; we elide the element
+    // entirely in that case for a more minimal document.
+    if let Some(prev) = entry.previous_parent_group {
+        write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
+    }
     close(w, "Entry")
 }
 

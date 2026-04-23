@@ -443,13 +443,58 @@ impl Kdbx<Unlocked> {
     /// - [`ModelError::EntryNotFound`] if no entry with that id exists
     ///   anywhere in the vault.
     pub fn delete_entry(&mut self, id: EntryId) -> Result<(), ModelError> {
-        let removed =
-            remove_entry(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let (removed, _old_parent) = remove_entry_with_parent(&mut self.state.vault.root, id)
+            .ok_or(ModelError::EntryNotFound(id))?;
         let now = self.state.clock.now();
         self.state.vault.deleted_objects.push(DeletedObject {
             uuid: removed.id.0,
             deleted_at: Some(now),
         });
+        Ok(())
+    }
+
+    /// Move an entry from its current parent to `new_parent`.
+    ///
+    /// Bookkeeping applied automatically:
+    /// - `entry.times.location_changed = self.clock().now()`
+    /// - `entry.previous_parent_group = Some(old_parent)`
+    /// - No history snapshot — MUTATION.md §"Bookkeeping invariants"
+    ///   explicitly excludes `move_entry` from history: a move is not
+    ///   a field edit.
+    ///
+    /// A no-op move (same parent as current) still stamps
+    /// `location_changed` and records `previous_parent_group = Some(same)`
+    /// — the caller expressed intent, so we don't silently skip.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
+    /// - [`ModelError::GroupNotFound`] if `new_parent` is not in the
+    ///   vault. The entry is *not* removed in this case — we check the
+    ///   destination before touching the source.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic under any input. The second `find_group_mut`
+    /// call is `.expect()`ed because the first call has already
+    /// proved the destination exists.
+    pub fn move_entry(&mut self, id: EntryId, new_parent: GroupId) -> Result<(), ModelError> {
+        // Check the destination first so a failure leaves the entry
+        // where it was.
+        if find_group_mut(&mut self.state.vault.root, new_parent).is_none() {
+            return Err(ModelError::GroupNotFound(new_parent));
+        }
+
+        let (mut entry, old_parent) = remove_entry_with_parent(&mut self.state.vault.root, id)
+            .ok_or(ModelError::EntryNotFound(id))?;
+
+        entry.previous_parent_group = Some(old_parent);
+        let now = self.state.clock.now();
+        entry.times.location_changed = Some(now);
+
+        let target = find_group_mut(&mut self.state.vault.root, new_parent)
+            .expect("destination existence checked above");
+        target.entries.push(entry);
         Ok(())
     }
 
@@ -515,15 +560,19 @@ fn find_group_mut(root: &mut Group, id: GroupId) -> Option<&mut Group> {
 }
 
 /// Remove the entry with the given id from wherever it lives in the
-/// tree rooted at `root`. Returns the removed entry, or `None` if no
+/// tree rooted at `root`. Returns the removed entry paired with the
+/// [`GroupId`] of the parent group it came out of, or `None` if no
 /// entry with that id exists anywhere in the subtree.
-fn remove_entry(root: &mut Group, id: EntryId) -> Option<Entry> {
+///
+/// The parent id is what `move_entry` records in
+/// `entry.previous_parent_group` and what `delete_entry` ignores.
+fn remove_entry_with_parent(root: &mut Group, id: EntryId) -> Option<(Entry, GroupId)> {
     if let Some(pos) = root.entries.iter().position(|e| e.id == id) {
-        return Some(root.entries.remove(pos));
+        return Some((root.entries.remove(pos), root.id));
     }
     for child in &mut root.groups {
-        if let Some(entry) = remove_entry(child, id) {
-            return Some(entry);
+        if let Some(pair) = remove_entry_with_parent(child, id) {
+            return Some(pair);
         }
     }
     None
