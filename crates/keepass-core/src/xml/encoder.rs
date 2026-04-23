@@ -45,7 +45,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
-use crate::model::{Entry, Group, Meta, Vault};
+use crate::model::{AutoType, Entry, Group, Meta, Vault};
 
 /// Encode a [`Vault`] into a byte-for-byte legal KeePass inner XML
 /// document, **without** applying an inner-stream cipher.
@@ -185,6 +185,26 @@ fn write_entry<W: std::io::Write>(
     if !entry.tags.is_empty() {
         write_text_element(w, "Tags", &entry.tags.join(";"))?;
     }
+    // Decorative fields — emit only when non-default so a vanilla
+    // entry stays minimal. The decoder treats absent and present-but-
+    // empty as the same, so elision is safe.
+    if !entry.foreground_color.is_empty() {
+        write_text_element(w, "ForegroundColor", &entry.foreground_color)?;
+    }
+    if !entry.background_color.is_empty() {
+        write_text_element(w, "BackgroundColor", &entry.background_color)?;
+    }
+    if !entry.override_url.is_empty() {
+        write_text_element(w, "OverrideURL", &entry.override_url)?;
+    }
+    if let Some(icon) = entry.custom_icon_uuid {
+        write_text_element(w, "CustomIconUUID", &uuid_to_base64(icon))?;
+    }
+    // QualityCheck defaults to true; emit only when the entry has
+    // explicitly opted out, matching what KeePassXC writes.
+    if !entry.quality_check {
+        write_text_element(w, "QualityCheck", "False")?;
+    }
     write_times(w, &entry.times)?;
     // `<PreviousParentGroup>` — only emitted when the entry has been
     // moved at least once. The decoder accepts either an empty string
@@ -192,6 +212,12 @@ fn write_entry<W: std::io::Write>(
     // entirely in that case for a more minimal document.
     if let Some(prev) = entry.previous_parent_group {
         write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
+    }
+    // AutoType — emit only when the block carries any non-default
+    // setting. AutoType has no protected values, so its placement
+    // does not affect the inner-stream cipher's keystream sync.
+    if !is_default_auto_type(&entry.auto_type) {
+        write_auto_type(w, &entry.auto_type)?;
     }
     // `<History>` — prior snapshots of this entry. Emitted before the
     // closing `</Entry>` (matching KeePassXC's output) and recursively
@@ -237,6 +263,34 @@ fn write_times<W: std::io::Write>(
     write_text_element(w, "Expires", if times.expires { "True" } else { "False" })?;
     write_text_element(w, "UsageCount", &times.usage_count.to_string())?;
     close(w, "Times")
+}
+
+fn is_default_auto_type(at: &AutoType) -> bool {
+    let d = AutoType::default();
+    at.enabled == d.enabled
+        && at.data_transfer_obfuscation == d.data_transfer_obfuscation
+        && at.default_sequence == d.default_sequence
+        && at.associations.is_empty()
+}
+
+fn write_auto_type<W: std::io::Write>(w: &mut Writer<W>, at: &AutoType) -> Result<(), XmlError> {
+    open(w, "AutoType")?;
+    write_text_element(w, "Enabled", if at.enabled { "True" } else { "False" })?;
+    write_text_element(
+        w,
+        "DataTransferObfuscation",
+        &at.data_transfer_obfuscation.to_string(),
+    )?;
+    if !at.default_sequence.is_empty() {
+        write_text_element(w, "DefaultSequence", &at.default_sequence)?;
+    }
+    for assoc in &at.associations {
+        open(w, "Association")?;
+        write_text_element(w, "Window", &assoc.window)?;
+        write_text_element(w, "KeystrokeSequence", &assoc.keystroke_sequence)?;
+        close(w, "Association")?;
+    }
+    close(w, "AutoType")
 }
 
 fn write_deleted_objects<W: std::io::Write>(
