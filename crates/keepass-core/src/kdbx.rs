@@ -47,8 +47,8 @@ use crate::format::{
     write_hmac_block_stream,
 };
 use crate::model::{
-    AutoType, Binary, Clock, DeletedObject, Entry, EntryId, Group, GroupId, ModelError, NewEntry,
-    SystemClock, Timestamps, Vault,
+    AutoType, Binary, Clock, DeletedObject, Entry, EntryEditor, EntryId, Group, GroupId,
+    HistoryPolicy, ModelError, NewEntry, SystemClock, Timestamps, Vault,
 };
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{decode_vault_with_cipher, encode_vault_with_cipher};
@@ -498,6 +498,87 @@ impl Kdbx<Unlocked> {
         Ok(())
     }
 
+    /// Field-level edit on a single entry, with one automatic
+    /// history snapshot (per `policy`) and one automatic
+    /// `last_modification_time` stamp after the closure returns.
+    ///
+    /// The closure is handed an [`EntryEditor`] that exposes only
+    /// the legitimately caller-mutable fields. Setters on the editor
+    /// (title / username / password / url / notes in this slice)
+    /// touch the target entry in-place; the library owns the
+    /// bookkeeping around them.
+    ///
+    /// History snapshot behaviour is determined by `policy`:
+    /// - [`HistoryPolicy::Snapshot`]: always clone the pre-edit entry
+    ///   into `entry.history` before the closure runs.
+    /// - [`HistoryPolicy::NoSnapshot`]: skip the snapshot.
+    /// - `HistoryPolicy::SnapshotIfOlderThan(since)`: snapshot
+    ///   only if the most recent history entry's
+    ///   `last_modification_time` is older than `clock.now() - since`,
+    ///   or if history is empty.
+    ///
+    /// After a snapshot is taken the history list is truncated to
+    /// [`crate::model::Meta::history_max_items`] entries (negative
+    /// values mean unlimited). `history_max_size` is treated as an
+    /// approximate soft budget on the serialised canonical-field
+    /// byte count — entries are dropped from the front (oldest first)
+    /// until the estimate fits.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
+    pub fn edit_entry<R>(
+        &mut self,
+        id: EntryId,
+        policy: HistoryPolicy,
+        f: impl FnOnce(&mut EntryEditor<'_>) -> R,
+    ) -> Result<R, ModelError> {
+        // Hoist everything we need off `self.state` before we take
+        // a long-lived `&mut Entry` borrow — the borrow checker
+        // otherwise forbids touching `self.state.clock` / meta
+        // through the rest of the method.
+        let now = self.state.clock.now();
+        let history_max_items = self.state.vault.meta.history_max_items;
+        let history_max_size = self.state.vault.meta.history_max_size;
+
+        let entry =
+            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+
+        let should_snapshot = match policy {
+            HistoryPolicy::NoSnapshot => false,
+            HistoryPolicy::Snapshot => true,
+            HistoryPolicy::SnapshotIfOlderThan(window) => match entry.history.last() {
+                None => true,
+                Some(last) => {
+                    let threshold = now - window;
+                    // Absent timestamp → treat as "ancient", snapshot.
+                    last.times
+                        .last_modification_time
+                        .is_none_or(|t| t < threshold)
+                }
+            },
+        };
+
+        if should_snapshot {
+            let mut snap = entry.clone();
+            // KeePass history entries never nest their own history.
+            snap.history.clear();
+            entry.history.push(snap);
+            truncate_history(&mut entry.history, history_max_items, history_max_size);
+        }
+
+        // Scope the editor borrow so `entry` is freely usable again
+        // when we stamp the last-modification timestamp below.
+        let result = {
+            let mut editor = EntryEditor::new(entry);
+            f(&mut editor)
+        };
+
+        entry.times.last_modification_time = Some(now);
+
+        Ok(result)
+    }
+
     /// Serialise this unlocked database back to a KDBX byte stream —
     /// the byte-level inverse of [`Kdbx::<HeaderRead>::unlock`].
     ///
@@ -606,6 +687,72 @@ fn fresh_uuid(vault: &Vault) -> uuid::Uuid {
             return candidate;
         }
     }
+}
+
+/// Locate an entry by id anywhere in the tree rooted at `root`,
+/// returning a mutable reference for in-place field edits.
+fn find_entry_mut(root: &mut Group, id: EntryId) -> Option<&mut Entry> {
+    // Manual loop instead of `iter_mut().find(...)` + recursion:
+    // the borrow checker can't prove we don't reborrow through two
+    // different subtrees when we use combinators here.
+    if let Some(pos) = root.entries.iter().position(|e| e.id == id) {
+        return Some(&mut root.entries[pos]);
+    }
+    for child in &mut root.groups {
+        if let Some(entry) = find_entry_mut(child, id) {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+/// Truncate `history` per `max_items` (negative = unlimited) and
+/// `max_size` (negative = unlimited). Oldest entries go first.
+///
+/// `max_size` is a soft budget measured against an approximation of
+/// each entry's serialised XML size: the byte length of the five
+/// canonical string fields plus custom fields and tags, plus a
+/// 200-byte constant for wrapper markup. Good enough for "don't let
+/// a megabyte of history accumulate"; not byte-exact.
+fn truncate_history(history: &mut Vec<Entry>, max_items: i32, max_size: i64) {
+    // Item-count budget first, since it's cheapest and common.
+    if max_items >= 0 {
+        let cap = usize::try_from(max_items).unwrap_or(usize::MAX);
+        while history.len() > cap {
+            history.remove(0);
+        }
+    }
+
+    // Size budget, if one is declared.
+    if max_size >= 0 {
+        let cap = u64::try_from(max_size).unwrap_or(u64::MAX);
+        let mut total: u64 = history.iter().map(approx_entry_size).sum();
+        while total > cap && !history.is_empty() {
+            let dropped = approx_entry_size(&history[0]);
+            history.remove(0);
+            total = total.saturating_sub(dropped);
+        }
+    }
+}
+
+/// Approximate the byte footprint an entry takes up when serialised
+/// inside a `<History>` block. Counts the user-visible string bytes
+/// plus a constant for XML wrapping overhead.
+fn approx_entry_size(e: &Entry) -> u64 {
+    let mut n: u64 = 200; // wrapper markup for <Entry>...<History>...</History></Entry>
+    n = n.saturating_add(e.title.len() as u64);
+    n = n.saturating_add(e.username.len() as u64);
+    n = n.saturating_add(e.password.len() as u64);
+    n = n.saturating_add(e.url.len() as u64);
+    n = n.saturating_add(e.notes.len() as u64);
+    for cf in &e.custom_fields {
+        n = n.saturating_add(cf.key.len() as u64);
+        n = n.saturating_add(cf.value.len() as u64);
+    }
+    for t in &e.tags {
+        n = n.saturating_add(t.len() as u64);
+    }
+    n
 }
 
 // ---------------------------------------------------------------------------
