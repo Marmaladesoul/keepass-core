@@ -45,11 +45,10 @@ flate2 = "1"                        # gzip decompression (both KDBX3 and KDBX4 p
 quick-xml = "0.36"                  # streaming XML reader for KeePass inner document
 winnow    = "0.6"                   # binary header TLVs
 
-# Timestamps. Default features disabled — we don't need `clock`
-# (wall-clock access, which pulls in platform bindings) or `wasmbind`.
-# `alloc` is on implicitly via `std`; that's all we need for DateTime<Utc>
-# parsing and arithmetic.
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+# Timestamps. `clock` enables `Utc::now()` via platform wall-clock
+# bindings — needed by the mutation API's SystemClock. `wasmbind` is
+# off because we don't target browser wasm.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 # Randomness.
 # getrandom = "0.2"
