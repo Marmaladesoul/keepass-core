@@ -145,7 +145,30 @@ fn write_group<W: std::io::Write>(
     if !group.notes.is_empty() {
         write_text_element(w, "Notes", &group.notes)?;
     }
+    if let Some(icon) = group.custom_icon_uuid {
+        write_text_element(w, "CustomIconUUID", &uuid_to_base64(icon))?;
+    }
     write_times(w, &group.times)?;
+    if !group.is_expanded {
+        // Default is `true`; emit only the non-default value.
+        write_text_element(w, "IsExpanded", "False")?;
+    }
+    if !group.default_auto_type_sequence.is_empty() {
+        write_text_element(
+            w,
+            "DefaultAutoTypeSequence",
+            &group.default_auto_type_sequence,
+        )?;
+    }
+    if let Some(b) = group.enable_auto_type {
+        write_text_element(w, "EnableAutoType", if b { "True" } else { "False" })?;
+    }
+    if let Some(b) = group.enable_searching {
+        write_text_element(w, "EnableSearching", if b { "True" } else { "False" })?;
+    }
+    if let Some(prev) = group.previous_parent_group {
+        write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
+    }
     for entry in &group.entries {
         write_entry(w, entry, cipher)?;
     }
