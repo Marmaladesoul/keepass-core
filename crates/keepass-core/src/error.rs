@@ -30,4 +30,9 @@ pub enum Error {
     /// Underlying I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// A vault-mutation error: entry/group not found, circular move,
+    /// duplicate UUID, etc. See [`crate::model::ModelError`].
+    #[error(transparent)]
+    Model(#[from] crate::model::ModelError),
 }
