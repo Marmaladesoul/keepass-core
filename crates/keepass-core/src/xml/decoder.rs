@@ -43,7 +43,8 @@ use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
 use crate::model::{
     Attachment, AutoType, AutoTypeAssociation, Binary, CustomDataItem, CustomField, CustomIcon,
-    DeletedObject, Entry, EntryId, Group, GroupId, MemoryProtection, Meta, Timestamps, Vault,
+    DeletedObject, Entry, EntryId, Group, GroupId, MemoryProtection, Meta, Timestamps,
+    UnknownElement, Vault,
 };
 
 /// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
@@ -195,6 +196,7 @@ fn read_group<R: std::io::BufRead>(
         last_top_visible_entry: None,
         custom_icon_uuid: None,
         times: Timestamps::default(),
+        unknown_xml: Vec::new(),
     };
 
     // Depth 0 = directly inside <Group>; we only act on depth-0 tags.
@@ -282,14 +284,18 @@ fn read_group<R: std::io::BufRead>(
                             continue;
                         }
                         _ => {
-                            // Unknown child of <Group>. Skip silently for
-                            // now; future work adds full preservation.
-                            depth += 1;
+                            // Unknown child of <Group> — capture verbatim
+                            // for round-trip. See `capture_unknown_subtree`
+                            // for the fidelity contract.
+                            let unknown = capture_unknown_subtree(reader, e)?;
+                            group.unknown_xml.push(unknown);
+                            continue;
                         }
                     }
-                } else {
-                    depth += 1;
                 }
+                // depth > 0: nested element inside some already-entered
+                // block; just track the nesting so End events balance.
+                depth += 1;
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -340,6 +346,7 @@ fn read_entry<R: std::io::BufRead>(
         previous_parent_group: None,
         auto_type: AutoType::default(),
         times: Timestamps::default(),
+        unknown_xml: Vec::new(),
     };
 
     let mut depth: i32 = 0;
@@ -430,16 +437,24 @@ fn read_entry<R: std::io::BufRead>(
                             continue;
                         }
                         _ => {
-                            // Unknown child of <Entry>: AutoType, Binary,
-                            // CustomData, etc. None of these carry
-                            // protected values in practice, so skipping is
-                            // safe for keystream sync.
-                            depth += 1;
+                            // Unknown child of <Entry> — capture verbatim
+                            // for round-trip. An unknown subtree may in
+                            // principle contain `<Value Protected="True">`
+                            // payloads whose plaintext we can't recover
+                            // (we don't know the intended semantics), so
+                            // we treat the whole captured fragment as
+                            // opaque bytes. The inner-stream keystream
+                            // stays in sync because `capture_unknown_subtree`
+                            // does not invoke the cipher.
+                            let unknown = capture_unknown_subtree(reader, e)?;
+                            entry.unknown_xml.push(unknown);
+                            continue;
                         }
                     }
-                } else {
-                    depth += 1;
                 }
+                // depth > 0: nested element inside some already-entered
+                // block; just track the nesting so End events balance.
+                depth += 1;
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -728,6 +743,120 @@ fn tag_name(e: &BytesStart<'_>) -> Result<String, XmlError> {
         .map_err(|err| XmlError::Malformed(err.to_string()))
 }
 
+/// Capture an unknown depth-0 `<Start>…</End>` subtree from a
+/// container-level reader (`read_entry`, `read_group`, `read_meta`) as
+/// a self-contained [`UnknownElement`], so foreign XML survives a
+/// read → save round-trip.
+///
+/// Consumes events from `reader` up to and including the matching end
+/// of `start`, re-emitting each into a private buffer via
+/// [`quick_xml::Writer`]. Returns once the subtree is closed; the
+/// caller's outer loop resumes at the next sibling.
+///
+/// Fidelity contract: structural (re-parse) equality is promised;
+/// byte-exact equality with the source is not. `quick-xml` normalises
+/// attribute whitespace and empty-element shorthand on write. Nested
+/// CDATA and comments are preserved; nested `<?xml ?>` declarations
+/// and processing instructions are dropped (neither is legal inside
+/// a KeePass element).
+///
+/// Unknown self-closing elements (`<Foo/>`) are captured separately
+/// through [`capture_unknown_empty`] — this helper requires a matching
+/// end tag.
+fn capture_unknown_subtree<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    start: BytesStart<'_>,
+) -> Result<UnknownElement, XmlError> {
+    let tag = tag_name(&start)?;
+    let mut out = quick_xml::Writer::new(std::io::Cursor::new(Vec::new()));
+    out.write_event(Event::Start(start))
+        .map_err(|e| XmlError::Malformed(e.to_string()))?;
+    let mut depth: i32 = 0;
+    let mut inner_buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut inner_buf) {
+            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Ok(Event::Start(e)) => {
+                depth += 1;
+                out.write_event(Event::Start(e))
+                    .map_err(|e| XmlError::Malformed(e.to_string()))?;
+            }
+            Ok(Event::End(e)) => {
+                if depth == 0 {
+                    out.write_event(Event::End(e))
+                        .map_err(|e| XmlError::Malformed(e.to_string()))?;
+                    break;
+                }
+                depth -= 1;
+                out.write_event(Event::End(e))
+                    .map_err(|e| XmlError::Malformed(e.to_string()))?;
+            }
+            Ok(Event::Empty(e)) => {
+                out.write_event(Event::Empty(e))
+                    .map_err(|e| XmlError::Malformed(e.to_string()))?;
+            }
+            Ok(Event::Text(t)) => {
+                out.write_event(Event::Text(t))
+                    .map_err(|e| XmlError::Malformed(e.to_string()))?;
+            }
+            Ok(Event::CData(t)) => {
+                out.write_event(Event::CData(t))
+                    .map_err(|e| XmlError::Malformed(e.to_string()))?;
+            }
+            Ok(Event::Comment(t)) => {
+                out.write_event(Event::Comment(t))
+                    .map_err(|e| XmlError::Malformed(e.to_string()))?;
+            }
+            Ok(Event::Eof) => {
+                return Err(XmlError::Malformed(format!(
+                    "EOF inside unknown <{tag}>"
+                )));
+            }
+            // PIs and nested declarations are illegal inside a KeePass
+            // element; drop them rather than refuse the document.
+            Ok(_) => {}
+        }
+        inner_buf.clear();
+    }
+    Ok(UnknownElement {
+        tag,
+        raw_xml: out.into_inner().into_inner(),
+    })
+}
+
+/// Allowlist of `<Meta>` child tag names the decoder produces typed
+/// output for. Used by [`read_meta`] to decide whether a depth-0 start
+/// element is a known-canonical field (read as text + routed through
+/// [`assign_meta_field`]) or an unknown subtree to capture verbatim.
+///
+/// Nested-structured children (`Binaries`, `MemoryProtection`,
+/// `CustomData`, `CustomIcons`) have their own read helpers and are
+/// intercepted before this check.
+fn is_known_meta_text_field(name: &str) -> bool {
+    matches!(
+        name,
+        "Generator"
+            | "DatabaseName"
+            | "DatabaseDescription"
+            | "DatabaseNameChanged"
+            | "DatabaseDescriptionChanged"
+            | "DefaultUserName"
+            | "DefaultUserNameChanged"
+            | "RecycleBinEnabled"
+            | "RecycleBinUUID"
+            | "RecycleBinChanged"
+            | "SettingsChanged"
+            | "MasterKeyChanged"
+            | "MasterKeyChangeRec"
+            | "MasterKeyChangeForce"
+            | "HistoryMaxItems"
+            | "HistoryMaxSize"
+            | "MaintenanceHistoryDays"
+            | "Color"
+            | "HeaderHash"
+    )
+}
+
 fn has_protected_attribute(e: &BytesStart<'_>) -> Result<bool, XmlError> {
     for attr in e.attributes() {
         let a = attr.map_err(|err| XmlError::Malformed(err.to_string()))?;
@@ -865,8 +994,17 @@ fn read_meta<R: std::io::BufRead>(
                         meta.custom_icons = read_custom_icons(reader, buf)?;
                         continue;
                     }
-                    let text = read_text(reader, buf)?;
-                    assign_meta_field(&mut meta, &name, text)?;
+                    if is_known_meta_text_field(&name) {
+                        let text = read_text(reader, buf)?;
+                        assign_meta_field(&mut meta, &name, text)?;
+                        continue;
+                    }
+                    // Unknown child of <Meta> — capture verbatim. A
+                    // foreign writer's addition must survive even though
+                    // we don't know its shape (scalar, struct, repeated
+                    // element).
+                    let unknown = capture_unknown_subtree(reader, e)?;
+                    meta.unknown_xml.push(unknown);
                     continue;
                 }
                 depth += 1;

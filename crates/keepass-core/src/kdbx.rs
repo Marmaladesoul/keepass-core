@@ -421,6 +421,7 @@ impl Kdbx<Unlocked> {
                 expires: false,
                 usage_count: 0,
             },
+            unknown_xml: Vec::new(),
         };
 
         // Re-locate under &mut; infallible because we just checked.
@@ -692,6 +693,7 @@ impl Kdbx<Unlocked> {
                 expires: false,
                 usage_count: 0,
             },
+            unknown_xml: Vec::new(),
         };
 
         let target = find_group_mut(&mut self.state.vault.root, parent)
