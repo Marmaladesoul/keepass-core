@@ -23,7 +23,7 @@ pub mod clock;
 pub mod entry_editor;
 pub mod new_entry;
 pub use clock::{Clock, FixedClock, SystemClock};
-pub use entry_editor::EntryEditor;
+pub use entry_editor::{CustomFieldValue, EntryEditor};
 pub use new_entry::NewEntry;
 
 // ---------------------------------------------------------------------------
@@ -288,6 +288,19 @@ impl Default for AutoType {
     }
 }
 
+impl AutoType {
+    /// Construct a fresh [`AutoType`] block — enabled, no obfuscation,
+    /// no default sequence, no per-window associations.
+    ///
+    /// Provided as a constructor because [`AutoType`] is
+    /// `#[non_exhaustive]`, so callers in downstream crates can't
+    /// build one with a struct literal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// One `<Association>` inside an [`AutoType`] block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -297,6 +310,21 @@ pub struct AutoTypeAssociation {
     pub window: String,
     /// `<KeystrokeSequence>` — macro to play for this window match.
     pub keystroke_sequence: String,
+}
+
+impl AutoTypeAssociation {
+    /// Construct a per-window override.
+    ///
+    /// Provided as a constructor because [`AutoTypeAssociation`] is
+    /// `#[non_exhaustive]`, so callers in downstream crates can't
+    /// build one with a struct literal.
+    #[must_use]
+    pub fn new(window: impl Into<String>, keystroke_sequence: impl Into<String>) -> Self {
+        Self {
+            window: window.into(),
+            keystroke_sequence: keystroke_sequence.into(),
+        }
+    }
 }
 
 /// Reference from an [`Entry`] to a binary in [`Vault::binaries`].
