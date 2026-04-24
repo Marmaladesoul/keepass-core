@@ -329,6 +329,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: AutoType::default(),
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         }
     }
 

@@ -1,0 +1,37 @@
+{
+  "description": "Hand-injected unknown XML children on Meta, the root Group, and the single Entry. Round-trip must preserve all three structurally through a read-edit-save cycle.",
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "key_file": null,
+  "master_password": "test-unknown-106",
+  "source": "pykeepass+lxml",
+  "unknown_xml": {
+    "entries": [
+      {
+        "title": "Contoso Mail",
+        "unknowns": [
+          {
+            "attributes": {
+              "attr": "x"
+            },
+            "tag": "FutureEntryHint",
+            "text": "payload"
+          }
+        ]
+      }
+    ],
+    "meta": [
+      {
+        "tag": "FuturePolicy",
+        "text": "strict"
+      }
+    ],
+    "root_group": [
+      {
+        "tag": "FutureGroupFlag",
+        "text": "yes"
+      }
+    ]
+  }
+}

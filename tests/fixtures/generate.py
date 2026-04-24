@@ -662,6 +662,98 @@ def gen_pykeepass_custom_fields() -> None:
     log(f"wrote pykeepass/{name}")
 
 
+def gen_pykeepass_unknown_xml() -> None:
+    """Vault with hand-injected unknown XML children on Entry, Group, Meta.
+
+    Built for the `unknown_xml` round-trip test: a future KeePass client
+    might add new elements the library doesn't know about, and we must
+    preserve them verbatim (structurally, not byte-for-byte) through a
+    read → edit-unrelated-field → save cycle.
+
+    Fixture shape:
+      - Root group has one unknown child `<FutureGroupFlag>yes</FutureGroupFlag>`.
+      - The single entry has one unknown child
+        `<FutureEntryHint attr="x">payload</FutureEntryHint>`.
+      - `<Meta>` has one unknown child `<FuturePolicy>strict</FuturePolicy>`.
+
+    These are injected via lxml after pykeepass has populated the tree,
+    then the in-memory tree is re-serialised and re-encrypted through
+    pykeepass's own save path.
+    """
+    from pykeepass import create_database, PyKeePass
+    from lxml import etree
+
+    name = "unknown-xml"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    pw = "test-unknown-106"
+    PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
+
+    kp = create_database(str(db_path), password=pw)
+    kp.add_entry(kp.root_group, title="Contoso Mail",
+                 username="alice@example.com",
+                 password="p4ss-unknown-01",
+                 url="https://mail.contoso.example")
+    kp.save()
+
+    # Re-open and inject the unknown children via lxml directly.
+    kp = PyKeePass(str(db_path), password=pw)
+
+    meta = kp.tree.find("Meta")
+    future_policy = etree.SubElement(meta, "FuturePolicy")
+    future_policy.text = "strict"
+
+    # Root group is at Root/Group; lxml returns the first match.
+    root_group = kp.tree.find("Root/Group")
+    future_group_flag = etree.SubElement(root_group, "FutureGroupFlag")
+    future_group_flag.text = "yes"
+
+    # The one entry is the first <Entry> under the root group.
+    entry = root_group.find("Entry")
+    future_entry_hint = etree.SubElement(entry, "FutureEntryHint", attr="x")
+    future_entry_hint.text = "payload"
+
+    kp.save()
+
+    # Sidecar records the injected elements so the test can assert each
+    # survives.
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": (
+            "Hand-injected unknown XML children on Meta, the root Group, "
+            "and the single Entry. Round-trip must preserve all three "
+            "structurally through a read-edit-save cycle."
+        ),
+        "format": "KDBX4",
+        "source": "pykeepass+lxml",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": None,
+        "entry_count": 1,
+        "unknown_xml": {
+            "meta": [
+                {"tag": "FuturePolicy", "text": "strict"},
+            ],
+            "root_group": [
+                {"tag": "FutureGroupFlag", "text": "yes"},
+            ],
+            "entries": [
+                {
+                    "title": "Contoso Mail",
+                    "unknowns": [
+                        {
+                            "tag": "FutureEntryHint",
+                            "text": "payload",
+                            "attributes": {"attr": "x"},
+                        },
+                    ],
+                },
+            ],
+        },
+    })
+    log(f"wrote pykeepass/{name}")
+
+
 def gen_pykeepass_large() -> None:
     """Large vault — 1000 entries. Tests scaling + stable parse time."""
     from pykeepass import create_database, PyKeePass
@@ -784,6 +876,7 @@ GENERATORS: dict[str, list[Callable[[], None]]] = {
         gen_pykeepass_history,
         gen_pykeepass_recycle,
         gen_pykeepass_custom_fields,
+        gen_pykeepass_unknown_xml,
         gen_pykeepass_large,
     ],
     "malformed": [
