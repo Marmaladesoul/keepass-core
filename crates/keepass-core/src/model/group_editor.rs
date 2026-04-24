@@ -118,6 +118,7 @@ mod tests {
             editor.set_enable_auto_type(Some(false));
             editor.set_enable_searching(Some(true));
             editor.set_custom_icon(Some(icon));
+            editor.set_icon_id(43);
         }
         assert_eq!(g.name, "Personal");
         assert_eq!(g.notes, "private vault");
@@ -129,5 +130,6 @@ mod tests {
         assert_eq!(g.enable_auto_type, Some(false));
         assert_eq!(g.enable_searching, Some(true));
         assert_eq!(g.custom_icon_uuid, Some(icon));
+        assert_eq!(g.icon_id, 43);
     }
 }
