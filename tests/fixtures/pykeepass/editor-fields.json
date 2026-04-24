@@ -1,0 +1,38 @@
+{
+  "description": "Every canonical EntryEditor / GroupEditor field set to a non-default value, so round-trip invariant tests can assert each one survives an unrelated edit.",
+  "entry": {
+    "auto_type": {
+      "associations": [
+        {
+          "keystroke_sequence": "{PASSWORD}{ENTER}",
+          "window": "Firefox - *"
+        }
+      ],
+      "data_transfer_obfuscation": 1,
+      "default_sequence": "{USERNAME}{TAB}",
+      "enabled": false
+    },
+    "background_color": "#00FFAA",
+    "custom_icon_uuid": "aaaaaaaa-bbbb-cccc-dddd-000000000011",
+    "expiry_time": "2030-01-02T03:04:05Z",
+    "foreground_color": "#FF0000",
+    "icon_id": 25,
+    "override_url": "cmd://firefox %1",
+    "quality_check": false,
+    "title": "Contoso Mail"
+  },
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "group": {
+    "custom_icon_uuid": "aaaaaaaa-bbbb-cccc-dddd-000000000012",
+    "default_auto_type_sequence": "{TITLE}{ENTER}",
+    "enable_auto_type": false,
+    "enable_searching": false,
+    "icon_id": 43,
+    "name": "Work"
+  },
+  "key_file": null,
+  "master_password": "test-editor-107",
+  "source": "pykeepass+lxml"
+}

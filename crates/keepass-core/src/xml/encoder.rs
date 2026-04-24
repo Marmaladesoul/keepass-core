@@ -181,6 +181,11 @@ fn write_group<W: std::io::Write>(
     if !group.notes.is_empty() {
         write_text_element(w, "Notes", &group.notes)?;
     }
+    // `<IconID>` always emits — unlike the decorative colour fields,
+    // every real KeePass group carries one, and preserving the
+    // default-0 case keeps round-trips symmetric with writers that
+    // emit it explicitly.
+    write_text_element(w, "IconID", &group.icon_id.to_string())?;
     if let Some(icon) = group.custom_icon_uuid {
         write_text_element(w, "CustomIconUUID", &uuid_to_base64(icon))?;
     }
@@ -263,6 +268,8 @@ fn write_entry<W: std::io::Write>(
     if !entry.override_url.is_empty() {
         write_text_element(w, "OverrideURL", &entry.override_url)?;
     }
+    // See the matching note in `write_group`.
+    write_text_element(w, "IconID", &entry.icon_id.to_string())?;
     if let Some(icon) = entry.custom_icon_uuid {
         write_text_element(w, "CustomIconUUID", &uuid_to_base64(icon))?;
     }
@@ -551,6 +558,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let vault = Vault {
@@ -593,6 +601,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let child = Group {
@@ -610,6 +619,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let root = Group {
@@ -627,6 +637,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let vault = Vault {
@@ -692,6 +703,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let root = Group {
@@ -709,6 +721,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let vault = Vault {
@@ -752,6 +765,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let root = Group {
@@ -769,6 +783,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let vault = Vault {
@@ -802,6 +817,7 @@ mod tests {
                 last_top_visible_entry: None,
                 custom_icon_uuid: None,
                 times: Timestamps::default(),
+                icon_id: 0,
                 unknown_xml: Vec::new(),
             },
             meta: Meta::default(),
@@ -855,6 +871,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let e2 = Entry {
@@ -877,6 +894,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         let root = Group {
@@ -894,6 +912,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
         Vault {
