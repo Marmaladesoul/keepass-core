@@ -49,9 +49,9 @@ use crate::format::{
 };
 use crate::model::entry_editor::PendingBinaryOps;
 use crate::model::{
-    Attachment, AutoType, Binary, Clock, DeletedObject, Entry, EntryEditor, EntryId, Group,
-    GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, SystemClock, Timestamps,
-    Vault,
+    Attachment, AutoType, Binary, Clock, CustomIcon, DeletedObject, Entry, EntryEditor, EntryId,
+    Group, GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, SystemClock,
+    Timestamps, Vault,
 };
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{decode_vault_with_cipher, encode_vault_with_cipher};
@@ -748,6 +748,79 @@ impl Kdbx<Unlocked> {
         Ok(())
     }
 
+    // -----------------------------------------------------------------
+    // Custom-icon pool
+    // -----------------------------------------------------------------
+
+    /// Insert a custom icon into [`crate::model::Meta::custom_icons`],
+    /// returning the UUID the caller can then hand to
+    /// [`crate::model::EntryEditor::set_custom_icon`] /
+    /// [`crate::model::GroupEditor::set_custom_icon`].
+    ///
+    /// Deduplicated by content hash: if the pool already holds an
+    /// icon with identical bytes (SHA-256 match), that icon's
+    /// existing UUID is returned and the pool is left unchanged.
+    /// Dedup is idempotent — the existing icon's `name` and
+    /// `last_modified` fields are **not** overwritten, so a caller
+    /// that has previously labelled an icon doesn't lose the label
+    /// by re-adding the bytes.
+    ///
+    /// Stamps [`crate::model::Meta::settings_changed`] on a fresh
+    /// insert; a dedup hit does not stamp (nothing changed).
+    pub fn add_custom_icon(&mut self, data: Vec<u8>) -> uuid::Uuid {
+        let (uuid, inserted) = add_or_dedup_icon(&mut self.state.vault, data);
+        if inserted {
+            self.stamp_settings_changed();
+        }
+        uuid
+    }
+
+    /// Remove the custom icon with the given UUID from
+    /// [`crate::model::Meta::custom_icons`]. Returns `true` if the
+    /// icon existed.
+    ///
+    /// Does **not** unset `entry.custom_icon_uuid` /
+    /// `group.custom_icon_uuid` on records still referencing the
+    /// removed icon. Those refs dangle in the in-memory model until
+    /// the next [`Self::save_to_bytes`] call, where the save path
+    /// GC silently resets every dangling `custom_icon_uuid` to
+    /// `None` so the emitted bytes carry no unresolvable references.
+    /// Callers who want the model to match the save-path output
+    /// should walk the tree themselves; the library's on-disk
+    /// invariant — "every `<CustomIconUUID>` resolves in
+    /// `<CustomIcons>`" — is maintained either way.
+    ///
+    /// Stamps [`crate::model::Meta::settings_changed`] on success;
+    /// a "no such icon" call does not stamp (nothing changed).
+    pub fn remove_custom_icon(&mut self, id: uuid::Uuid) -> bool {
+        let before = self.state.vault.meta.custom_icons.len();
+        self.state.vault.meta.custom_icons.retain(|c| c.uuid != id);
+        if self.state.vault.meta.custom_icons.len() < before {
+            self.stamp_settings_changed();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Borrow the raw bytes for the custom icon identified by `id`.
+    /// Returns `None` if no such icon is registered.
+    ///
+    /// Bytes are opaque to the library — typically PNG, but the
+    /// format is whatever the inserting client wrote. The decoder
+    /// already base64-decoded them on read, so callers get the
+    /// image payload directly without a second decode step.
+    #[must_use]
+    pub fn custom_icon(&self, id: uuid::Uuid) -> Option<&[u8]> {
+        self.state
+            .vault
+            .meta
+            .custom_icons
+            .iter()
+            .find(|c| c.uuid == id)
+            .map(|c| c.data.as_slice())
+    }
+
     /// Serialise this unlocked database back to a KDBX byte stream —
     /// the byte-level inverse of [`Kdbx::<HeaderRead>::unlock`].
     ///
@@ -1330,6 +1403,52 @@ fn fresh_uuid(vault: &Vault) -> uuid::Uuid {
     }
 }
 
+/// Insertion + content-hash dedup core for [`Kdbx::add_custom_icon`].
+///
+/// Returns `(uuid, inserted)`. When `inserted == true`, a fresh icon
+/// was pushed and the caller should stamp
+/// [`crate::model::Meta::settings_changed`]; when `false`, dedup hit
+/// an existing icon and nothing about the pool has changed (so no
+/// stamp).
+///
+/// Extracted from the public method so a unit test can assert the
+/// load-bearing idempotence invariant directly — `name` and
+/// `last_modified` on an existing icon must NOT be overwritten by a
+/// same-bytes re-insertion. Neither field is on the public surface
+/// yet, so crossing the integration-test boundary without an
+/// `unsafe` pointer cast or a test-only accessor isn't possible.
+fn add_or_dedup_icon(vault: &mut Vault, data: Vec<u8>) -> (uuid::Uuid, bool) {
+    let incoming: [u8; 32] = Sha256::digest(&data).into();
+    for existing in &vault.meta.custom_icons {
+        let hash: [u8; 32] = Sha256::digest(&existing.data).into();
+        if hash == incoming {
+            return (existing.uuid, false);
+        }
+    }
+    let uuid = fresh_icon_uuid(vault);
+    vault.meta.custom_icons.push(CustomIcon {
+        uuid,
+        data,
+        name: String::new(),
+        last_modified: None,
+    });
+    (uuid, true)
+}
+
+/// Generate a fresh v4 UUID that doesn't collide with any existing
+/// custom-icon UUID in [`Vault::meta::custom_icons`]. Entry/group
+/// UUIDs live in a different semantic namespace (the wire format
+/// doesn't cross-reference them), but `Uuid::new_v4()` is globally
+/// unique anyway; the loop is belt-and-braces.
+fn fresh_icon_uuid(vault: &Vault) -> uuid::Uuid {
+    loop {
+        let candidate = uuid::Uuid::new_v4();
+        if !vault.meta.custom_icons.iter().any(|c| c.uuid == candidate) {
+            return candidate;
+        }
+    }
+}
+
 /// Apply the attach intents staged inside an `edit_entry` closure to
 /// the shared [`Vault::binaries`] pool, then push matching
 /// [`Attachment`] references onto the target entry.
@@ -1444,6 +1563,89 @@ fn collect_attachment_refs(group: &Group, out: &mut HashSet<u32>) {
     }
     for child in &group.groups {
         collect_attachment_refs(child, out);
+    }
+}
+
+/// Save-time refcount GC for [`Vault::meta::custom_icons`].
+///
+/// Walks every entry (live + every `history[]` snapshot) and every
+/// group to collect the set of `custom_icon_uuid` values actually
+/// referenced, prunes the pool to that set, and sweeps any surviving
+/// reference that no longer resolves (e.g. because the caller ran
+/// `remove_custom_icon(X)` without unsetting the field) back to
+/// `None`. The on-disk invariant "every `<CustomIconUUID>` resolves
+/// in `<CustomIcons>`" is restored before the bytes hit the wire.
+///
+/// **Rhythm divergence from `gc_binaries_pool`**: the binary-pool
+/// GC runs inside every mutation post-pass because attachments can
+/// go orphan mid-session and the `Attachment` surface exposes
+/// per-entry iteration callers may rely on. Icons neither have a
+/// bulk accessor yet nor can they be orphaned by a content edit
+/// (only by the explicit `remove_custom_icon`, whose docstring
+/// already warns callers), so the icon GC runs only on save. This
+/// keeps the hot `edit_entry` path from paying for a tree walk it
+/// doesn't need.
+fn gc_custom_icons_pool(vault: &mut Vault) {
+    let mut in_use: HashSet<uuid::Uuid> = HashSet::new();
+    collect_custom_icon_refs(&vault.root, &mut in_use);
+    vault.meta.custom_icons.retain(|c| in_use.contains(&c.uuid));
+
+    // Dangling-ref sweep: any entry/group custom_icon_uuid that
+    // doesn't resolve in the post-prune pool gets reset to None.
+    // Without this the wire format would carry an unresolvable
+    // reference.
+    let pool: HashSet<uuid::Uuid> = vault.meta.custom_icons.iter().map(|c| c.uuid).collect();
+    clear_dangling_custom_icons(&mut vault.root, &pool);
+}
+
+/// Collect every `custom_icon_uuid` referenced anywhere under
+/// `group`, including inside history snapshots — a snapshot carries
+/// its own `custom_icon_uuid` that must keep the referenced icon
+/// alive in the pool, same discipline as attachment refs.
+fn collect_custom_icon_refs(group: &Group, out: &mut HashSet<uuid::Uuid>) {
+    if let Some(u) = group.custom_icon_uuid {
+        out.insert(u);
+    }
+    for e in &group.entries {
+        if let Some(u) = e.custom_icon_uuid {
+            out.insert(u);
+        }
+        for snap in &e.history {
+            if let Some(u) = snap.custom_icon_uuid {
+                out.insert(u);
+            }
+        }
+    }
+    for child in &group.groups {
+        collect_custom_icon_refs(child, out);
+    }
+}
+
+/// Walk the tree and reset any `custom_icon_uuid` whose target is no
+/// longer in `pool`. Runs after the prune pass in
+/// [`gc_custom_icons_pool`].
+fn clear_dangling_custom_icons(group: &mut Group, pool: &HashSet<uuid::Uuid>) {
+    if let Some(u) = group.custom_icon_uuid {
+        if !pool.contains(&u) {
+            group.custom_icon_uuid = None;
+        }
+    }
+    for e in &mut group.entries {
+        if let Some(u) = e.custom_icon_uuid {
+            if !pool.contains(&u) {
+                e.custom_icon_uuid = None;
+            }
+        }
+        for snap in &mut e.history {
+            if let Some(u) = snap.custom_icon_uuid {
+                if !pool.contains(&u) {
+                    snap.custom_icon_uuid = None;
+                }
+            }
+        }
+    }
+    for child in &mut group.groups {
+        clear_dangling_custom_icons(child, pool);
     }
 }
 
@@ -1762,13 +1964,19 @@ fn do_unlock(
 // ---------------------------------------------------------------------------
 
 fn do_save(signature: FileSignature, version: Version, state: &Unlocked) -> Result<Vec<u8>, Error> {
+    // Save-time GC mutates a local clone of the vault so the
+    // caller-visible in-memory state stays byte-stable across a
+    // save. See `gc_custom_icons_pool` for the rhythm divergence
+    // from the binary-pool GC (which runs on every mutation).
+    let mut vault = state.vault.clone();
+    gc_custom_icons_pool(&mut vault);
     match version {
-        Version::V3 => do_save_v3(signature, state),
-        Version::V4 => do_save_v4(signature, state),
+        Version::V3 => do_save_v3(signature, state, &vault),
+        Version::V4 => do_save_v4(signature, state, &vault),
     }
 }
 
-fn do_save_v4(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Error> {
+fn do_save_v4(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Result<Vec<u8>, Error> {
     let header = &state.outer_header;
     let inner_params = state
         .inner_stream
@@ -1797,7 +2005,8 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Err
     let mut inner_cipher = InnerStreamCipher::new(inner_params.algorithm, &inner_params.key)
         .map_err(|_| CryptoError::Decrypt)?;
 
-    let vault = &state.vault;
+    // `vault` comes from `do_save` post-GC — see the clone-and-prune
+    // comment there. `state.vault` stays untouched.
     let mut inner_binaries: Vec<InnerBinary> = Vec::with_capacity(vault.binaries.len());
     for b in &vault.binaries {
         let flags: u8 = u8::from(b.protected);
@@ -1873,7 +2082,7 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Err
     Ok(out)
 }
 
-fn do_save_v3(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Error> {
+fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Result<Vec<u8>, Error> {
     let header = &state.outer_header;
     let inner_params = state
         .inner_stream
@@ -1917,7 +2126,7 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked) -> Result<Vec<u8>, Err
     // inner-stream cipher only touches protected <Value> elements.
     let mut inner_cipher = InnerStreamCipher::new(inner_params.algorithm, &inner_params.key)
         .map_err(|_| CryptoError::Decrypt)?;
-    let xml_bytes = encode_vault_with_cipher(&state.vault, &mut inner_cipher)?;
+    let xml_bytes = encode_vault_with_cipher(vault, &mut inner_cipher)?;
 
     // --- Compress XML (if declared) --------------------------------------
     let compressed = compress(header.compression, &xml_bytes)
@@ -2101,5 +2310,69 @@ mod tests {
             assert_eq!(a.password, b.password);
             assert_eq!(a.url, b.url);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // add_or_dedup_icon — pure-helper idempotence invariant
+    // -----------------------------------------------------------------
+
+    fn empty_vault() -> Vault {
+        use crate::model::{Group, GroupId, Meta};
+        Vault {
+            root: Group {
+                id: GroupId(uuid::Uuid::nil()),
+                name: String::new(),
+                notes: String::new(),
+                groups: Vec::new(),
+                entries: Vec::new(),
+                is_expanded: true,
+                default_auto_type_sequence: String::new(),
+                enable_auto_type: None,
+                enable_searching: None,
+                custom_data: Vec::new(),
+                previous_parent_group: None,
+                last_top_visible_entry: None,
+                custom_icon_uuid: None,
+                icon_id: 0,
+                times: Timestamps::default(),
+                unknown_xml: Vec::new(),
+            },
+            meta: Meta::default(),
+            binaries: Vec::new(),
+            deleted_objects: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn add_or_dedup_icon_dedup_preserves_existing_metadata() {
+        // First insert establishes the icon, then we hand-label it
+        // to simulate a caller that has previously named it. A
+        // second insert with the same bytes must dedup back to the
+        // same UUID AND leave `name` / `last_modified` alone —
+        // otherwise any Keys "re-register this icon" flow would
+        // silently wipe user-set labels.
+        let mut vault = empty_vault();
+        let (first, inserted) = add_or_dedup_icon(&mut vault, b"icon-bytes".to_vec());
+        assert!(inserted);
+        vault.meta.custom_icons[0].name = "My Label".to_owned();
+        let marker_ts: chrono::DateTime<chrono::Utc> = "2024-05-06T07:08:09Z".parse().unwrap();
+        vault.meta.custom_icons[0].last_modified = Some(marker_ts);
+
+        let (second, inserted) = add_or_dedup_icon(&mut vault, b"icon-bytes".to_vec());
+        assert_eq!(first, second, "dedup returns the existing UUID");
+        assert!(!inserted, "dedup must not stamp settings_changed");
+        assert_eq!(vault.meta.custom_icons.len(), 1);
+        assert_eq!(vault.meta.custom_icons[0].name, "My Label");
+        assert_eq!(vault.meta.custom_icons[0].last_modified, Some(marker_ts));
+    }
+
+    #[test]
+    fn add_or_dedup_icon_different_bytes_mint_new_entry() {
+        let mut vault = empty_vault();
+        let (a, inserted_a) = add_or_dedup_icon(&mut vault, b"first".to_vec());
+        let (b, inserted_b) = add_or_dedup_icon(&mut vault, b"second".to_vec());
+        assert!(inserted_a && inserted_b);
+        assert_ne!(a, b);
+        assert_eq!(vault.meta.custom_icons.len(), 2);
     }
 }

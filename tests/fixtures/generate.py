@@ -833,6 +833,103 @@ def gen_pykeepass_history_unknown_xml() -> None:
     log(f"wrote pykeepass/{name}")
 
 
+def gen_pykeepass_custom_icons() -> None:
+    """Vault that carries a populated `<CustomIcons>` pool, for the
+    round-trip byte-identity guard in `PreservedSubset`.
+
+    No existing fixture has custom icons — pykeepass's public API
+    doesn't cleanly expose custom-icon insertion (nothing equivalent
+    to `kp.add_custom_icon(bytes)` as of pykeepass 4.x), so the fixture
+    is assembled via lxml injection after pykeepass builds the base.
+
+    Shape:
+      - Two entries: one referencing the injected icon, one without.
+      - One `<CustomIcon>` under `<Meta><CustomIcons>` carrying the
+        bytes of the attachments corpus' `1x1.png` (already checked
+        in, a valid transparent-pixel PNG).
+      - The "With Icon" entry's `<CustomIconUUID>` points at the icon.
+    """
+    import base64
+    import uuid as _uuid
+    from pykeepass import create_database, PyKeePass
+    from lxml import etree
+
+    name = "custom-icons"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    pw = "test-icons-109"
+    PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
+
+    kp = create_database(str(db_path), password=pw)
+    kp.add_entry(kp.root_group, title="With Icon",
+                 username="alice@example.com",
+                 password="p4ss-icon-01",
+                 url="https://example.com")
+    kp.add_entry(kp.root_group, title="No Icon",
+                 username="bob@example.org",
+                 password="p4ss-icon-02",
+                 url="https://example.org")
+    kp.save()
+
+    # Deterministic icon bytes: reuse the 1x1 PNG from the attachments
+    # corpus. Same bytes exercised elsewhere → one source of drift.
+    png_bytes = (ATTACHMENTS / "1x1.png").read_bytes()
+    png_sha256 = hashlib.sha256(png_bytes).hexdigest()
+    icon_uuid = _uuid.UUID("cccccccc-dddd-eeee-ffff-000000000042")
+    icon_uuid_b64 = base64.b64encode(icon_uuid.bytes).decode("ascii")
+
+    kp = PyKeePass(str(db_path), password=pw)
+    meta = kp.tree.find("Meta")
+    existing = meta.find("CustomIcons")
+    if existing is not None:
+        meta.remove(existing)
+    custom_icons = etree.SubElement(meta, "CustomIcons")
+    icon = etree.SubElement(custom_icons, "Icon")
+    etree.SubElement(icon, "UUID").text = icon_uuid_b64
+    etree.SubElement(icon, "Data").text = base64.b64encode(png_bytes).decode("ascii")
+
+    root_group = kp.tree.find("Root/Group")
+    for e in root_group.findall("Entry"):
+        title = None
+        for s in e.findall("String"):
+            k = s.find("Key")
+            v = s.find("Value")
+            if k is not None and v is not None and k.text == "Title":
+                title = v.text
+                break
+        if title == "With Icon":
+            existing_ref = e.find("CustomIconUUID")
+            if existing_ref is not None:
+                e.remove(existing_ref)
+            etree.SubElement(e, "CustomIconUUID").text = icon_uuid_b64
+
+    kp.save()
+
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": (
+            "KDBX4 vault with a single custom icon in the Meta/CustomIcons "
+            "pool, referenced by the 'With Icon' entry. Guards byte-equal "
+            "round-trip of the custom-icon surface."
+        ),
+        "format": "KDBX4",
+        "source": "pykeepass+lxml",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": None,
+        "entry_count": 2,
+        "custom_icons": [
+            {
+                "uuid": str(icon_uuid),
+                "source_file": "attachments/1x1.png",
+                "sha256": png_sha256,
+                "referenced_by_entry_title": "With Icon",
+            },
+        ],
+    })
+    log(f"wrote pykeepass/{name}")
+
+
 def gen_pykeepass_editor_fields() -> None:
     """Vault populated with non-default values in every canonical field
     that `EntryEditor` / `GroupEditor` now exposes, for the editor-
@@ -885,6 +982,24 @@ def gen_pykeepass_editor_fields() -> None:
     entry_icon_id = 25
     group_icon_id = 43  # KeePass's "Recycle Bin" icon — distinguishable from 0/48.
     expiry = "2030-01-02T03:04:05Z"
+
+    # Register both icon UUIDs in Meta/CustomIcons so the references
+    # are not dangling. The library's save-time GC (slice 5) clears
+    # any `<CustomIconUUID>` that doesn't resolve in the pool, so the
+    # fixture has to carry valid pool entries or the preservation
+    # tests fail by design. Bytes are the 1x1 PNG from the attachments
+    # corpus — same bytes, distinguished only by UUID.
+    import base64
+    png_bytes = (ATTACHMENTS / "1x1.png").read_bytes()
+    meta = kp.tree.find("Meta")
+    existing_pool = meta.find("CustomIcons")
+    if existing_pool is not None:
+        meta.remove(existing_pool)
+    pool = etree.SubElement(meta, "CustomIcons")
+    for u in (entry_custom_icon, group_custom_icon):
+        icon_el = etree.SubElement(pool, "Icon")
+        etree.SubElement(icon_el, "UUID").text = _uuid_to_b64(u)
+        etree.SubElement(icon_el, "Data").text = base64.b64encode(png_bytes).decode("ascii")
 
     # Locate the Work group and its sole entry.
     root_group = kp.tree.find("Root/Group")
@@ -1121,6 +1236,7 @@ GENERATORS: dict[str, list[Callable[[], None]]] = {
         gen_pykeepass_unknown_xml,
         gen_pykeepass_history_unknown_xml,
         gen_pykeepass_editor_fields,
+        gen_pykeepass_custom_icons,
         gen_pykeepass_large,
     ],
     "malformed": [
