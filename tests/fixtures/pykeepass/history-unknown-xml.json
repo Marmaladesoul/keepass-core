@@ -1,0 +1,19 @@
+{
+  "description": "Single entry with one history snapshot; live entry carries <FutureLive> and history[0] carries <FutureSnap>. Fixture for the `restore_entry_from_history` unknown_xml keep-live invariant test.",
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "key_file": null,
+  "live_title": "Current",
+  "live_unknown": {
+    "tag": "FutureLive",
+    "text": "live-only"
+  },
+  "master_password": "test-hist-unk-108",
+  "snapshot_title": "Original",
+  "snapshot_unknown": {
+    "tag": "FutureSnap",
+    "text": "snap-only"
+  },
+  "source": "pykeepass+lxml"
+}

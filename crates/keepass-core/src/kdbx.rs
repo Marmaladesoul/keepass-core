@@ -543,20 +543,7 @@ impl Kdbx<Unlocked> {
         let entry =
             find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
 
-        let should_snapshot = match policy {
-            HistoryPolicy::NoSnapshot => false,
-            HistoryPolicy::Snapshot => true,
-            HistoryPolicy::SnapshotIfOlderThan(window) => match entry.history.last() {
-                None => true,
-                Some(last) => {
-                    let threshold = now - window;
-                    // Absent timestamp → treat as "ancient", snapshot.
-                    last.times
-                        .last_modification_time
-                        .is_none_or(|t| t < threshold)
-                }
-            },
-        };
+        let should_snapshot = should_snapshot_now(policy, &entry.history, now);
 
         if should_snapshot {
             let mut snap = entry.clone();
@@ -587,6 +574,140 @@ impl Kdbx<Unlocked> {
         gc_binaries_pool(&mut self.state.vault);
 
         Ok(result)
+    }
+
+    /// Restore the live entry's content from its own
+    /// `history[history_index]`, with the pre-restore state optionally
+    /// stamped into history per `policy`.
+    ///
+    /// Semantically: "revert this entry to how it looked at snapshot
+    /// N". Used by Keys.app's
+    /// `EntryDetailView.swift:481` ("restore this revision") button.
+    ///
+    /// Bookkeeping:
+    ///
+    /// 1. Verify `history_index < entry.history.len()`; out-of-range
+    ///    rejects with [`ModelError::HistoryIndexOutOfRange`] before
+    ///    any state changes.
+    /// 2. If `policy` says snapshot (the same rules as
+    ///    [`Self::edit_entry`]), push `entry.clone()` into
+    ///    `entry.history` with that snapshot's own history cleared —
+    ///    KeePass never nests. This captures the content we're about
+    ///    to overwrite so the user can undo the restore later.
+    /// 3. Overwrite the live entry's content fields from the target
+    ///    snapshot. "Content" is the user-visible surface: title,
+    ///    username, password, url, notes, tags, custom fields, icon
+    ///    id + custom-icon UUID, override URL, foreground / background
+    ///    colours, quality-check flag, the expiry pair
+    ///    (`times.expires` + `times.expiry_time`, treated atomically),
+    ///    auto-type block, and the attachment reference list (refs
+    ///    only — binary bytes live in [`crate::model::Vault::binaries`]
+    ///    and are refcount-tracked across history, so a restored ref
+    ///    can't dangle).
+    /// 4. Fields NOT overwritten: `id` (identity),
+    ///    `times.{creation,last_access,location_changed,usage_count,
+    ///    last_modification_time}` (library owns), `history` (we're
+    ///    mutating it, not restoring it), `previous_parent_group`
+    ///    (tree-movement state, not content), `custom_data` (plugin
+    ///    / client state that may have advanced since the snapshot),
+    ///    and `unknown_xml` (foreign-writer opaque data — see below).
+    /// 5. Stamp `entry.times.last_modification_time = clock.now()`.
+    /// 6. Truncate `entry.history` per `Meta::history_max_items` /
+    ///    `history_max_size`. A newly-pushed pre-restore snapshot may
+    ///    push the count over the cap; truncation drops oldest first.
+    /// 7. Run [`gc_binaries_pool`] — truncation can drop a snapshot
+    ///    that was the only remaining reference to a pool binary, so
+    ///    we collect the pool after history shrinks.
+    ///
+    /// **`unknown_xml` is intentionally left on the live entry.** By
+    /// construction these are XML subtrees the decoder didn't
+    /// recognise — foreign-writer or future-version data we have no
+    /// semantic grounds to classify as content. Rolling them back to
+    /// the snapshot risks destroying additions that arrived after the
+    /// snapshot was taken. Same reasoning as `custom_data` above:
+    /// restore is a *content* operation; opaque external channels are
+    /// preserved on the live entry.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
+    /// - [`ModelError::HistoryIndexOutOfRange`] if `history_index`
+    ///   is `>= entry.history.len()`.
+    pub fn restore_entry_from_history(
+        &mut self,
+        id: EntryId,
+        history_index: usize,
+        policy: HistoryPolicy,
+    ) -> Result<(), ModelError> {
+        // Hoist off `self.state` before the `&mut Entry` borrow, same
+        // reason as `edit_entry`.
+        let now = self.state.clock.now();
+        let history_max_items = self.state.vault.meta.history_max_items;
+        let history_max_size = self.state.vault.meta.history_max_size;
+
+        let entry =
+            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+
+        if history_index >= entry.history.len() {
+            return Err(ModelError::HistoryIndexOutOfRange {
+                id,
+                index: history_index,
+                len: entry.history.len(),
+            });
+        }
+
+        // Clone the target snapshot out before mutating history — once
+        // we push the pre-restore snapshot the index shifts.
+        let snap = entry.history[history_index].clone();
+
+        if should_snapshot_now(policy, &entry.history, now) {
+            let mut pre_restore = entry.clone();
+            // KeePass never nests history; the snapshot we're pushing
+            // represents the live entry at call time, not "live + all
+            // its prior history".
+            pre_restore.history.clear();
+            entry.history.push(pre_restore);
+        }
+
+        // ---- Restore content -----------------------------------------
+        // Explicit field-by-field copy so the restore set is auditable
+        // at this call site. Excluded fields are documented on the
+        // method; if a new field lands on `Entry`, the reviewer sees
+        // this block and decides its restore policy deliberately.
+        entry.title = snap.title;
+        entry.username = snap.username;
+        entry.password = snap.password;
+        entry.url = snap.url;
+        entry.notes = snap.notes;
+        entry.tags = snap.tags;
+        entry.custom_fields = snap.custom_fields;
+        entry.attachments = snap.attachments;
+        entry.foreground_color = snap.foreground_color;
+        entry.background_color = snap.background_color;
+        entry.override_url = snap.override_url;
+        entry.custom_icon_uuid = snap.custom_icon_uuid;
+        entry.icon_id = snap.icon_id;
+        entry.quality_check = snap.quality_check;
+        entry.auto_type = snap.auto_type;
+        // Expiry is wire-split into two fields, but semantically one —
+        // the `set_expiry` setter unifies them at the API boundary and
+        // we copy them atomically here so a stale `expires=false` can't
+        // linger alongside a freshly-restored `expiry_time`.
+        entry.times.expires = snap.times.expires;
+        entry.times.expiry_time = snap.times.expiry_time;
+
+        // Stamp the restore as an edit, so UIs that sort by
+        // last-modification show this entry at the top.
+        entry.times.last_modification_time = Some(now);
+
+        truncate_history(&mut entry.history, history_max_items, history_max_size);
+
+        // End the entry borrow so the vault is accessible again for
+        // pool GC.
+        let _ = entry;
+        gc_binaries_pool(&mut self.state.vault);
+
+        Ok(())
     }
 
     /// Serialise this unlocked database back to a KDBX byte stream —
@@ -1323,6 +1444,35 @@ fn find_entry_mut(root: &mut Group, id: EntryId) -> Option<&mut Entry> {
         }
     }
     None
+}
+
+/// Decide whether a mutation that carries `policy` should push a
+/// pre-mutation snapshot given the live entry's current `history` and
+/// the current wall-clock `now`.
+///
+/// Shared by [`Kdbx::edit_entry`] and
+/// [`Kdbx::restore_entry_from_history`] — both need the same
+/// SnapshotIfOlderThan semantics, and extracting the helper keeps the
+/// two call sites from drifting.
+fn should_snapshot_now(
+    policy: HistoryPolicy,
+    history: &[Entry],
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    match policy {
+        HistoryPolicy::NoSnapshot => false,
+        HistoryPolicy::Snapshot => true,
+        HistoryPolicy::SnapshotIfOlderThan(window) => match history.last() {
+            None => true,
+            Some(last) => {
+                let threshold = now - window;
+                // Absent timestamp → treat as "ancient" and snapshot.
+                last.times
+                    .last_modification_time
+                    .is_none_or(|t| t < threshold)
+            }
+        },
+    }
 }
 
 /// Truncate `history` per `max_items` (negative = unlimited) and
