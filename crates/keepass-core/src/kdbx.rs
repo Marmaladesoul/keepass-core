@@ -50,8 +50,8 @@ use crate::format::{
 use crate::model::entry_editor::PendingBinaryOps;
 use crate::model::{
     Attachment, AutoType, Binary, Clock, CustomIcon, DeletedObject, Entry, EntryEditor, EntryId,
-    Group, GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, SystemClock,
-    Timestamps, Vault,
+    Group, GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, PortableEntry,
+    SystemClock, Timestamps, Vault,
 };
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{decode_vault_with_cipher, encode_vault_with_cipher};
@@ -821,6 +821,231 @@ impl Kdbx<Unlocked> {
             .map(|c| c.data.as_slice())
     }
 
+    // -----------------------------------------------------------------
+    // Cross-vault export / import
+    // -----------------------------------------------------------------
+
+    /// Produce a self-contained snapshot of the entry identified by
+    /// `id`, suitable for importing into a different (or the same)
+    /// vault via [`Self::import_entry`].
+    ///
+    /// The returned [`PortableEntry`] carries the entry, every one
+    /// of its history snapshots, the full decrypted bytes of every
+    /// binary referenced by the entry **or** any history snapshot,
+    /// and every custom icon referenced by the entry **or** any
+    /// history snapshot. The destination vault therefore doesn't
+    /// need to share the source's pools — dedup against the
+    /// destination's pools happens during `import_entry`.
+    ///
+    /// Read-only: does not mutate `self`, does not stamp any
+    /// timestamps, does not touch the binary or custom-icon pools.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
+    pub fn export_entry(&self, id: EntryId) -> Result<PortableEntry, ModelError> {
+        let entry = find_entry(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+
+        // Collect the set of binary ref_ids referenced by the entry
+        // or any of its history snapshots. Same live+history walk
+        // as `collect_attachment_refs` (defined for pool GC).
+        let mut binary_refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for a in &entry.attachments {
+            binary_refs.insert(a.ref_id);
+        }
+        for snap in &entry.history {
+            for a in &snap.attachments {
+                binary_refs.insert(a.ref_id);
+            }
+        }
+        let mut binaries: Vec<(u32, Binary)> = binary_refs
+            .into_iter()
+            .filter_map(|r| {
+                self.state
+                    .vault
+                    .binaries
+                    .get(r as usize)
+                    .map(|b| (r, b.clone()))
+            })
+            .collect();
+        binaries.sort_by_key(|(r, _)| *r);
+
+        // Collect the set of custom-icon UUIDs referenced by live +
+        // history, then clone the full CustomIcon record for each.
+        let mut icon_refs: std::collections::HashSet<uuid::Uuid> = std::collections::HashSet::new();
+        if let Some(u) = entry.custom_icon_uuid {
+            icon_refs.insert(u);
+        }
+        for snap in &entry.history {
+            if let Some(u) = snap.custom_icon_uuid {
+                icon_refs.insert(u);
+            }
+        }
+        let custom_icons: Vec<crate::model::CustomIcon> = self
+            .state
+            .vault
+            .meta
+            .custom_icons
+            .iter()
+            .filter(|c| icon_refs.contains(&c.uuid))
+            .cloned()
+            .collect();
+
+        Ok(PortableEntry {
+            entry: entry.clone(),
+            binaries,
+            custom_icons,
+        })
+    }
+
+    /// Insert a [`PortableEntry`] under `parent`.
+    ///
+    /// When `mint_new_uuid` is `true`, the imported entry — and
+    /// every one of its history snapshots — receives a fresh UUID
+    /// via [`crate::model::Vault`]-wide collision avoidance. This is
+    /// the canonical cross-vault-move path: the entry-as-it-appears-
+    /// in-this-vault is a newly-created record, distinct identity
+    /// from the source's.
+    ///
+    /// When `mint_new_uuid` is `false`, the original UUIDs are
+    /// preserved; import fails with [`ModelError::DuplicateUuid`]
+    /// (before any destination state is mutated) if the entry's
+    /// UUID **or** any history snapshot's UUID already exists in
+    /// this vault. Used by merge flows that treat identical UUIDs
+    /// across vaults as the same record.
+    ///
+    /// Binary dedup: each referenced binary is content-hash-compared
+    /// against [`crate::model::Vault::binaries`]; matches reuse the
+    /// existing pool slot, misses are appended. The entry's and
+    /// every history snapshot's `attachments[].ref_id` are remapped
+    /// to destination-vault indices before insertion.
+    ///
+    /// Custom-icon dedup: when `mint_new_uuid = false`, icons are
+    /// deduped by UUID; when `mint_new_uuid = true`, icons are
+    /// deduped by content hash via [`Self::add_custom_icon`] (so the
+    /// icon's save-time GC discipline continues to hold). In both
+    /// paths the entry's and history snapshots' `custom_icon_uuid`
+    /// refs are remapped.
+    ///
+    /// Bookkeeping (same shape as [`Self::add_entry`] for the
+    /// imported live entry):
+    ///
+    /// - All `times.*` stamped to [`Self::clock`]`.now()` —
+    ///   `creation_time`, `last_modification_time`,
+    ///   `last_access_time`, `location_changed`. `expires` and
+    ///   `expiry_time` are content fields and preserved from the
+    ///   source. `usage_count` reset to 0 (the entry's usage starts
+    ///   fresh in this vault).
+    /// - `previous_parent_group = None`.
+    /// - **History-snapshot timestamps preserved verbatim** —
+    ///   those snapshots describe edits that happened on the source
+    ///   before the import, and rewriting them would be a lie.
+    ///
+    /// Does not stamp [`crate::model::Meta::settings_changed`] —
+    /// adding entries is not a settings change, same as
+    /// [`Self::add_entry`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::GroupNotFound`] if `parent` isn't in the vault.
+    /// - [`ModelError::DuplicateUuid`] if `mint_new_uuid = false`
+    ///   and any UUID from the incoming entry (live or history)
+    ///   collides with an existing vault UUID. The destination is
+    ///   untouched on this failure.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic under any input. The second `find_group_mut`
+    /// call after UUID validation is `.expect()`ed because the
+    /// first call has already proved the parent exists.
+    pub fn import_entry(
+        &mut self,
+        parent: GroupId,
+        mut entry: PortableEntry,
+        mint_new_uuid: bool,
+    ) -> Result<EntryId, ModelError> {
+        if find_group(&self.state.vault.root, parent).is_none() {
+            return Err(ModelError::GroupNotFound(parent));
+        }
+
+        // Validate (or mint) UUIDs for the live entry + every
+        // history snapshot before any destination mutation.
+        // `DuplicateUuid` must fail cleanly.
+        if mint_new_uuid {
+            entry.entry.id = EntryId(fresh_uuid(&self.state.vault));
+            for snap in &mut entry.entry.history {
+                snap.id = EntryId(fresh_uuid(&self.state.vault));
+            }
+        } else {
+            if uuid_in_use(&self.state.vault, entry.entry.id.0) {
+                return Err(ModelError::DuplicateUuid(entry.entry.id.0));
+            }
+            for snap in &entry.entry.history {
+                if uuid_in_use(&self.state.vault, snap.id.0) {
+                    return Err(ModelError::DuplicateUuid(snap.id.0));
+                }
+            }
+        }
+
+        // Binary-pool remap: content-hash dedup against
+        // `self.state.vault.binaries`; insert misses, reuse hits.
+        let mut binary_remap: HashMap<u32, u32> = HashMap::new();
+        for (src_ref, bin) in entry.binaries.drain(..) {
+            let dst_ref = insert_or_dedup_binary(&mut self.state.vault, bin);
+            binary_remap.insert(src_ref, dst_ref);
+        }
+
+        // Custom-icon pool remap: UUID-dedup on the mint_new_uuid=false
+        // path, content-hash-dedup via `add_custom_icon` on the
+        // mint_new_uuid=true path.
+        let mut icon_remap: HashMap<uuid::Uuid, uuid::Uuid> = HashMap::new();
+        if mint_new_uuid {
+            for icon in entry.custom_icons.drain(..) {
+                let dst_uuid = self.add_custom_icon(icon.data.clone());
+                icon_remap.insert(icon.uuid, dst_uuid);
+            }
+        } else {
+            for icon in entry.custom_icons.drain(..) {
+                let src_uuid = icon.uuid;
+                let already_present = self
+                    .state
+                    .vault
+                    .meta
+                    .custom_icons
+                    .iter()
+                    .any(|c| c.uuid == src_uuid);
+                if !already_present {
+                    self.state.vault.meta.custom_icons.push(icon);
+                    // No `settings_changed` stamp here — adding an
+                    // entry (and its referenced icons) is shaped
+                    // like `add_entry`, which doesn't stamp Meta.
+                }
+                icon_remap.insert(src_uuid, src_uuid);
+            }
+        }
+
+        // Apply remaps to the live entry and every history snapshot.
+        let now = self.state.clock.now();
+        remap_entry_refs(&mut entry.entry, &binary_remap, &icon_remap);
+        for snap in &mut entry.entry.history {
+            remap_entry_refs(snap, &binary_remap, &icon_remap);
+        }
+
+        // Stamp live-entry bookkeeping per MUTATION.md invariants.
+        entry.entry.times.creation_time = Some(now);
+        entry.entry.times.last_modification_time = Some(now);
+        entry.entry.times.last_access_time = Some(now);
+        entry.entry.times.location_changed = Some(now);
+        entry.entry.times.usage_count = 0;
+        entry.entry.previous_parent_group = None;
+
+        let new_id = entry.entry.id;
+        let target = find_group_mut(&mut self.state.vault.root, parent)
+            .expect("parent existence checked at the top of this method");
+        target.entries.push(entry.entry);
+        Ok(new_id)
+    }
+
     /// Serialise this unlocked database back to a KDBX byte stream —
     /// the byte-level inverse of [`Kdbx::<HeaderRead>::unlock`].
     ///
@@ -1384,7 +1609,19 @@ fn group_uuid_in_use(group: &Group, candidate: uuid::Uuid) -> bool {
     if group.id.0 == candidate {
         return true;
     }
-    if group.entries.iter().any(|e| e.id.0 == candidate) {
+    // Walk both the live entry ids AND every history snapshot's id.
+    // Tree-wide UUID uniqueness on the wire includes history entries
+    // — KeePass writers assign history snapshots their own `<UUID>`
+    // element, and `import_entry(mint_new_uuid=false)`'s pre-mutation
+    // collision check has to catch incoming UUIDs that collide with
+    // a pre-existing history id (not just a live one). Also fixes a
+    // latent hole on `add_entry`'s caller-supplied-UUID rejection
+    // path, which uses the same helper.
+    if group
+        .entries
+        .iter()
+        .any(|e| e.id.0 == candidate || e.history.iter().any(|s| s.id.0 == candidate))
+    {
         return true;
     }
     group.groups.iter().any(|g| group_uuid_in_use(g, candidate))
@@ -1666,6 +1903,67 @@ fn renumber_attachments(group: &mut Group, remap: &[Option<u32>]) {
     }
     for child in &mut group.groups {
         renumber_attachments(child, remap);
+    }
+}
+
+/// Read-only counterpart to [`find_entry_mut`]. Used by
+/// [`Kdbx::export_entry`], which is itself `&self`.
+fn find_entry(root: &Group, id: EntryId) -> Option<&Entry> {
+    if let Some(e) = root.entries.iter().find(|e| e.id == id) {
+        return Some(e);
+    }
+    for child in &root.groups {
+        if let Some(entry) = find_entry(child, id) {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+/// Append `bin` to [`Vault::binaries`] if no existing binary has
+/// identical `(data, protected)`; otherwise return the existing
+/// slot's `ref_id`. Used by [`Kdbx::import_entry`] to dedup
+/// imported attachment bytes against the destination pool.
+///
+/// Content-hash comparison uses SHA-256 so a large shared
+/// attachment (e.g. a company-logo PNG on many entries) imports
+/// exactly once. The `protected` flag is part of the dedup key
+/// because the same bytes with a different inner-stream encryption
+/// flag are semantically different binaries (the on-disk
+/// representation differs).
+fn insert_or_dedup_binary(vault: &mut Vault, bin: Binary) -> u32 {
+    let incoming: [u8; 32] = Sha256::digest(&bin.data).into();
+    for (idx, existing) in vault.binaries.iter().enumerate() {
+        if existing.protected == bin.protected {
+            let h: [u8; 32] = Sha256::digest(&existing.data).into();
+            if h == incoming {
+                return u32::try_from(idx).expect("pool index fits u32");
+            }
+        }
+    }
+    let new_ref = u32::try_from(vault.binaries.len()).expect("pool index fits u32");
+    vault.binaries.push(bin);
+    new_ref
+}
+
+/// Apply the binary + custom-icon remaps produced during
+/// [`Kdbx::import_entry`] to a single [`Entry`]. Walks the entry's
+/// attachments and `custom_icon_uuid`; callers invoke this once on
+/// the live imported entry and once per history snapshot.
+fn remap_entry_refs(
+    entry: &mut Entry,
+    binary_remap: &HashMap<u32, u32>,
+    icon_remap: &HashMap<uuid::Uuid, uuid::Uuid>,
+) {
+    for a in &mut entry.attachments {
+        if let Some(&new) = binary_remap.get(&a.ref_id) {
+            a.ref_id = new;
+        }
+    }
+    if let Some(u) = entry.custom_icon_uuid {
+        if let Some(&new) = icon_remap.get(&u) {
+            entry.custom_icon_uuid = Some(new);
+        }
     }
 }
 
