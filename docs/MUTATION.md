@@ -35,6 +35,8 @@ caller skip one is a bug, even if all the tests pass.
 | `move_group` | Stamp `group.times.location_changed`; set `group.previous_parent_group`; reject if `new_parent` is a descendant of `id` (cycle) |
 | `delete_group` | Recursively tombstone every entry and subgroup under it, each with its own `DeletedObject` record; then tombstone the group itself |
 | Any Meta setter | Stamp `meta.settings_changed = clock.now()` |
+| `add_custom_icon(data)` | SHA-256 dedup check; on fresh insert push to `meta.custom_icons` + stamp `meta.settings_changed`; on dedup hit no-op, no stamp. Pool GC runs only on `save_to_bytes` |
+| `remove_custom_icon(id)` | Remove from `meta.custom_icons` if present + stamp `meta.settings_changed`; returns `false` with no stamp if absent. Does **not** unset dangling `entry.custom_icon_uuid` / `group.custom_icon_uuid` refs — `save_to_bytes`'s GC resolves those to `None` |
 | `rekey` | Refresh `MasterSeed`, `EncryptionIv`, KDF seed/salt; stamp `meta.master_key_changed = clock.now()`; **does not** touch entries |
 
 ## Clock injection
