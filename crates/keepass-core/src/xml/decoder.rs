@@ -826,9 +826,7 @@ fn capture_unknown_subtree<R: std::io::BufRead>(
                     .map_err(|e| XmlError::Malformed(e.to_string()))?;
             }
             Ok(Event::Eof) => {
-                return Err(XmlError::Malformed(format!(
-                    "EOF inside unknown <{tag}>"
-                )));
+                return Err(XmlError::Malformed(format!("EOF inside unknown <{tag}>")));
             }
             // PIs and nested declarations are illegal inside a KeePass
             // element; drop them rather than refuse the document.
