@@ -294,6 +294,41 @@ fn recycle_group_on_root_returns_cannot_delete_root() {
     }
 }
 
+/// The `group_is_descendant_of` branch in `recycle_group` —
+/// short-circuit `Ok(None)` when the target is already nested
+/// inside the bin — isn't otherwise exercised by the test suite.
+/// `recycle_entry` has its equivalent (test #3); this closes the
+/// symmetry gap for groups.
+#[test]
+fn recycle_group_on_group_already_nested_in_bin_returns_ok_none_without_mutation() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_with_clock(&kdbx4_basic(), t0);
+    let root = kdbx.vault().root.id;
+
+    // Set up a group under root, recycle it into the bin.
+    let g = kdbx.add_group(root, NewGroup::new("Moving In")).unwrap();
+    clock.set(t0 + Duration::minutes(1));
+    let bin = kdbx.recycle_group(g).unwrap().expect("first recycle moves");
+    let changed_after_first = kdbx.vault().meta.recycle_bin_changed;
+    let bin_groups_before_retry = find_group(&kdbx.vault().root, bin).unwrap().groups.len();
+
+    // Second recycle of the same group — now nested under the bin
+    // already. Must short-circuit `Ok(None)`, no mutation.
+    clock.set(t0 + Duration::minutes(2));
+    let result = kdbx.recycle_group(g).unwrap();
+    assert!(result.is_none(), "already-in-bin group returns Ok(None)");
+    assert_eq!(
+        kdbx.vault().meta.recycle_bin_changed,
+        changed_after_first,
+        "short-circuit must not re-stamp recycle_bin_changed"
+    );
+    assert_eq!(
+        find_group(&kdbx.vault().root, bin).unwrap().groups.len(),
+        bin_groups_before_retry,
+        "short-circuit must not duplicate or re-move"
+    );
+}
+
 #[test]
 fn recycle_group_on_bin_itself_returns_circular_move() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();

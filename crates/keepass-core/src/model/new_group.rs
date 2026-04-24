@@ -101,8 +101,25 @@ mod tests {
     fn builder_methods_chain() {
         let g = NewGroup::new("Work")
             .notes("client logins")
-            .with_uuid(Uuid::nil());
+            .with_uuid(Uuid::nil())
+            .icon_id(43)
+            .enable_auto_type(Some(false))
+            .enable_searching(Some(false));
         assert_eq!(g.notes, "client logins");
         assert_eq!(g.uuid, Some(Uuid::nil()));
+        assert_eq!(g.icon_id, 43);
+        assert_eq!(g.enable_auto_type, Some(false));
+        assert_eq!(g.enable_searching, Some(false));
+    }
+
+    #[test]
+    fn default_icon_and_tristate_fields_are_zero_and_none() {
+        // The recycle-bin lazy creation relies on these defaults —
+        // pin them explicitly so a future refactor of the builder's
+        // defaults can't silently break the first-use bin's shape.
+        let g = NewGroup::new("Bare");
+        assert_eq!(g.icon_id, 0);
+        assert_eq!(g.enable_auto_type, None);
+        assert_eq!(g.enable_searching, None);
     }
 }

@@ -1059,9 +1059,13 @@ impl Kdbx<Unlocked> {
     ///   `times.location_changed = clock.now()` + `previous_parent_group
     ///   = Some(old_parent)`. No `DeletedObject` is emitted — recycling
     ///   is a move, not a delete.
-    /// - **Bin disabled** (`meta.recycle_bin_enabled = false`):
-    ///   falls back to [`Self::delete_entry`] (hard delete +
-    ///   `DeletedObject` tombstone). No bin is created.
+    /// - **Bin disabled and no bin group exists**
+    ///   (`meta.recycle_bin_enabled = false` **and**
+    ///   `meta.recycle_bin_uuid` is `None`): falls back to
+    ///   [`Self::delete_entry`] (hard delete + `DeletedObject`
+    ///   tombstone). A bin that exists with `enabled = false` is
+    ///   still used for soft-delete — the flag gates bin
+    ///   **creation**, not bin **use**.
     /// - **Already inside the bin**: short-circuits; no mutation.
     ///
     /// Returns `Ok(Some(bin_id))` on a real move, or `Ok(None)` on
