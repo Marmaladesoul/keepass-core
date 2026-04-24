@@ -615,7 +615,7 @@ impl Kdbx<Unlocked> {
     /// 6. Truncate `entry.history` per `Meta::history_max_items` /
     ///    `history_max_size`. A newly-pushed pre-restore snapshot may
     ///    push the count over the cap; truncation drops oldest first.
-    /// 7. Run [`gc_binaries_pool`] — truncation can drop a snapshot
+    /// 7. Run the binary-pool refcount GC — truncation can drop a snapshot
     ///    that was the only remaining reference to a pool binary, so
     ///    we collect the pool after history shrinks.
     ///
