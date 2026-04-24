@@ -297,6 +297,16 @@ fn read_group<R: std::io::BufRead>(
                 // block; just track the nesting so End events balance.
                 depth += 1;
             }
+            // Self-closing unknown child like `<Favourite/>` at top
+            // level — capture so round-trip preservation doesn't depend
+            // on whether a foreign writer chose Start+End or the
+            // empty-element shorthand for a content-free field. Nested
+            // `Empty` events (depth > 0) are unreachable in practice:
+            // unknown subtrees are drained by `capture_unknown_subtree`.
+            Ok(Event::Empty(e)) if depth == 0 => {
+                let unknown = capture_unknown_empty(e)?;
+                group.unknown_xml.push(unknown);
+            }
             Ok(Event::End(_)) => {
                 if depth == 0 {
                     return Ok(group);
@@ -455,6 +465,14 @@ fn read_entry<R: std::io::BufRead>(
                 // depth > 0: nested element inside some already-entered
                 // block; just track the nesting so End events balance.
                 depth += 1;
+            }
+            // Self-closing unknown child at top level — see the matching
+            // comment in `read_group`. A self-closing element carries no
+            // `<Value>` payload, so the inner-stream keystream is
+            // unaffected.
+            Ok(Event::Empty(e)) if depth == 0 => {
+                let unknown = capture_unknown_empty(e)?;
+                entry.unknown_xml.push(unknown);
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -761,7 +779,7 @@ fn tag_name(e: &BytesStart<'_>) -> Result<String, XmlError> {
 /// a KeePass element).
 ///
 /// Unknown self-closing elements (`<Foo/>`) are captured separately
-/// through [`capture_unknown_empty`] — this helper requires a matching
+/// through [`capture_unknown_empty`]; this helper requires a matching
 /// end tag.
 fn capture_unknown_subtree<R: std::io::BufRead>(
     reader: &mut Reader<R>,
@@ -818,6 +836,24 @@ fn capture_unknown_subtree<R: std::io::BufRead>(
         }
         inner_buf.clear();
     }
+    Ok(UnknownElement {
+        tag,
+        raw_xml: out.into_inner().into_inner(),
+    })
+}
+
+/// Capture a self-closing `<Foo/>` unknown element as an
+/// [`UnknownElement`]. Complement to [`capture_unknown_subtree`] for
+/// the empty-event shape — no descendants to consume, so this is a
+/// one-shot serialise of the `BytesStart` payload as an `Event::Empty`.
+///
+/// Same fidelity contract as the subtree capture: structural, not
+/// byte-exact.
+fn capture_unknown_empty(start: BytesStart<'_>) -> Result<UnknownElement, XmlError> {
+    let tag = tag_name(&start)?;
+    let mut out = quick_xml::Writer::new(std::io::Cursor::new(Vec::new()));
+    out.write_event(Event::Empty(start))
+        .map_err(|e| XmlError::Malformed(e.to_string()))?;
     Ok(UnknownElement {
         tag,
         raw_xml: out.into_inner().into_inner(),
@@ -1008,6 +1044,12 @@ fn read_meta<R: std::io::BufRead>(
                     continue;
                 }
                 depth += 1;
+            }
+            // Self-closing unknown child at top level — see the matching
+            // comment in `read_group`.
+            Ok(Event::Empty(e)) if depth == 0 => {
+                let unknown = capture_unknown_empty(e)?;
+                meta.unknown_xml.push(unknown);
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -3690,5 +3732,51 @@ mod tests {
         let vault = decode_vault(xml).unwrap();
         let e = vault.iter_entries().next().unwrap();
         assert_eq!(e.auto_type, crate::model::AutoType::default());
+    }
+
+    /// A self-closing `<Foo/>` unknown child must be captured in the
+    /// parent's `unknown_xml` at each of the three supported container
+    /// levels. The outer loop used to drop Empty events into the
+    /// `_ => {}` catch-all, silently losing such elements on round-trip.
+    #[test]
+    fn self_closing_unknowns_are_captured_at_entry_group_and_meta() {
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<KeePassFile>
+  <Meta>
+    <Generator>KeePassXC</Generator>
+    <MetaFlag/>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>Passwords</Name>
+      <GroupFlag/>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>Gmail</Value></String>
+        <EntryFlag/>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#;
+        let vault = decode_vault(xml).unwrap();
+
+        // Meta captured a self-closing unknown.
+        let meta_tags: Vec<_> = vault.meta.unknown_xml.iter().map(|u| &u.tag).collect();
+        assert_eq!(meta_tags, vec!["MetaFlag"]);
+        let meta_raw = std::str::from_utf8(&vault.meta.unknown_xml[0].raw_xml).unwrap();
+        assert!(
+            meta_raw.contains("MetaFlag"),
+            "meta fragment lost its tag: {meta_raw:?}"
+        );
+
+        // Root group captured a self-closing unknown.
+        let group_tags: Vec<_> = vault.root.unknown_xml.iter().map(|u| &u.tag).collect();
+        assert_eq!(group_tags, vec!["GroupFlag"]);
+
+        // Entry captured a self-closing unknown.
+        let entry = vault.iter_entries().next().unwrap();
+        let entry_tags: Vec<_> = entry.unknown_xml.iter().map(|u| &u.tag).collect();
+        assert_eq!(entry_tags, vec!["EntryFlag"]);
     }
 }

@@ -678,8 +678,11 @@ impl Default for Meta {
 /// Structural (parse-back) equality is what round-trips.
 ///
 /// The encoder emits captured elements at the end of the parent
-/// container's canonical children (before `</Entry>`, `</Group>`,
-/// `</Meta>`), so original source position is not preserved either.
+/// container's canonical children — in particular, for `<Group>` this
+/// is *after* the container's child `<Entry>` and nested `<Group>`
+/// siblings, not interleaved among them. Original source position
+/// relative to both canonical fields and structural children is not
+/// preserved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UnknownElement {

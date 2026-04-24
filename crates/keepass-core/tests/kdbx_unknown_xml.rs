@@ -150,6 +150,50 @@ fn unknown_children_survive_edit_group_on_canonical_field() {
 }
 
 #[test]
+fn unknown_children_survive_snapshot_edit_on_both_live_and_history() {
+    // Under HistoryPolicy::Snapshot, the library clones the live
+    // entry into `entry.history` *before* the edit closure runs.
+    // That snapshot is a full `Entry` — `unknown_xml` included — so
+    // the captured foreign children must travel with it. The live
+    // entry then runs the closure and must keep its own
+    // `unknown_xml` untouched.
+    //
+    // FFI_PHASE1 confirmation checklist flags this exact path as
+    // needing coverage; the other integration tests here all use
+    // NoSnapshot, which never exercises the Clone.
+    let mut kdbx = open_fixture();
+    let entry_id = kdbx.vault().iter_entries().next().expect("entry").id;
+
+    kdbx.edit_entry(
+        entry_id,
+        keepass_core::model::HistoryPolicy::Snapshot,
+        |e| e.set_password(SecretString::from("post-snapshot")),
+    )
+    .expect("edit_entry");
+
+    let bytes = kdbx.save_to_bytes().expect("save_to_bytes");
+    let reopened = reopen(bytes);
+    let entry = reopened
+        .vault()
+        .iter_entries()
+        .next()
+        .expect("entry after reopen");
+
+    // Live entry: unknown_xml intact; the edit landed.
+    assert_captured(&entry.unknown_xml, "FutureEntryHint", "payload");
+    assert_eq!(entry.password, "post-snapshot");
+
+    // History: exactly one pre-edit snapshot, carrying its own copy
+    // of the unknown child. A derived Clone should propagate it, but
+    // this is the kind of invariant that silently rots, so assert it.
+    assert_eq!(entry.history.len(), 1);
+    let snap = &entry.history[0];
+    assert_captured(&snap.unknown_xml, "FutureEntryHint", "payload");
+    // And the snapshot captures the pre-edit password, not the new one.
+    assert_ne!(snap.password, "post-snapshot");
+}
+
+#[test]
 fn unknown_children_survive_meta_setter() {
     let mut kdbx = open_fixture();
     kdbx.set_database_description("rebranded via mutation");
