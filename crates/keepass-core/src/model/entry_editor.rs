@@ -268,6 +268,45 @@ impl<'a> EntryEditor<'a> {
     }
 
     // -----------------------------------------------------------------
+    // History management
+    // -----------------------------------------------------------------
+
+    /// Remove the history entry at `index` (0-based, oldest-first).
+    ///
+    /// Returns `true` if an entry was removed, `false` if `index` was
+    /// out of range (which is *not* an error — UIs that let a user
+    /// click "delete this revision" may race against concurrent edits,
+    /// and surfacing that as `bool` is less friction than forcing the
+    /// host to call another API to check the length first).
+    ///
+    /// The outer [`crate::kdbx::Kdbx::edit_entry`] still stamps
+    /// `last_modification_time` and applies the caller's
+    /// [`crate::model::HistoryPolicy`] to push a snapshot of the
+    /// pre-edit state. Hosts deleting a single history entry typically
+    /// pass [`crate::model::HistoryPolicy::NoSnapshot`] — snapshotting
+    /// before deleting a snapshot would be counterproductive — but
+    /// the library doesn't enforce that.
+    pub fn remove_history_at(&mut self, index: usize) -> bool {
+        if index >= self.inner.history.len() {
+            return false;
+        }
+        self.inner.history.remove(index);
+        true
+    }
+
+    /// Remove every history entry. Returns how many were dropped, so
+    /// callers that want to report "cleared N revisions" don't have
+    /// to read the length first.
+    ///
+    /// Same `HistoryPolicy` consideration as [`Self::remove_history_at`]:
+    /// `NoSnapshot` is almost always what the host wants here.
+    pub fn clear_history(&mut self) -> usize {
+        let n = self.inner.history.len();
+        self.inner.history.clear();
+        n
+    }
+
+    // -----------------------------------------------------------------
     // Attachments
     // -----------------------------------------------------------------
 
@@ -438,12 +477,14 @@ mod tests {
             editor.set_background_color("#00FFAA");
             editor.set_override_url("cmd://firefox %1");
             editor.set_custom_icon(Some(icon));
+            editor.set_icon_id(25);
             editor.set_quality_check(false);
         }
         assert_eq!(e.foreground_color, "#FF0000");
         assert_eq!(e.background_color, "#00FFAA");
         assert_eq!(e.override_url, "cmd://firefox %1");
         assert_eq!(e.custom_icon_uuid, Some(icon));
+        assert_eq!(e.icon_id, 25);
         assert!(!e.quality_check);
 
         // Clearing the custom icon round-trips back to None.

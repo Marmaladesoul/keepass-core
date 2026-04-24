@@ -754,6 +754,85 @@ def gen_pykeepass_unknown_xml() -> None:
     log(f"wrote pykeepass/{name}")
 
 
+def gen_pykeepass_history_unknown_xml() -> None:
+    """Vault with one entry carrying deliberately-divergent `unknown_xml`
+    between the live state and its single history snapshot.
+
+    Shape after the generator runs:
+      - Entry live state: one unknown child `<FutureLive>live-only</FutureLive>`.
+      - Entry history[0]: one unknown child `<FutureSnap>snap-only</FutureSnap>`.
+
+    Purpose: the `restore_entry_from_history` test suite needs to prove
+    that restore leaves the live entry's `unknown_xml` alone rather
+    than rolling it back to the snapshot's. Without divergence between
+    live and snapshot, we can't distinguish "keep-live" from "copy-from-
+    snapshot" at the assertion site. `unknown_xml` has no public setter
+    by design (it's for foreign-writer preservation), so the divergence
+    has to be baked into the fixture via direct XML injection.
+    """
+    from pykeepass import create_database, PyKeePass
+    from lxml import etree
+
+    name = "history-unknown-xml"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    pw = "test-hist-unk-108"
+    PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
+
+    # Base: one entry, push one edit into history via pykeepass.
+    kp = create_database(str(db_path), password=pw)
+    kp.add_entry(kp.root_group, title="Original",
+                 username="alice@example.com",
+                 password="p4ss-v1",
+                 url="https://example.com")
+    kp.save()
+    kp = PyKeePass(str(db_path), password=pw)
+    e = kp.find_entries(title="Original", first=True)
+    e.save_history()
+    e.title = "Current"
+    e.password = "p4ss-v2"
+    kp.save()
+
+    # lxml injection: one unknown child on live, a different one on
+    # the single history snapshot.
+    kp = PyKeePass(str(db_path), password=pw)
+    root_group = kp.tree.find("Root/Group")
+    entry = root_group.find("Entry")
+    assert entry is not None, "entry not found"
+    history_el = entry.find("History")
+    assert history_el is not None, "history element not found"
+    snap = history_el.find("Entry")
+    assert snap is not None, "snapshot entry not found"
+
+    live_flag = etree.SubElement(entry, "FutureLive")
+    live_flag.text = "live-only"
+    snap_flag = etree.SubElement(snap, "FutureSnap")
+    snap_flag.text = "snap-only"
+
+    kp.save()
+
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": (
+            "Single entry with one history snapshot; live entry carries "
+            "<FutureLive> and history[0] carries <FutureSnap>. Fixture "
+            "for the `restore_entry_from_history` unknown_xml keep-live "
+            "invariant test."
+        ),
+        "format": "KDBX4",
+        "source": "pykeepass+lxml",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": None,
+        "entry_count": 1,
+        "live_title": "Current",
+        "snapshot_title": "Original",
+        "live_unknown": {"tag": "FutureLive", "text": "live-only"},
+        "snapshot_unknown": {"tag": "FutureSnap", "text": "snap-only"},
+    })
+    log(f"wrote pykeepass/{name}")
+
+
 def gen_pykeepass_editor_fields() -> None:
     """Vault populated with non-default values in every canonical field
     that `EntryEditor` / `GroupEditor` now exposes, for the editor-
@@ -1040,6 +1119,7 @@ GENERATORS: dict[str, list[Callable[[], None]]] = {
         gen_pykeepass_recycle,
         gen_pykeepass_custom_fields,
         gen_pykeepass_unknown_xml,
+        gen_pykeepass_history_unknown_xml,
         gen_pykeepass_editor_fields,
         gen_pykeepass_large,
     ],

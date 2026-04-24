@@ -227,6 +227,10 @@ fn write_entry<W: std::io::Write>(
 ) -> Result<(), XmlError> {
     open(w, "Entry")?;
     write_text_element(w, "UUID", &uuid_to_base64(entry.id.0))?;
+    // `<IconID>` sits right after `<UUID>` here to match `write_group`'s
+    // element order. Internal consistency only — see the matching note
+    // in `write_group`; the decoder accepts either position.
+    write_text_element(w, "IconID", &entry.icon_id.to_string())?;
     // Canonical string fields first, in the KeePass-conventional order.
     // Title / UserName / URL / Notes are never encrypted.
     write_string_kv_plain(w, "Title", &entry.title)?;
@@ -268,8 +272,6 @@ fn write_entry<W: std::io::Write>(
     if !entry.override_url.is_empty() {
         write_text_element(w, "OverrideURL", &entry.override_url)?;
     }
-    // See the matching note in `write_group`.
-    write_text_element(w, "IconID", &entry.icon_id.to_string())?;
     if let Some(icon) = entry.custom_icon_uuid {
         write_text_element(w, "CustomIconUUID", &uuid_to_base64(icon))?;
     }

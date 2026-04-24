@@ -113,6 +113,22 @@ pub enum ModelError {
     /// The root group cannot be deleted — every vault has exactly one.
     #[error("cannot delete the root group")]
     CannotDeleteRoot,
+
+    /// A [`crate::kdbx::Kdbx::restore_entry_from_history`] (or any
+    /// future caller that indexes into [`Entry::history`]) was given
+    /// an `index` outside the valid range `0..len`. `len` is the
+    /// entry's history length at the time of the call; captured so
+    /// the error message is self-diagnosing without re-inspecting
+    /// vault state.
+    #[error("entry {id:?} history index {index} out of range (len = {len})")]
+    HistoryIndexOutOfRange {
+        /// The entry whose history was indexed.
+        id: EntryId,
+        /// The index the caller supplied.
+        index: usize,
+        /// The entry's history length at the time the call was rejected.
+        len: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
