@@ -45,6 +45,13 @@ struct PreservedSubset {
     database_name: String,
     entry_count: usize,
     entries: Vec<PreservedEntry>,
+    /// Sorted `(icon_uuid, sha256_of_bytes)` pairs — one per custom
+    /// icon in the pool. Represents icons as `[u8; 32]` hashes rather
+    /// than raw bytes so assertions surface a diff-sized `PartialEq`
+    /// failure at a glance. Added as part of slice 5 (custom-icon
+    /// pool); automatically guards every future fixture that carries
+    /// icons.
+    custom_icons: Vec<(uuid::Uuid, [u8; 32])>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,6 +66,17 @@ struct PreservedEntry {
 }
 
 fn preserved(v: &Vault) -> PreservedSubset {
+    use sha2::{Digest as _, Sha256};
+    let mut custom_icons: Vec<(uuid::Uuid, [u8; 32])> = v
+        .meta
+        .custom_icons
+        .iter()
+        .map(|c| {
+            let hash: [u8; 32] = Sha256::digest(&c.data).into();
+            (c.uuid, hash)
+        })
+        .collect();
+    custom_icons.sort_by_key(|(uuid, _)| *uuid);
     PreservedSubset {
         generator: v.meta.generator.clone(),
         database_name: v.meta.database_name.clone(),
@@ -87,6 +105,7 @@ fn preserved(v: &Vault) -> PreservedSubset {
                 },
             })
             .collect(),
+        custom_icons,
     }
 }
 
