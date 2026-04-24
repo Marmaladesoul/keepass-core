@@ -37,6 +37,8 @@ caller skip one is a bug, even if all the tests pass.
 | Any Meta setter | Stamp `meta.settings_changed = clock.now()` |
 | `add_custom_icon(data)` | SHA-256 dedup check; on fresh insert push to `meta.custom_icons` + stamp `meta.settings_changed`; on dedup hit no-op, no stamp. Pool GC runs only on `save_to_bytes` |
 | `remove_custom_icon(id)` | Remove from `meta.custom_icons` if present + stamp `meta.settings_changed`; returns `false` with no stamp if absent. Does **not** unset dangling `entry.custom_icon_uuid` / `group.custom_icon_uuid` refs — `save_to_bytes`'s GC resolves those to `None` |
+| `export_entry(id)` | Read-only; no timestamps stamped, no pool mutation, no `Meta` change. Returns `EntryNotFound` if `id` is absent |
+| `import_entry(parent, entry, mint_new_uuid)` | Same shape as `add_entry` for the imported live entry (stamp all `times.*` to `clock.now()`, `previous_parent_group = None`, `usage_count = 0`); history-snapshot timestamps preserved verbatim; binaries content-hash-deduped against the destination pool; custom icons UUID-deduped (`mint_new_uuid=false`) or content-hash-deduped via `add_custom_icon` (`mint_new_uuid=true`); `DuplicateUuid` check covers the entry AND every history-snapshot UUID when `mint_new_uuid=false` |
 | `rekey` | Refresh `MasterSeed`, `EncryptionIv`, KDF seed/salt; stamp `meta.master_key_changed = clock.now()`; **does not** touch entries |
 
 ## Clock injection
