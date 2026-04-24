@@ -249,6 +249,22 @@ impl<'a> EntryEditor<'a> {
         self.inner.quality_check = enabled;
     }
 
+    /// Set the entry's `<LastAccessTime>` explicitly.
+    ///
+    /// `Some(at)` writes the timestamp; `None` clears the field
+    /// entirely — the Keys-app "clear last-access" button path. The
+    /// library does **not** auto-stamp `last_access_time` from any
+    /// other operation: `edit_entry`, `move_entry`, etc. leave it
+    /// untouched. Explicit stamping from a read-touch goes through
+    /// [`crate::kdbx::Kdbx::touch_entry`] instead.
+    ///
+    /// FFI clock-ownership rule A: the library owns every `*.times.*`
+    /// stamp, but the corollary is that different stamps fire under
+    /// different operations — reading an entry isn't a touch.
+    pub fn set_last_access_time(&mut self, at: Option<DateTime<Utc>>) {
+        self.inner.times.last_access_time = at;
+    }
+
     /// Set the entry's expiry. `Some(at)` enables expiry and stamps
     /// the deadline; `None` disables expiry entirely (clearing both
     /// the `Expires` flag and the stored `ExpiryTime`).

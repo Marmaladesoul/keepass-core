@@ -29,6 +29,7 @@ caller skip one is a bug, even if all the tests pass.
 | `edit_entry` (field change) | Per `HistoryPolicy`: optionally snapshot pre-edit entry into `entry.history`, truncate per `Meta::history_max_items` / `max_size`; stamp `entry.times.last_modification_time = clock.now()` once after the closure runs |
 | `move_entry` | Stamp `entry.times.location_changed = clock.now()`; set `entry.previous_parent_group = Some(old_parent)`; splice out of old parent, push onto new parent; **no** history snapshot (move is not a field edit) |
 | `delete_entry` | Append `DeletedObject { uuid, deleted_at: clock.now() }` to `vault.deleted_objects`; remove from tree |
+| `touch_entry` | Stamp `entry.times.last_access_time = clock.now()`; **no** history snapshot, **no** `last_modification_time` stamp, **no** `meta.settings_changed` stamp, **no** binary-pool GC (leaf read-touch, not a content edit) |
 | `add_group` | Same shape as `add_entry` (UUID, times, previous_parent_group = None) |
 | `edit_group` | Stamp `group.times.last_modification_time = clock.now()`; **no** history (groups don't carry history) |
 | `move_group` | Stamp `group.times.location_changed`; set `group.previous_parent_group`; reject if `new_parent` is a descendant of `id` (cycle) |
