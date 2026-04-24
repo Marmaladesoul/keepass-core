@@ -19,6 +19,9 @@ pub struct NewGroup {
     pub(crate) name: String,
     pub(crate) notes: String,
     pub(crate) uuid: Option<Uuid>,
+    pub(crate) icon_id: u32,
+    pub(crate) enable_auto_type: Option<bool>,
+    pub(crate) enable_searching: Option<bool>,
 }
 
 impl NewGroup {
@@ -30,6 +33,9 @@ impl NewGroup {
             name: name.into(),
             notes: String::new(),
             uuid: None,
+            icon_id: 0,
+            enable_auto_type: None,
+            enable_searching: None,
         }
     }
 
@@ -50,6 +56,33 @@ impl NewGroup {
         self.uuid = Some(uuid);
         self
     }
+
+    /// Set the built-in icon index. Same semantics as
+    /// [`crate::model::GroupEditor::set_icon_id`]; the library does
+    /// not range-check.
+    #[must_use]
+    pub fn icon_id(mut self, id: u32) -> Self {
+        self.icon_id = id;
+        self
+    }
+
+    /// Set the tri-state auto-type override. `Some(false)` is the
+    /// canonical shape for the recycle-bin group, which opts its
+    /// contents out of auto-type; `Some(true)` forces on;
+    /// `None` (the default) means "inherit from parent".
+    #[must_use]
+    pub fn enable_auto_type(mut self, enabled: Option<bool>) -> Self {
+        self.enable_auto_type = enabled;
+        self
+    }
+
+    /// Set the tri-state search-inclusion override. Same semantics
+    /// as [`Self::enable_auto_type`].
+    #[must_use]
+    pub fn enable_searching(mut self, enabled: Option<bool>) -> Self {
+        self.enable_searching = enabled;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -68,8 +101,25 @@ mod tests {
     fn builder_methods_chain() {
         let g = NewGroup::new("Work")
             .notes("client logins")
-            .with_uuid(Uuid::nil());
+            .with_uuid(Uuid::nil())
+            .icon_id(43)
+            .enable_auto_type(Some(false))
+            .enable_searching(Some(false));
         assert_eq!(g.notes, "client logins");
         assert_eq!(g.uuid, Some(Uuid::nil()));
+        assert_eq!(g.icon_id, 43);
+        assert_eq!(g.enable_auto_type, Some(false));
+        assert_eq!(g.enable_searching, Some(false));
+    }
+
+    #[test]
+    fn default_icon_and_tristate_fields_are_zero_and_none() {
+        // The recycle-bin lazy creation relies on these defaults —
+        // pin them explicitly so a future refactor of the builder's
+        // defaults can't silently break the first-use bin's shape.
+        let g = NewGroup::new("Bare");
+        assert_eq!(g.icon_id, 0);
+        assert_eq!(g.enable_auto_type, None);
+        assert_eq!(g.enable_searching, None);
     }
 }
