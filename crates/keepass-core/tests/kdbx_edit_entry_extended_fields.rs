@@ -18,7 +18,6 @@ use secrecy::SecretString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 struct SharedClock(Arc<Mutex<DateTime<Utc>>>);
@@ -69,7 +68,6 @@ fn edit_entry_extended_fields_round_trip_through_save() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let t1: DateTime<Utc> = "2026-04-22T11:00:00Z".parse().unwrap();
     let expiry: DateTime<Utc> = "2030-12-31T23:59:59Z".parse().unwrap();
-    let icon = Uuid::from_u128(0xCAFE_F00D_DEAD_BEEF_0000_0000_0000_0001);
 
     let clock = SharedClock::new(t0);
     let handle = clock.clone();
@@ -79,6 +77,13 @@ fn edit_entry_extended_fields_round_trip_through_save() {
         .unwrap()
         .unlock_with_clock(&composite, Box::new(clock))
         .unwrap();
+
+    // Register a custom icon in the pool BEFORE referencing it from
+    // the entry. `gc_custom_icons_pool` (slice 5) resets dangling
+    // refs on save; the prior version of this test bound
+    // `custom_icon_uuid` to a UUID that wasn't in the pool, which
+    // only round-tripped because the GC didn't exist yet.
+    let icon = kdbx.add_custom_icon(b"test-icon-bytes".to_vec());
 
     let root = kdbx.vault().root.id;
     let id = kdbx

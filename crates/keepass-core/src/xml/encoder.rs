@@ -162,8 +162,33 @@ fn write_meta<W: std::io::Write>(w: &mut Writer<W>, meta: &Meta) -> Result<(), X
     )?;
     write_text_element(w, "HistoryMaxItems", &meta.history_max_items.to_string())?;
     write_text_element(w, "HistoryMaxSize", &meta.history_max_size.to_string())?;
+    if !meta.custom_icons.is_empty() {
+        write_custom_icons(w, &meta.custom_icons)?;
+    }
     write_unknown_xml(w, &meta.unknown_xml)?;
     close(w, "Meta")
+}
+
+/// Emit `<CustomIcons>` with one `<Icon>` child per entry in the
+/// pool. Mirrors `read_custom_icons` / `read_one_custom_icon` —
+/// elides `<Name>` when empty and `<LastModificationTime>` when
+/// absent, matching the minimal shape KeePassXC itself writes.
+fn write_custom_icons<W: std::io::Write>(
+    w: &mut Writer<W>,
+    icons: &[crate::model::CustomIcon],
+) -> Result<(), XmlError> {
+    open(w, "CustomIcons")?;
+    for icon in icons {
+        open(w, "Icon")?;
+        write_text_element(w, "UUID", &uuid_to_base64(icon.uuid))?;
+        write_text_element(w, "Data", &BASE64.encode(&icon.data))?;
+        if !icon.name.is_empty() {
+            write_text_element(w, "Name", &icon.name)?;
+        }
+        write_optional_timestamp(w, "LastModificationTime", icon.last_modified)?;
+        close(w, "Icon")?;
+    }
+    close(w, "CustomIcons")
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,17 @@
+{
+  "custom_icons": [
+    {
+      "referenced_by_entry_title": "With Icon",
+      "sha256": "43739c566e26fd7cb88f69d3864ea34740372f5ee99acac169e090beffbce5c6",
+      "source_file": "attachments/1x1.png",
+      "uuid": "cccccccc-dddd-eeee-ffff-000000000042"
+    }
+  ],
+  "description": "KDBX4 vault with a single custom icon in the Meta/CustomIcons pool, referenced by the 'With Icon' entry. Guards byte-equal round-trip of the custom-icon surface.",
+  "entry_count": 2,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "key_file": null,
+  "master_password": "test-icons-109",
+  "source": "pykeepass+lxml"
+}
