@@ -754,6 +754,169 @@ def gen_pykeepass_unknown_xml() -> None:
     log(f"wrote pykeepass/{name}")
 
 
+def gen_pykeepass_editor_fields() -> None:
+    """Vault populated with non-default values in every canonical field
+    that `EntryEditor` / `GroupEditor` now exposes, for the editor-
+    invariant tests.
+
+    Every target field lives on the fixture with a non-default,
+    distinguishable value; the round-trip tests then mutate an
+    unrelated field and assert the target field comes back equal.
+
+    Most fields go in via `lxml` `SubElement` rather than pykeepass's
+    typed setters because pykeepass's public surface does NOT cleanly
+    express:
+      - `<EnableAutoType>False</EnableAutoType>` tri-state false
+        (pykeepass treats False as "inherit" in some versions);
+      - `<EnableSearching>False</EnableSearching>` ditto;
+      - a non-default `<AutoType>` block with an `<Association>`
+        child on an entry;
+      - `<QualityCheck>False</QualityCheck>`.
+
+    Using lxml throughout keeps the generator readable and removes the
+    need to reason about which version of pykeepass we're running
+    against. Base vault (password, crypto, framing) is still created
+    via pykeepass so the file is a real KDBX4.
+    """
+    from pykeepass import create_database, PyKeePass
+    from lxml import etree
+
+    name = "editor-fields"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    pw = "test-editor-107"
+    PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
+
+    # Base vault: root group, one subgroup ("Work"), one entry under it.
+    kp = create_database(str(db_path), password=pw)
+    sub = kp.add_group(kp.root_group, "Work")
+    kp.add_entry(sub, title="Contoso Mail",
+                 username="alice@example.com",
+                 password="p4ss-editor-01",
+                 url="https://mail.contoso.example")
+    kp.save()
+
+    # Re-open and decorate via lxml.
+    kp = PyKeePass(str(db_path), password=pw)
+
+    # Pre-agreed values; the sidecar mirrors these.
+    entry_custom_icon = "aaaaaaaa-bbbb-cccc-dddd-000000000011"
+    group_custom_icon = "aaaaaaaa-bbbb-cccc-dddd-000000000012"
+    entry_icon_id = 25
+    group_icon_id = 43  # KeePass's "Recycle Bin" icon — distinguishable from 0/48.
+    expiry = "2030-01-02T03:04:05Z"
+
+    # Locate the Work group and its sole entry.
+    root_group = kp.tree.find("Root/Group")
+    work_group = None
+    for g in root_group.findall("Group"):
+        name_el = g.find("Name")
+        if name_el is not None and name_el.text == "Work":
+            work_group = g
+            break
+    assert work_group is not None, "Work group not found"
+    entry = work_group.find("Entry")
+    assert entry is not None, "entry under Work not found"
+
+    # ---- Entry decoration ----------------------------------------
+    def set_or_replace(parent, tag, text):
+        existing = parent.find(tag)
+        if existing is not None:
+            parent.remove(existing)
+        el = etree.SubElement(parent, tag)
+        el.text = text
+        return el
+
+    set_or_replace(entry, "IconID", str(entry_icon_id))
+    set_or_replace(entry, "CustomIconUUID",
+                   _uuid_to_b64(entry_custom_icon))
+    set_or_replace(entry, "ForegroundColor", "#FF0000")
+    set_or_replace(entry, "BackgroundColor", "#00FFAA")
+    set_or_replace(entry, "OverrideURL", "cmd://firefox %1")
+    set_or_replace(entry, "QualityCheck", "False")
+    # Expiry: set both the flag and the time under <Times>.
+    times = entry.find("Times")
+    assert times is not None, "<Times> missing on entry"
+    set_or_replace(times, "Expires", "True")
+    set_or_replace(times, "ExpiryTime", expiry)
+
+    # AutoType block: non-default on every subfield + one Association.
+    existing_at = entry.find("AutoType")
+    if existing_at is not None:
+        entry.remove(existing_at)
+    at = etree.SubElement(entry, "AutoType")
+    etree.SubElement(at, "Enabled").text = "False"
+    etree.SubElement(at, "DataTransferObfuscation").text = "1"
+    etree.SubElement(at, "DefaultSequence").text = "{USERNAME}{TAB}"
+    assoc = etree.SubElement(at, "Association")
+    etree.SubElement(assoc, "Window").text = "Firefox - *"
+    etree.SubElement(assoc, "KeystrokeSequence").text = "{PASSWORD}{ENTER}"
+
+    # ---- Group decoration ----------------------------------------
+    set_or_replace(work_group, "IconID", str(group_icon_id))
+    set_or_replace(work_group, "CustomIconUUID",
+                   _uuid_to_b64(group_custom_icon))
+    set_or_replace(work_group, "DefaultAutoTypeSequence", "{TITLE}{ENTER}")
+    set_or_replace(work_group, "EnableAutoType", "False")
+    set_or_replace(work_group, "EnableSearching", "False")
+
+    kp.save()
+
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": (
+            "Every canonical EntryEditor / GroupEditor field set to a "
+            "non-default value, so round-trip invariant tests can assert "
+            "each one survives an unrelated edit."
+        ),
+        "format": "KDBX4",
+        "source": "pykeepass+lxml",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": None,
+        "entry_count": 1,
+        "entry": {
+            "title": "Contoso Mail",
+            "icon_id": entry_icon_id,
+            "custom_icon_uuid": entry_custom_icon,
+            "foreground_color": "#FF0000",
+            "background_color": "#00FFAA",
+            "override_url": "cmd://firefox %1",
+            "quality_check": False,
+            "expiry_time": expiry,
+            "auto_type": {
+                "enabled": False,
+                "data_transfer_obfuscation": 1,
+                "default_sequence": "{USERNAME}{TAB}",
+                "associations": [
+                    {
+                        "window": "Firefox - *",
+                        "keystroke_sequence": "{PASSWORD}{ENTER}",
+                    },
+                ],
+            },
+        },
+        "group": {
+            "name": "Work",
+            "icon_id": group_icon_id,
+            "custom_icon_uuid": group_custom_icon,
+            "default_auto_type_sequence": "{TITLE}{ENTER}",
+            "enable_auto_type": False,
+            "enable_searching": False,
+        },
+    })
+    log(f"wrote pykeepass/{name}")
+
+
+def _uuid_to_b64(hyphenated: str) -> str:
+    """KeePass stores UUIDs as base64 of the 16 raw bytes, not the
+    hyphenated string form. This mirrors the internal convention used
+    by pykeepass / KeePassXC."""
+    import base64
+    import uuid as _uuid
+    return base64.b64encode(_uuid.UUID(hyphenated).bytes).decode("ascii")
+
+
 def gen_pykeepass_large() -> None:
     """Large vault — 1000 entries. Tests scaling + stable parse time."""
     from pykeepass import create_database, PyKeePass
@@ -877,6 +1040,7 @@ GENERATORS: dict[str, list[Callable[[], None]]] = {
         gen_pykeepass_recycle,
         gen_pykeepass_custom_fields,
         gen_pykeepass_unknown_xml,
+        gen_pykeepass_editor_fields,
         gen_pykeepass_large,
     ],
     "malformed": [

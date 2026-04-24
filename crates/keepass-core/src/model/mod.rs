@@ -231,6 +231,14 @@ pub struct Entry {
     /// (not-yet-modelled) Meta/CustomIcons pool. `None` when the
     /// entry uses one of the built-in icons.
     pub custom_icon_uuid: Option<Uuid>,
+    /// `<IconID>` — index into KeePass's built-in icon set (0–68 in
+    /// KeePass 2.x, with `0` being the "Key" default). A separate
+    /// [`Self::custom_icon_uuid`] overrides this when both are set;
+    /// the field is still round-tripped so host clients that render
+    /// by-id (rather than by-UUID) don't lose the user's choice.
+    /// Missing `<IconID>` in the XML decodes to `0` (KeePass's own
+    /// default for a fresh entry).
+    pub icon_id: u32,
     /// `<CustomData>` — free-form plugin / client-specific key/value
     /// items attached to this entry. Same shape as
     /// [`Meta::custom_data`], just scoped to the entry.
@@ -418,6 +426,10 @@ pub struct Group {
     /// [`Meta::custom_icons`] pool. Same semantics as
     /// [`Entry::custom_icon_uuid`], scoped to the group.
     pub custom_icon_uuid: Option<Uuid>,
+    /// `<IconID>` — built-in icon index. Same semantics as
+    /// [`Entry::icon_id`], scoped to the group. Missing element
+    /// decodes to `0` (KeePass's "Folder" default for groups).
+    pub icon_id: u32,
     /// `<Times>` block for the group itself.
     pub times: Timestamps,
     /// Unknown XML children on `<Group>` preserved verbatim for
@@ -801,6 +813,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: AutoType::default(),
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         }
     }
@@ -820,6 +833,7 @@ mod tests {
             previous_parent_group: None,
             last_top_visible_entry: None,
             custom_icon_uuid: None,
+            icon_id: 0,
             times: Timestamps::default(),
             unknown_xml: Vec::new(),
         }

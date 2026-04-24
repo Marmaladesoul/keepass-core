@@ -71,6 +71,12 @@ impl<'a> GroupEditor<'a> {
     pub fn set_custom_icon(&mut self, icon: Option<Uuid>) {
         self.inner.custom_icon_uuid = icon;
     }
+
+    /// Set the group's built-in icon index. Same semantics and
+    /// non-validation policy as [`crate::model::EntryEditor::set_icon_id`].
+    pub fn set_icon_id(&mut self, id: u32) {
+        self.inner.icon_id = id;
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +99,7 @@ mod tests {
             previous_parent_group: None,
             last_top_visible_entry: None,
             custom_icon_uuid: None,
+            icon_id: 0,
             times: Timestamps::default(),
             unknown_xml: Vec::new(),
         }

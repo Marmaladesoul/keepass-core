@@ -229,6 +229,18 @@ impl<'a> EntryEditor<'a> {
         self.inner.custom_icon_uuid = icon;
     }
 
+    /// Set the entry's built-in icon index (`<IconID>` — 0..=68 in
+    /// KeePass 2.x, where 0 is the "Key" default). Independent of
+    /// [`Self::set_custom_icon`]; when both are set, most KeePass
+    /// clients prefer the custom icon and the built-in index is kept
+    /// as a fallback for clients that only render by id. The library
+    /// does not range-check — writers have been observed to emit
+    /// values outside the documented 0..=68 range, and surfacing
+    /// those unchanged is the correct round-trip behaviour.
+    pub fn set_icon_id(&mut self, id: u32) {
+        self.inner.icon_id = id;
+    }
+
     /// Toggle whether this entry's password participates in the host
     /// client's password-quality audit. Defaults to `true`; opt out
     /// for PINs, recovery codes, and other strings where a strength
@@ -329,6 +341,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: AutoType::default(),
             times: Timestamps::default(),
+            icon_id: 0,
             unknown_xml: Vec::new(),
         }
     }
