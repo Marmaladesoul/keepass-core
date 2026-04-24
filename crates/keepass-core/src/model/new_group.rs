@@ -19,6 +19,9 @@ pub struct NewGroup {
     pub(crate) name: String,
     pub(crate) notes: String,
     pub(crate) uuid: Option<Uuid>,
+    pub(crate) icon_id: u32,
+    pub(crate) enable_auto_type: Option<bool>,
+    pub(crate) enable_searching: Option<bool>,
 }
 
 impl NewGroup {
@@ -30,6 +33,9 @@ impl NewGroup {
             name: name.into(),
             notes: String::new(),
             uuid: None,
+            icon_id: 0,
+            enable_auto_type: None,
+            enable_searching: None,
         }
     }
 
@@ -48,6 +54,33 @@ impl NewGroup {
     #[must_use]
     pub fn with_uuid(mut self, uuid: Uuid) -> Self {
         self.uuid = Some(uuid);
+        self
+    }
+
+    /// Set the built-in icon index. Same semantics as
+    /// [`crate::model::GroupEditor::set_icon_id`]; the library does
+    /// not range-check.
+    #[must_use]
+    pub fn icon_id(mut self, id: u32) -> Self {
+        self.icon_id = id;
+        self
+    }
+
+    /// Set the tri-state auto-type override. `Some(false)` is the
+    /// canonical shape for the recycle-bin group, which opts its
+    /// contents out of auto-type; `Some(true)` forces on;
+    /// `None` (the default) means "inherit from parent".
+    #[must_use]
+    pub fn enable_auto_type(mut self, enabled: Option<bool>) -> Self {
+        self.enable_auto_type = enabled;
+        self
+    }
+
+    /// Set the tri-state search-inclusion override. Same semantics
+    /// as [`Self::enable_auto_type`].
+    #[must_use]
+    pub fn enable_searching(mut self, enabled: Option<bool>) -> Self {
+        self.enable_searching = enabled;
         self
     }
 }
