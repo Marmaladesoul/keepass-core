@@ -421,6 +421,7 @@ impl Kdbx<Unlocked> {
                 expires: false,
                 usage_count: 0,
             },
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
 
@@ -693,6 +694,7 @@ impl Kdbx<Unlocked> {
                 expires: false,
                 usage_count: 0,
             },
+            icon_id: 0,
             unknown_xml: Vec::new(),
         };
 

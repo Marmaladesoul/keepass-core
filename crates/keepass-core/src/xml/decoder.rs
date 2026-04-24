@@ -195,6 +195,7 @@ fn read_group<R: std::io::BufRead>(
         previous_parent_group: None,
         last_top_visible_entry: None,
         custom_icon_uuid: None,
+        icon_id: 0,
         times: Timestamps::default(),
         unknown_xml: Vec::new(),
     };
@@ -283,6 +284,17 @@ fn read_group<R: std::io::BufRead>(
                             }
                             continue;
                         }
+                        "IconID" => {
+                            // Missing element → default 0 (the struct
+                            // literal's initial value). Present-but-
+                            // malformed integer → surface as
+                            // `XmlError::InvalidValue` via `parse_int`
+                            // so foreign-writer bugs don't silently
+                            // coerce to the default.
+                            let text = read_text(reader, buf)?;
+                            group.icon_id = parse_int::<u32>(&text, "IconID")?;
+                            continue;
+                        }
                         _ => {
                             // Unknown child of <Group> — capture verbatim
                             // for round-trip. See `capture_unknown_subtree`
@@ -351,6 +363,7 @@ fn read_entry<R: std::io::BufRead>(
         background_color: String::new(),
         override_url: String::new(),
         custom_icon_uuid: None,
+        icon_id: 0,
         custom_data: Vec::new(),
         quality_check: true,
         previous_parent_group: None,
@@ -416,6 +429,12 @@ fn read_entry<R: std::io::BufRead>(
                                     entry.custom_icon_uuid = Some(uuid);
                                 }
                             }
+                            continue;
+                        }
+                        "IconID" => {
+                            // See `read_group`'s matching branch.
+                            let text = read_text(reader, buf)?;
+                            entry.icon_id = parse_int::<u32>(&text, "IconID")?;
                             continue;
                         }
                         "CustomData" => {
