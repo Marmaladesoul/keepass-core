@@ -576,6 +576,44 @@ impl Kdbx<Unlocked> {
         Ok(result)
     }
 
+    /// Stamp `entry.times.last_access_time = clock.now()` on the
+    /// entry identified by `id`, without running any other
+    /// bookkeeping.
+    ///
+    /// Counterpart for read-touch actions on the Keys-app side:
+    /// AutoFill credential fulfilment from the extension, in-app
+    /// password reveal, and anything else
+    /// `DatabaseManager.recordAccess` classifies as significant.
+    /// The library owns the stamp (FFI clock-ownership rule A);
+    /// callers signal the intent, we write the value.
+    ///
+    /// Explicit non-effects (asserted by integration tests):
+    ///
+    /// - No history snapshot. A read-touch is not a content edit.
+    /// - No [`crate::model::Meta::settings_changed`] stamp. A
+    ///   per-entry access is not a settings change.
+    /// - No [`crate::model::Timestamps::last_modification_time`]
+    ///   update. The entry's content hasn't changed.
+    /// - No [`crate::model::Timestamps::location_changed`] update.
+    ///   The entry hasn't moved.
+    /// - No binary-pool GC. Refcounts are unaffected.
+    ///
+    /// To *clear* `last_access_time` (for example the Keys-app
+    /// "clear last-access" button), route through
+    /// [`Self::edit_entry`] +
+    /// [`crate::model::EntryEditor::set_last_access_time`] with `None`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
+    pub fn touch_entry(&mut self, id: EntryId) -> Result<(), ModelError> {
+        let now = self.state.clock.now();
+        let entry =
+            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        entry.times.last_access_time = Some(now);
+        Ok(())
+    }
+
     /// Restore the live entry's content from its own
     /// `history[history_index]`, with the pre-restore state optionally
     /// stamped into history per `policy`.
