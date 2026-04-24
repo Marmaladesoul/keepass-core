@@ -1609,7 +1609,19 @@ fn group_uuid_in_use(group: &Group, candidate: uuid::Uuid) -> bool {
     if group.id.0 == candidate {
         return true;
     }
-    if group.entries.iter().any(|e| e.id.0 == candidate) {
+    // Walk both the live entry ids AND every history snapshot's id.
+    // Tree-wide UUID uniqueness on the wire includes history entries
+    // — KeePass writers assign history snapshots their own `<UUID>`
+    // element, and `import_entry(mint_new_uuid=false)`'s pre-mutation
+    // collision check has to catch incoming UUIDs that collide with
+    // a pre-existing history id (not just a live one). Also fixes a
+    // latent hole on `add_entry`'s caller-supplied-UUID rejection
+    // path, which uses the same helper.
+    if group
+        .entries
+        .iter()
+        .any(|e| e.id.0 == candidate || e.history.iter().any(|s| s.id.0 == candidate))
+    {
         return true;
     }
     group.groups.iter().any(|g| group_uuid_in_use(g, candidate))

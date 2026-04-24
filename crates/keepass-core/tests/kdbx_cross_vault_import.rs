@@ -233,6 +233,82 @@ fn import_duplicate_uuid_fails_cleanly_without_mutation() {
     );
 }
 
+/// Regression guard for the `group_uuid_in_use` history-walk fix
+/// (PR #79 review — reviewer's `#R5` finding).
+///
+/// Before the fix, `group_uuid_in_use` only walked live entry ids;
+/// an incoming UUID colliding with an existing destination **history
+/// snapshot** id slipped past the pre-mutation validation and the
+/// import silently succeeded with a tree-wide UUID collision.
+///
+/// The test constructs exactly that state: destination holds an
+/// entry whose `history[0].id` is a freshly-minted UUID distinct
+/// from the live entry's id (courtesy of `import_entry(mint_new_uuid=
+/// true)`'s own history re-minting). A second import with
+/// `mint_new_uuid=false` carrying that history UUID as its live id
+/// must now fail with `DuplicateUuid`.
+#[test]
+fn import_false_rejects_collision_with_destination_history_uuid() {
+    use keepass_core::model::NewEntry;
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let ((mut src, src_clock), (mut dst, _)) = open_basic_pair(t0, t0);
+
+    // Build src_with_history: an entry carrying one history snapshot.
+    let src_with_hist = src
+        .add_entry(
+            root_group(&src),
+            NewEntry::new("With History").password(SecretString::from("v1")),
+        )
+        .unwrap();
+    src_clock.set(t0 + Duration::minutes(1));
+    src.edit_entry(src_with_hist, HistoryPolicy::Snapshot, |e| {
+        e.set_password(SecretString::from("v2"));
+    })
+    .unwrap();
+
+    // Seed dst by importing with mint_new_uuid=true. The destination
+    // entry's live id and its history[0].id are BOTH fresh UUIDs
+    // distinct from each other under our import implementation —
+    // `fresh_uuid` mints a new UUID per call, so live + history get
+    // different values.
+    let portable = src.export_entry(src_with_hist).unwrap();
+    let dst_live = dst.import_entry(root_group(&dst), portable, true).unwrap();
+    let dst_hist_id = {
+        let dst_entry = find_entry(&dst, dst_live).expect("seeded entry present");
+        assert_eq!(dst_entry.history.len(), 1);
+        dst_entry.history[0].id
+    };
+    assert_ne!(
+        dst_live, dst_hist_id,
+        "history re-mint produced a distinct UUID — test premise intact"
+    );
+
+    // Now build a source entry whose live id deliberately collides
+    // with the destination's history[0].id via `NewEntry::with_uuid`.
+    // Import with mint_new_uuid=false must catch the history-side
+    // collision BEFORE any mutation.
+    let collision = dst_hist_id.0;
+    let src_colliding = src
+        .add_entry(
+            root_group(&src),
+            NewEntry::new("Collider").with_uuid(collision),
+        )
+        .unwrap();
+    assert_eq!(src_colliding.0, collision);
+
+    let portable2 = src.export_entry(src_colliding).unwrap();
+    let dst_entries_before = dst.vault().total_entries();
+    match dst.import_entry(root_group(&dst), portable2, /* mint_new_uuid */ false) {
+        Err(ModelError::DuplicateUuid(uuid)) => assert_eq!(uuid, collision),
+        other => panic!("expected DuplicateUuid for history-id collision, got {other:?}"),
+    }
+    assert_eq!(
+        dst.vault().total_entries(),
+        dst_entries_before,
+        "rejected import must not mutate the destination"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Binary pool remap
 // ---------------------------------------------------------------------
