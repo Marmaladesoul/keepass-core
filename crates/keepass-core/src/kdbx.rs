@@ -1046,6 +1046,201 @@ impl Kdbx<Unlocked> {
         Ok(new_id)
     }
 
+    // -----------------------------------------------------------------
+    // Recycle bin helpers
+    // -----------------------------------------------------------------
+
+    /// Soft-delete an entry by moving it into the vault's recycle
+    /// bin group, creating the bin lazily on first use.
+    ///
+    /// - **Happy path** (bin exists or will be created,
+    ///   `recycle_bin_enabled` is `true`): calls
+    ///   [`Self::move_entry`] under the hood, so the entry gets
+    ///   `times.location_changed = clock.now()` + `previous_parent_group
+    ///   = Some(old_parent)`. No `DeletedObject` is emitted — recycling
+    ///   is a move, not a delete.
+    /// - **Bin disabled and no bin group exists**
+    ///   (`meta.recycle_bin_enabled = false` **and**
+    ///   `meta.recycle_bin_uuid` is `None`): falls back to
+    ///   [`Self::delete_entry`] (hard delete + `DeletedObject`
+    ///   tombstone). A bin that exists with `enabled = false` is
+    ///   still used for soft-delete — the flag gates bin
+    ///   **creation**, not bin **use**.
+    /// - **Already inside the bin**: short-circuits; no mutation.
+    ///
+    /// Returns `Ok(Some(bin_id))` on a real move, or `Ok(None)` on
+    /// any of three distinct non-move outcomes:
+    /// 1. The entry was already inside the bin.
+    /// 2. `recycle_bin_enabled = false` and the fallback hard-delete
+    ///    ran.
+    /// 3. _(Reserved — no other case produces `None` today.)_
+    ///
+    /// Callers can disambiguate by inspecting
+    /// `meta.recycle_bin_enabled` + whether the entry still exists
+    /// after the call.
+    ///
+    /// # Lazy bin creation
+    ///
+    /// If `meta.recycle_bin_uuid` is `None` — or points at a group
+    /// that no longer exists (dangling) — a fresh group is created
+    /// under the root with `name = "Recycle Bin"`, `icon_id = 43`
+    /// (KeePass's built-in "Recycle Bin" icon),
+    /// `enable_auto_type = Some(false)`, `enable_searching = Some(false)`.
+    /// Meta bookkeeping: `recycle_bin_enabled = true`,
+    /// `recycle_bin_uuid = Some(new_id)`,
+    /// `recycle_bin_changed = clock.now()`, plus a
+    /// `meta.settings_changed` stamp.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if `id` is absent.
+    pub fn recycle_entry(&mut self, id: EntryId) -> Result<Option<GroupId>, ModelError> {
+        // Validate existence + get the entry's current parent group.
+        let parent =
+            entry_parent_group(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+
+        // `recycle_bin_enabled = false` → hard delete, no bin.
+        if !self.state.vault.meta.recycle_bin_enabled
+            && self.state.vault.meta.recycle_bin_uuid.is_none()
+        {
+            // Only fall through to hard-delete when BOTH enabled is
+            // false AND no bin exists. If a bin exists (even with
+            // enabled=false), respect it — matches KeePassXC's
+            // "bin exists, you can still use it" flexibility.
+            self.delete_entry(id)?;
+            return Ok(None);
+        }
+
+        // Already inside the bin? Walk ancestors from the parent
+        // group up to root; any ancestor == bin → no-op.
+        if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
+            if find_group(&self.state.vault.root, bin_id).is_some()
+                && group_is_descendant_of(&self.state.vault.root, parent, bin_id)
+            {
+                return Ok(None);
+            }
+        }
+
+        let bin_id = self.find_or_create_recycle_bin()?;
+        self.move_entry(id, bin_id)?;
+        Ok(Some(bin_id))
+    }
+
+    /// Soft-delete a group (and its subtree) into the recycle bin.
+    /// Same shape as [`Self::recycle_entry`] but for groups.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::GroupNotFound`] if `id` is absent.
+    /// - [`ModelError::CannotDeleteRoot`] if `id` is the root.
+    /// - [`ModelError::CircularMove`] if `id` is the recycle bin
+    ///   itself — "group can't be its own ancestor" is the wire
+    ///   invariant, and recycling the bin into itself trips it.
+    pub fn recycle_group(&mut self, id: GroupId) -> Result<Option<GroupId>, ModelError> {
+        if find_group(&self.state.vault.root, id).is_none() {
+            return Err(ModelError::GroupNotFound(id));
+        }
+        if id == self.state.vault.root.id {
+            return Err(ModelError::CannotDeleteRoot);
+        }
+
+        // Same fallback logic as `recycle_entry`.
+        if !self.state.vault.meta.recycle_bin_enabled
+            && self.state.vault.meta.recycle_bin_uuid.is_none()
+        {
+            self.delete_group(id)?;
+            return Ok(None);
+        }
+
+        // Is `id` the bin itself? → CircularMove.
+        if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
+            if bin_id == id && find_group(&self.state.vault.root, bin_id).is_some() {
+                return Err(ModelError::CircularMove {
+                    moving: id,
+                    new_parent: bin_id,
+                });
+            }
+            // Already inside the bin?
+            if find_group(&self.state.vault.root, bin_id).is_some()
+                && group_is_descendant_of(&self.state.vault.root, id, bin_id)
+            {
+                return Ok(None);
+            }
+        }
+
+        let bin_id = self.find_or_create_recycle_bin()?;
+        self.move_group(id, bin_id)?;
+        Ok(Some(bin_id))
+    }
+
+    /// Permanently delete every direct child of the recycle bin.
+    /// Each removed entry and subgroup lands as a `DeletedObject`
+    /// tombstone in `vault.deleted_objects`; the bin group itself
+    /// survives (empty).
+    ///
+    /// Returns the count of **direct** children removed from the
+    /// bin. The recursive tombstone cascade — one `DeletedObject`
+    /// per nested entry and subgroup, emitted by
+    /// [`Self::delete_entry`] / [`Self::delete_group`] — is
+    /// observable via `vault.deleted_objects.len()` delta, not via
+    /// this return value.
+    ///
+    /// `Ok(0)` if no recycle bin exists (either
+    /// `meta.recycle_bin_uuid` is `None` or it points at a group
+    /// that no longer resolves). No error, just a no-op.
+    pub fn empty_recycle_bin(&mut self) -> Result<usize, ModelError> {
+        let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid else {
+            return Ok(0);
+        };
+        // Snapshot direct-child ids BEFORE mutating — can't iterate
+        // `&mut Vec` while calling `&mut self` delete methods. A
+        // dangling `recycle_bin_uuid` resolves to `None` here and
+        // we early-return 0.
+        let Some(bin) = find_group(&self.state.vault.root, bin_id) else {
+            return Ok(0);
+        };
+        let entry_ids: Vec<EntryId> = bin.entries.iter().map(|e| e.id).collect();
+        let group_ids: Vec<GroupId> = bin.groups.iter().map(|g| g.id).collect();
+        let count = entry_ids.len() + group_ids.len();
+
+        for eid in entry_ids {
+            self.delete_entry(eid)?;
+        }
+        for gid in group_ids {
+            self.delete_group(gid)?;
+        }
+        Ok(count)
+    }
+
+    /// Resolve the existing recycle bin group id, or create one
+    /// lazily under the root if none exists (or if the current
+    /// `recycle_bin_uuid` dangles). See [`Self::recycle_entry`] for
+    /// the lazy-creation invariants.
+    fn find_or_create_recycle_bin(&mut self) -> Result<GroupId, ModelError> {
+        if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
+            if find_group(&self.state.vault.root, bin_id).is_some() {
+                return Ok(bin_id);
+            }
+            // Dangling — fall through and mint a fresh bin. The
+            // stale `recycle_bin_uuid` is about to be overwritten
+            // below.
+        }
+        let root = self.state.vault.root.id;
+        let bin_id = self.add_group(
+            root,
+            NewGroup::new("Recycle Bin")
+                .icon_id(43)
+                .enable_auto_type(Some(false))
+                .enable_searching(Some(false)),
+        )?;
+        let now = self.state.clock.now();
+        self.state.vault.meta.recycle_bin_enabled = true;
+        self.state.vault.meta.recycle_bin_uuid = Some(bin_id);
+        self.state.vault.meta.recycle_bin_changed = Some(now);
+        self.stamp_settings_changed();
+        Ok(bin_id)
+    }
+
     /// Serialise this unlocked database back to a KDBX byte stream —
     /// the byte-level inverse of [`Kdbx::<HeaderRead>::unlock`].
     ///
@@ -1136,8 +1331,8 @@ impl Kdbx<Unlocked> {
             entries: Vec::new(),
             is_expanded: true,
             default_auto_type_sequence: String::new(),
-            enable_auto_type: None,
-            enable_searching: None,
+            enable_auto_type: template.enable_auto_type,
+            enable_searching: template.enable_searching,
             custom_data: Vec::new(),
             previous_parent_group: None,
             last_top_visible_entry: None,
@@ -1151,7 +1346,7 @@ impl Kdbx<Unlocked> {
                 expires: false,
                 usage_count: 0,
             },
-            icon_id: 0,
+            icon_id: template.icon_id,
             unknown_xml: Vec::new(),
         };
 
@@ -1904,6 +2099,46 @@ fn renumber_attachments(group: &mut Group, remap: &[Option<u32>]) {
     for child in &mut group.groups {
         renumber_attachments(child, remap);
     }
+}
+
+/// Return the [`GroupId`] of the group that directly contains the
+/// entry identified by `id`, or `None` if the entry isn't in the
+/// tree. Used by the recycle-bin helpers to detect "already inside
+/// the bin" via an ancestor walk.
+fn entry_parent_group(root: &Group, id: EntryId) -> Option<GroupId> {
+    if root.entries.iter().any(|e| e.id == id) {
+        return Some(root.id);
+    }
+    for child in &root.groups {
+        if let Some(p) = entry_parent_group(child, id) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// `true` if the group identified by `candidate` is `ancestor`
+/// itself OR lives anywhere beneath `ancestor` in the tree rooted
+/// at `root`. Used by [`Kdbx::recycle_entry`] /
+/// [`Kdbx::recycle_group`] to short-circuit when the target is
+/// already inside the recycle bin.
+fn group_is_descendant_of(root: &Group, candidate: GroupId, ancestor: GroupId) -> bool {
+    if let Some(a) = find_group(root, ancestor) {
+        if a.id == candidate {
+            return true;
+        }
+        return group_contains(a, candidate);
+    }
+    false
+}
+
+/// `true` if `group` (or any of its nested subgroups) has id
+/// `candidate`.
+fn group_contains(group: &Group, candidate: GroupId) -> bool {
+    if group.id == candidate {
+        return true;
+    }
+    group.groups.iter().any(|g| group_contains(g, candidate))
 }
 
 /// Read-only counterpart to [`find_entry_mut`]. Used by
