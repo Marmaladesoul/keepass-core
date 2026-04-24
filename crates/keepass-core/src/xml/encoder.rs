@@ -45,7 +45,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
-use crate::model::{AutoType, Entry, Group, Meta, Vault};
+use crate::model::{AutoType, Entry, Group, Meta, UnknownElement, Vault};
 
 /// Encode a [`Vault`] into a byte-for-byte legal KeePass inner XML
 /// document, **without** applying an inner-stream cipher.
@@ -162,6 +162,7 @@ fn write_meta<W: std::io::Write>(w: &mut Writer<W>, meta: &Meta) -> Result<(), X
     )?;
     write_text_element(w, "HistoryMaxItems", &meta.history_max_items.to_string())?;
     write_text_element(w, "HistoryMaxSize", &meta.history_max_size.to_string())?;
+    write_unknown_xml(w, &meta.unknown_xml)?;
     close(w, "Meta")
 }
 
@@ -210,6 +211,7 @@ fn write_group<W: std::io::Write>(
     for child in &group.groups {
         write_group(w, child, cipher)?;
     }
+    write_unknown_xml(w, &group.unknown_xml)?;
     close(w, "Group")
 }
 
@@ -296,6 +298,7 @@ fn write_entry<W: std::io::Write>(
         }
         close(w, "History")?;
     }
+    write_unknown_xml(w, &entry.unknown_xml)?;
     close(w, "Entry")
 }
 
@@ -483,6 +486,26 @@ fn write_optional_timestamp<W: std::io::Write>(
     Ok(())
 }
 
+/// Re-emit every captured [`UnknownElement`] as raw XML bytes into the
+/// writer's underlying sink, at the current cursor position.
+///
+/// Called at the end of each container handler (`write_meta`,
+/// `write_entry`, `write_group`), just before the closing tag — so
+/// unknown elements always appear after the canonical children. Exact
+/// source position is not preserved; that's a documented trade-off
+/// of the capture model.
+fn write_unknown_xml<W: std::io::Write>(
+    w: &mut Writer<W>,
+    unknowns: &[UnknownElement],
+) -> Result<(), XmlError> {
+    for u in unknowns {
+        w.get_mut()
+            .write_all(&u.raw_xml)
+            .map_err(|e| XmlError::Malformed(e.to_string()))?;
+    }
+    Ok(())
+}
+
 fn uuid_to_base64(uuid: uuid::Uuid) -> String {
     BASE64.encode(uuid.as_bytes())
 }
@@ -528,6 +551,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let vault = Vault {
             root,
@@ -569,6 +593,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let child = Group {
             id: GroupId(uuid::Uuid::from_u128(0xAAAA_1111)),
@@ -585,6 +610,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let root = Group {
             id: GroupId(uuid::Uuid::nil()),
@@ -601,6 +627,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let vault = Vault {
             root,
@@ -665,6 +692,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let root = Group {
             id: GroupId(uuid::Uuid::nil()),
@@ -681,6 +709,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let vault = Vault {
             root,
@@ -723,6 +752,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let root = Group {
             id: GroupId(uuid::Uuid::nil()),
@@ -739,6 +769,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let vault = Vault {
             root,
@@ -771,6 +802,7 @@ mod tests {
                 last_top_visible_entry: None,
                 custom_icon_uuid: None,
                 times: Timestamps::default(),
+                unknown_xml: Vec::new(),
             },
             meta: Meta::default(),
             binaries: Vec::new(),
@@ -823,6 +855,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let e2 = Entry {
             id: EntryId(uuid::Uuid::from_u128(2)),
@@ -844,6 +877,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: crate::model::AutoType::default(),
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         let root = Group {
             id: GroupId(uuid::Uuid::nil()),
@@ -860,6 +894,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         };
         Vault {
             root,

@@ -94,6 +94,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         }
     }
 

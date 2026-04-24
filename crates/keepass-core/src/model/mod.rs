@@ -253,6 +253,12 @@ pub struct Entry {
     /// `<Times>` block — creation, modification, expiry, etc. Absent
     /// blocks deserialise to [`Timestamps::default`].
     pub times: Timestamps,
+    /// Unknown XML children captured verbatim so a foreign writer's
+    /// additions (future KeePass fields, vendor extensions) survive a
+    /// read → edit → save cycle. Each element is re-emitted at the end
+    /// of `<Entry>`, after all canonical children; exact source
+    /// position is not preserved. See [`UnknownElement`].
+    pub unknown_xml: Vec<UnknownElement>,
 }
 
 /// Auto-type configuration on an [`Entry`] — the macro framework
@@ -414,6 +420,11 @@ pub struct Group {
     pub custom_icon_uuid: Option<Uuid>,
     /// `<Times>` block for the group itself.
     pub times: Timestamps,
+    /// Unknown XML children on `<Group>` preserved verbatim for
+    /// round-trip — see [`Entry::unknown_xml`] for the full semantics.
+    /// Child `<Entry>` / `<Group>` elements are never captured here;
+    /// the decoder always descends into them.
+    pub unknown_xml: Vec<UnknownElement>,
 }
 
 impl Group {
@@ -596,6 +607,9 @@ pub struct Meta {
     /// base64-encoded string for lossless round-trip — we don't
     /// re-verify it here.
     pub header_hash: String,
+    /// Unknown XML children on `<Meta>` preserved verbatim for
+    /// round-trip — see [`Entry::unknown_xml`] for the full semantics.
+    pub unknown_xml: Vec<UnknownElement>,
 }
 
 /// One icon in the vault's [`Meta::custom_icons`] pool.
@@ -646,8 +660,40 @@ impl Default for Meta {
             custom_icons: Vec::new(),
             color: String::new(),
             header_hash: String::new(),
+            unknown_xml: Vec::new(),
         }
     }
+}
+
+/// An XML subtree the decoder didn't recognise, preserved verbatim so
+/// writers from the future (new KeePass fields, vendor extensions)
+/// don't have their additions silently stripped on read → save.
+///
+/// The payload is a pre-serialised XML fragment starting with the
+/// element's opening tag and ending with its matching close — ready to
+/// splice into the output stream. Byte-exact preservation is **not**
+/// promised: the fragment was re-emitted by `quick-xml` on parse, so
+/// attribute ordering, insignificant whitespace, and empty-element
+/// shorthand (`<Foo/>` vs `<Foo></Foo>`) may differ from the source.
+/// Structural (parse-back) equality is what round-trips.
+///
+/// The encoder emits captured elements at the end of the parent
+/// container's canonical children — in particular, for `<Group>` this
+/// is *after* the container's child `<Entry>` and nested `<Group>`
+/// siblings, not interleaved among them. Original source position
+/// relative to both canonical fields and structural children is not
+/// preserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UnknownElement {
+    /// The element's local name, extracted from the captured opening
+    /// tag. Diagnostic only — the encoder does not re-derive the tag
+    /// from this, it re-emits [`Self::raw_xml`] verbatim.
+    pub tag: String,
+    /// The element and all of its descendants, serialised as XML bytes.
+    /// Self-contained: a fragment can be written to any XML sink that
+    /// accepts raw bytes.
+    pub raw_xml: Vec<u8>,
 }
 
 /// One item in a `<CustomData>` collection.
@@ -755,6 +801,7 @@ mod tests {
             previous_parent_group: None,
             auto_type: AutoType::default(),
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         }
     }
 
@@ -774,6 +821,7 @@ mod tests {
             last_top_visible_entry: None,
             custom_icon_uuid: None,
             times: Timestamps::default(),
+            unknown_xml: Vec::new(),
         }
     }
 
