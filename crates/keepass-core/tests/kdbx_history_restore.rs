@@ -22,8 +22,12 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Duration, Utc};
 use keepass_core::CompositeKey;
 use keepass_core::kdbx::{Kdbx, Sealed, Unlocked};
-use keepass_core::model::{Clock, EntryId, HistoryPolicy, ModelError, NewEntry};
+use keepass_core::model::{
+    AutoType, AutoTypeAssociation, Clock, CustomFieldValue, EntryId, HistoryPolicy, ModelError,
+    NewEntry,
+};
 use secrecy::SecretString;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------
 // Fixture helpers
@@ -257,6 +261,130 @@ fn restore_with_snapshot_policy_pushes_pre_restore_and_restores_content() {
     assert_eq!(e.times.last_modification_time, Some(t_restore));
 }
 
+/// Exhaustive assertion that every restore-eligible content field
+/// travels from the snapshot back onto the live entry. The
+/// `restore_with_snapshot_policy_pushes_pre_restore_and_restores_content`
+/// test above covers the *structure* of the restore (history
+/// bookkeeping + one content proxy); this test covers the *content
+/// surface* — 17 fields that a regression could silently drop from
+/// the per-field copy block without any of the other tests catching
+/// it.
+///
+/// Shape: seed live with a known "v1" value on every restored field,
+/// snapshot it, scramble live to distinct "v2" values, restore from
+/// history[0], assert every field back to v1.
+#[test]
+fn restore_copies_every_content_field_from_snapshot() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let root = kdbx.vault().root.id;
+    let id = kdbx.add_entry(root, NewEntry::new("placeholder")).unwrap();
+
+    // Distinguishable UUIDs for the two custom-icon references; the
+    // pool doesn't have to hold them for round-trip-in-memory, they
+    // just need to differ from each other and from default.
+    let icon_v1 = Uuid::from_u128(0x1111_1111_1111_1111_1111_1111_1111_1111);
+    let icon_v2 = Uuid::from_u128(0x2222_2222_2222_2222_2222_2222_2222_2222);
+    let expiry_v1: DateTime<Utc> = "2030-01-02T03:04:05Z".parse().unwrap();
+    let expiry_v2: DateTime<Utc> = "2031-07-08T09:10:11Z".parse().unwrap();
+
+    // --- v1: populate every restore-eligible field --------------
+    clock.set(t0 + Duration::minutes(1));
+    kdbx.edit_entry(id, HistoryPolicy::NoSnapshot, |e| {
+        e.set_title("v1-title");
+        e.set_username("v1-user");
+        e.set_password(SecretString::from("v1-pass"));
+        e.set_url("https://v1.example");
+        e.set_notes("v1-notes");
+        e.set_tags(vec!["v1-a".into(), "v1-b".into()]);
+        e.set_custom_field("cf-key", CustomFieldValue::Plain("v1-cf".into()));
+        e.attach("v1-file.txt", b"v1-bytes".to_vec(), false);
+        e.set_foreground_color("#010203");
+        e.set_background_color("#0a0b0c");
+        e.set_override_url("cmd://v1 %1");
+        e.set_custom_icon(Some(icon_v1));
+        e.set_icon_id(11);
+        e.set_quality_check(false);
+        let mut at = AutoType::new();
+        at.enabled = false;
+        at.data_transfer_obfuscation = 1;
+        at.default_sequence = "v1-seq".into();
+        at.associations = vec![AutoTypeAssociation::new("v1-win", "v1-ks")];
+        e.set_auto_type(at);
+        e.set_expiry(Some(expiry_v1));
+    })
+    .unwrap();
+
+    // --- Snapshot the v1 state into history[0] via an edit that
+    //     scrambles every field to v2 ----------------------------------
+    clock.set(t0 + Duration::minutes(2));
+    kdbx.edit_entry(id, HistoryPolicy::Snapshot, |e| {
+        e.set_title("v2-title");
+        e.set_username("v2-user");
+        e.set_password(SecretString::from("v2-pass"));
+        e.set_url("https://v2.example");
+        e.set_notes("v2-notes");
+        e.set_tags(vec!["v2-only".into()]);
+        // Overwrite the existing custom field AND add a second one
+        // under a different key — both must disappear on restore.
+        e.set_custom_field("cf-key", CustomFieldValue::Plain("v2-cf".into()));
+        e.set_custom_field("cf-extra", CustomFieldValue::Plain("v2-extra".into()));
+        // Detach v1's attachment, attach v2's — after restore the
+        // live entry should carry v1-file.txt again and NOT v2-file.txt.
+        e.detach("v1-file.txt");
+        e.attach("v2-file.txt", b"v2-bytes".to_vec(), false);
+        e.set_foreground_color("#999999");
+        e.set_background_color("#aaaaaa");
+        e.set_override_url("cmd://v2");
+        e.set_custom_icon(Some(icon_v2));
+        e.set_icon_id(22);
+        e.set_quality_check(true);
+        let mut at = AutoType::new();
+        at.enabled = true;
+        at.data_transfer_obfuscation = 2;
+        at.default_sequence = "v2-seq".into();
+        at.associations = vec![AutoTypeAssociation::new("v2-win", "v2-ks")];
+        e.set_auto_type(at);
+        e.set_expiry(Some(expiry_v2));
+    })
+    .unwrap();
+
+    // --- Restore from the v1 snapshot -------------------------------
+    clock.set(t0 + Duration::minutes(3));
+    kdbx.restore_entry_from_history(id, 0, HistoryPolicy::NoSnapshot)
+        .unwrap();
+
+    // --- One assertion per restored field ---------------------------
+    let e = find_entry(&kdbx, id);
+    assert_eq!(e.title, "v1-title");
+    assert_eq!(e.username, "v1-user");
+    assert_eq!(e.password, "v1-pass");
+    assert_eq!(e.url, "https://v1.example");
+    assert_eq!(e.notes, "v1-notes");
+    assert_eq!(e.tags, vec!["v1-a".to_owned(), "v1-b".to_owned()]);
+    assert_eq!(e.custom_fields.len(), 1, "v2-extra must be dropped");
+    assert_eq!(e.custom_fields[0].key, "cf-key");
+    assert_eq!(e.custom_fields[0].value, "v1-cf");
+    assert_eq!(e.attachments.len(), 1, "v2-file must be dropped");
+    assert_eq!(e.attachments[0].name, "v1-file.txt");
+    assert_eq!(e.foreground_color, "#010203");
+    assert_eq!(e.background_color, "#0a0b0c");
+    assert_eq!(e.override_url, "cmd://v1 %1");
+    assert_eq!(e.custom_icon_uuid, Some(icon_v1));
+    assert_eq!(e.icon_id, 11);
+    assert!(!e.quality_check);
+    // AutoType: whole-struct equality.
+    let mut expected_at = AutoType::new();
+    expected_at.enabled = false;
+    expected_at.data_transfer_obfuscation = 1;
+    expected_at.default_sequence = "v1-seq".into();
+    expected_at.associations = vec![AutoTypeAssociation::new("v1-win", "v1-ks")];
+    assert_eq!(e.auto_type, expected_at);
+    // Expiry pair — treated atomically by the restore.
+    assert!(e.times.expires);
+    assert_eq!(e.times.expiry_time, Some(expiry_v1));
+}
+
 #[test]
 fn restore_with_no_snapshot_policy_leaves_history_length_unchanged() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
@@ -331,7 +459,12 @@ fn restore_keeps_live_unknown_xml_and_does_not_roll_back_to_snapshot_unknown_xml
         assert_eq!(snap_tags, vec!["FutureSnap"]);
     }
 
-    kdbx.restore_entry_from_history(id, 0, HistoryPolicy::NoSnapshot)
+    // Use `Snapshot` here so the restore pushes a pre-restore snapshot
+    // of the live entry into `history`. That pushed snapshot MUST
+    // carry a copy of live's `unknown_xml` — a Clone refactor that
+    // accidentally stripped the field would still satisfy the
+    // keep-live assertion below, so we need a separate check.
+    kdbx.restore_entry_from_history(id, 0, HistoryPolicy::Snapshot)
         .unwrap();
 
     let e = find_entry(&kdbx, id);
@@ -349,6 +482,22 @@ fn restore_keeps_live_unknown_xml_and_does_not_roll_back_to_snapshot_unknown_xml
         !e.unknown_xml.iter().any(|u| u.tag == "FutureSnap"),
         "restore must not import snapshot-only unknown_xml"
     );
+
+    // Pre-restore snapshot pushed by the `Snapshot` policy must carry
+    // the live entry's `unknown_xml` at snapshot time. If a future
+    // refactor of the Clone path drops the field, this catches it.
+    assert_eq!(e.history.len(), 2, "snapshot policy pushed one entry");
+    let pushed = e.history.last().expect("snapshot just pushed");
+    let pushed_tags: Vec<_> = pushed.unknown_xml.iter().map(|u| &u.tag).collect();
+    assert_eq!(
+        pushed_tags,
+        vec!["FutureLive"],
+        "pre-restore snapshot must carry the live entry's unknown_xml"
+    );
+    // Sanity: the ORIGINAL snapshot at index 0 is untouched — still
+    // carries its own `FutureSnap` marker.
+    let original_tags: Vec<_> = e.history[0].unknown_xml.iter().map(|u| &u.tag).collect();
+    assert_eq!(original_tags, vec!["FutureSnap"]);
 }
 
 #[test]
