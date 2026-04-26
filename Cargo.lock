@@ -384,6 +384,7 @@ name = "keepass-merge"
 version = "0.0.0"
 dependencies = [
  "keepass-core",
+ "thiserror",
 ]
 
 [[package]]
