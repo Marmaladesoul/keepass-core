@@ -18,16 +18,17 @@ pub mod conflict;
 pub mod error;
 pub mod outcome;
 
+pub mod resolution;
+
+mod apply;
 mod entry_merge;
 mod hash;
-// Slice 4 introduces this private helper ahead of slice 5's apply step
-// (the only non-test consumer of `merge_histories`). The `dead_code`
-// allow comes off when slice 5 wires the call.
-#[allow(dead_code)]
 mod history_merge;
 mod merge;
 
+pub use crate::apply::{apply_merge, reconcile_timestamps};
 pub use crate::conflict::{EntryConflict, FieldDelta, FieldDeltaKind, GroupConflict};
 pub use crate::error::MergeError;
 pub use crate::merge::merge;
 pub use crate::outcome::MergeOutcome;
+pub use crate::resolution::{ConflictSide, DeleteEditChoice, Resolution};
