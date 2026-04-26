@@ -287,6 +287,46 @@ pub struct Entry {
     pub unknown_xml: Vec<UnknownElement>,
 }
 
+impl Entry {
+    /// Construct a minimal [`Entry`] with the given id and default
+    /// everything else.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates). Newly-added
+    /// fields default to whatever [`Default`] would produce; this
+    /// constructor's behaviour is therefore stable across additions —
+    /// the natural companion to the type's `#[non_exhaustive]` marker.
+    ///
+    /// `quality_check` defaults to `true`, matching KeePass's default
+    /// for fresh entries.
+    #[must_use]
+    pub fn empty(id: EntryId) -> Self {
+        Self {
+            id,
+            title: String::new(),
+            username: String::new(),
+            password: String::new(),
+            url: String::new(),
+            notes: String::new(),
+            custom_fields: Vec::new(),
+            tags: Vec::new(),
+            history: Vec::new(),
+            attachments: Vec::new(),
+            foreground_color: String::new(),
+            background_color: String::new(),
+            override_url: String::new(),
+            custom_icon_uuid: None,
+            icon_id: 0,
+            custom_data: Vec::new(),
+            quality_check: true,
+            previous_parent_group: None,
+            auto_type: AutoType::default(),
+            times: Timestamps::default(),
+            unknown_xml: Vec::new(),
+        }
+    }
+}
+
 /// Auto-type configuration on an [`Entry`] — the macro framework
 /// KeePass uses to type credentials into a target window.
 ///
@@ -392,6 +432,24 @@ pub struct CustomField {
     pub protected: bool,
 }
 
+impl CustomField {
+    /// Construct a [`CustomField`] from its three required components.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates). Newly-added
+    /// fields default to whatever [`Default`] would produce; this
+    /// constructor's behaviour is therefore stable across additions —
+    /// the natural companion to the type's `#[non_exhaustive]` marker.
+    #[must_use]
+    pub fn new(key: impl Into<String>, value: impl Into<String>, protected: bool) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+            protected,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Group
 // ---------------------------------------------------------------------------
@@ -485,6 +543,39 @@ impl Group {
                 .iter()
                 .chain(self.groups.iter().flat_map(Group::iter_entries)),
         )
+    }
+
+    /// Construct a minimal [`Group`] with the given id and default
+    /// everything else.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates). Newly-added
+    /// fields default to whatever [`Default`] would produce; this
+    /// constructor's behaviour is therefore stable across additions —
+    /// the natural companion to the type's `#[non_exhaustive]` marker.
+    ///
+    /// `is_expanded` defaults to `true`, matching the KeePass 2.x
+    /// convention for groups missing the `<IsExpanded>` element.
+    #[must_use]
+    pub fn empty(id: GroupId) -> Self {
+        Self {
+            id,
+            name: String::new(),
+            notes: String::new(),
+            groups: Vec::new(),
+            entries: Vec::new(),
+            is_expanded: true,
+            default_auto_type_sequence: String::new(),
+            enable_auto_type: None,
+            enable_searching: None,
+            custom_data: Vec::new(),
+            previous_parent_group: None,
+            last_top_visible_entry: None,
+            custom_icon_uuid: None,
+            icon_id: 0,
+            times: Timestamps::default(),
+            unknown_xml: Vec::new(),
+        }
     }
 }
 
@@ -800,6 +891,25 @@ impl Vault {
     pub fn iter_entries(&self) -> Box<dyn Iterator<Item = &Entry> + '_> {
         self.root.iter_entries()
     }
+
+    /// Construct a minimal [`Vault`] with the given root-group id, an
+    /// empty root group, default [`Meta`], and no binaries or
+    /// tombstones.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates). Newly-added
+    /// fields default to whatever [`Default`] would produce; this
+    /// constructor's behaviour is therefore stable across additions —
+    /// the natural companion to the type's `#[non_exhaustive]` marker.
+    #[must_use]
+    pub fn empty(root_id: GroupId) -> Self {
+        Self {
+            root: Group::empty(root_id),
+            meta: Meta::default(),
+            binaries: Vec::new(),
+            deleted_objects: Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -894,5 +1004,76 @@ mod tests {
         assert_eq!(g.total_entries(), 0);
         assert_eq!(g.total_subgroups(), 0);
         assert_eq!(g.iter_entries().count(), 0);
+    }
+
+    #[test]
+    fn entry_empty_has_supplied_id_and_default_else() {
+        let id = EntryId(Uuid::from_u128(0x42));
+        let e = Entry::empty(id);
+        assert_eq!(e.id, id);
+        assert!(e.title.is_empty());
+        assert!(e.username.is_empty());
+        assert!(e.password.is_empty());
+        assert!(e.url.is_empty());
+        assert!(e.notes.is_empty());
+        assert!(e.custom_fields.is_empty());
+        assert!(e.tags.is_empty());
+        assert!(e.history.is_empty());
+        assert!(e.attachments.is_empty());
+        assert!(e.custom_data.is_empty());
+        assert!(e.unknown_xml.is_empty());
+        assert!(e.custom_icon_uuid.is_none());
+        assert!(e.previous_parent_group.is_none());
+        assert_eq!(e.icon_id, 0);
+        assert!(
+            e.quality_check,
+            "quality_check defaults to KeePass's default of true"
+        );
+        assert_eq!(e.times, Timestamps::default());
+        assert_eq!(e.auto_type, AutoType::default());
+    }
+
+    #[test]
+    fn group_empty_has_supplied_id_and_default_else() {
+        let id = GroupId(Uuid::from_u128(0x99));
+        let g = Group::empty(id);
+        assert_eq!(g.id, id);
+        assert!(g.name.is_empty());
+        assert!(g.notes.is_empty());
+        assert!(g.groups.is_empty());
+        assert!(g.entries.is_empty());
+        assert!(
+            g.is_expanded,
+            "is_expanded defaults to KeePass 2.x's default of true"
+        );
+        assert!(g.default_auto_type_sequence.is_empty());
+        assert!(g.enable_auto_type.is_none());
+        assert!(g.enable_searching.is_none());
+        assert!(g.custom_data.is_empty());
+        assert!(g.previous_parent_group.is_none());
+        assert!(g.last_top_visible_entry.is_none());
+        assert!(g.custom_icon_uuid.is_none());
+        assert_eq!(g.icon_id, 0);
+        assert_eq!(g.times, Timestamps::default());
+        assert!(g.unknown_xml.is_empty());
+    }
+
+    #[test]
+    fn vault_empty_has_supplied_root_id_and_defaults() {
+        let root_id = GroupId(Uuid::from_u128(0xa));
+        let v = Vault::empty(root_id);
+        assert_eq!(v.root.id, root_id);
+        assert_eq!(v.meta, Meta::default());
+        assert!(v.binaries.is_empty());
+        assert!(v.deleted_objects.is_empty());
+        assert_eq!(v.total_entries(), 0);
+    }
+
+    #[test]
+    fn custom_field_new_carries_all_three_components() {
+        let f = CustomField::new("OTPSecret", "JBSWY3DPEHPK3PXP", true);
+        assert_eq!(f.key, "OTPSecret");
+        assert_eq!(f.value, "JBSWY3DPEHPK3PXP");
+        assert!(f.protected);
     }
 }
