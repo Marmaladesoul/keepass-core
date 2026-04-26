@@ -21,7 +21,5 @@ keepass-core = { path = "../keepass-core", version = "0.0.0" }
 sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
-
-[dev-dependencies]
 uuid = "1"
 

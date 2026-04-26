@@ -18,15 +18,11 @@ pub mod conflict;
 pub mod error;
 pub mod outcome;
 
-// Slice 2 introduces these private modules ahead of slice 3's vault
-// walker (the only non-test consumer of `merge_entry`). The
-// `dead_code` allow comes off once slice 3 wires the merge entry
-// point into the public surface.
-#[allow(dead_code)]
 mod entry_merge;
-#[allow(dead_code)]
 mod hash;
+mod merge;
 
 pub use crate::conflict::{EntryConflict, FieldDelta, FieldDeltaKind, GroupConflict};
 pub use crate::error::MergeError;
+pub use crate::merge::merge;
 pub use crate::outcome::MergeOutcome;

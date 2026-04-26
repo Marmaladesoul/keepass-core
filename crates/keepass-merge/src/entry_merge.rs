@@ -66,6 +66,13 @@ pub(crate) struct EntryMergeOutput {
     /// `true` iff [`find_common_ancestor`] produced a hit. `false` means
     /// every conflicting field was classified conservatively (no
     /// auto-resolution attempted).
+    ///
+    /// Slice 3's vault walker doesn't read this directly — the
+    /// per-field auto-resolution profile carries enough information
+    /// for routing. Kept as a `pub(crate)` signal so a future slice
+    /// can emit a `debug!` ("no LCA found, conservative fallback")
+    /// if the FFI layer grows a tracing subscriber.
+    #[allow(dead_code)]
     pub had_ancestor: bool,
 }
 
@@ -137,6 +144,27 @@ pub(crate) fn merge_entry(local: &Entry, remote: &Entry) -> EntryMergeOutput {
     }
 
     out
+}
+
+/// Detect whether a local entry appears to have been edited after a
+/// remote tombstone was recorded. Used by the vault-level walker to
+/// classify the delete-vs-edit case.
+///
+/// When either timestamp is `None` we have no information; the
+/// function returns `true` (conservative: surface as a conflict
+/// rather than silently delete a possibly-edited entry). KDBX writers
+/// fill these timestamps in practice, so the fallback fires rarely
+/// — and false-positive conflict ("user clicks 'keep mine' once") is
+/// strictly less harmful than false-negative silent delete ("user
+/// loses an edit they never saw conflict on").
+pub(crate) fn local_edited_after(
+    entry: &Entry,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    match (entry.times.last_modification_time, cutoff) {
+        (Some(local_mtime), Some(deleted_at)) => local_mtime > deleted_at,
+        _ => true,
+    }
 }
 
 /// Find the most-recent entry-history record present on both sides.
