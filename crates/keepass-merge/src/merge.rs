@@ -103,6 +103,14 @@ fn route_both_present(id: EntryId, local: &Entry, remote: &Entry, outcome: &mut 
         return;
     }
 
+    // Identical on both sides — `merge_entry` produced no conflicts
+    // and no auto-resolutions. Omit from every bucket per spec; a
+    // caller iterating `local_only_changes` to log "unchanged" would
+    // otherwise see false positives.
+    if merge_out.auto_resolutions.is_empty() {
+        return;
+    }
+
     // No conflicts. Route by whether any auto-resolution would change
     // the local side's value: if the remote wins on at least one
     // field, the local side has work to do (apply the remote value)
@@ -211,6 +219,17 @@ mod tests {
 
     fn tombstone(id: u128, deleted_at: Option<chrono::DateTime<chrono::Utc>>) -> DeletedObject {
         DeletedObject::new(Uuid::from_u128(id), deleted_at)
+    }
+
+    #[test]
+    fn identical_entries_on_both_sides_are_omitted() {
+        let e = entry(1, "same", at(2026, 1));
+        let local = vault_with(vec![e.clone()]);
+        let remote = vault_with(vec![e]);
+        let out = merge(&local, &remote).expect("merge");
+        assert!(out.disk_only_changes.is_empty());
+        assert!(out.local_only_changes.is_empty());
+        assert!(out.entry_conflicts.is_empty());
     }
 
     #[test]
