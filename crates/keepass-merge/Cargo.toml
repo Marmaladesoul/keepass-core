@@ -16,6 +16,12 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 keepass-core = { path = "../keepass-core", version = "0.0.0" }
+sha2 = "0.10"
+subtle = "2"
 thiserror = "2"
+
+[dev-dependencies]
+uuid = "1"
 
