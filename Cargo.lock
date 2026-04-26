@@ -383,8 +383,12 @@ dependencies = [
 name = "keepass-merge"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "keepass-core",
+ "sha2",
+ "subtle",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
