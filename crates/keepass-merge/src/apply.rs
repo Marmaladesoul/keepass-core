@@ -21,43 +21,68 @@
 //! entry-id and group-id present on both. Caller invokes after
 //! `apply_merge`.
 //!
-//! Slice 5b layers on top of this with the caller-driven buckets:
-//! `entry_conflicts` and `delete_edit_conflicts`. This file's
-//! validation pass is a no-op when those buckets are empty; the full
-//! `Resolution` validation lands in 5b.
+//! Slice 5b adds the caller-driven buckets:
+//!
+//! - [`MergeOutcome::entry_conflicts`] — per-field resolution drives
+//!   which side wins each conflicting field. Pre-merge local snapshot
+//!   lands in history.
+//! - [`MergeOutcome::delete_edit_conflicts`] — `KeepLocal` drops the
+//!   remote tombstone (kept-local skip-set), `AcceptRemoteDelete`
+//!   removes the local entry and the standard tombstone-union
+//!   propagates the remote tombstone.
+//!
+//! Resolution validation runs first as a read-only single-pass walk
+//! returning the first violation as one of `MergeError::
+//! UnknownEntryInResolution` / `UnknownFieldInResolution` /
+//! `MissingResolutionForConflict`. No mutation has occurred when an
+//! error is returned; the caller can fix the resolution and retry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use keepass_core::model::{DeletedObject, Entry, EntryId, Group, GroupId, Vault};
+use keepass_core::model::{CustomField, DeletedObject, Entry, EntryId, Group, GroupId, Vault};
 use uuid::Uuid;
 
+use crate::conflict::{EntryConflict, FieldDeltaKind};
+use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
+use crate::resolution::{ConflictSide, DeleteEditChoice};
 use crate::{MergeError, MergeOutcome, Resolution};
 
-/// Mutate `local` in place by applying `outcome` (and `resolution`'s
-/// caller-driven choices, when slice 5b lands them).
+/// Mutate `local` in place by applying `outcome` and `resolution`'s
+/// caller-driven choices.
 ///
-/// `remote` is consulted read-only for two purposes: to source the
-/// added-entries and their parent-group paths, and to drive group-
-/// tree LWW reconciliation by timestamp.
+/// `remote` is consulted read-only for three purposes: to source the
+/// added-entries and their parent-group paths, to drive group-tree
+/// LWW reconciliation by timestamp, and to source the field values
+/// that the resolution has the caller pulling across the merge.
 ///
-/// Returns `Ok(())` when the merge was applied successfully. Slice 5a
-/// produces no errors in practice — every documented error path is a
-/// slice 5b concern (resolution validation). The `Result` return type
-/// is the eventual surface; today it always succeeds when the
-/// conflict buckets are empty.
+/// Returns `Err` if the resolution doesn't cover the outcome's
+/// conflict buckets — see the validation pass for the exact contract.
+/// On `Err` no mutation has occurred and `local` is untouched.
+///
+/// `Resolution::default()` is the auto-apply incantation: when the
+/// outcome's `entry_conflicts` and `delete_edit_conflicts` buckets
+/// are empty, an empty resolution is sufficient.
 pub fn apply_merge(
     local: &mut Vault,
     remote: &Vault,
     outcome: &MergeOutcome,
-    _resolution: &Resolution,
+    resolution: &Resolution,
 ) -> Result<(), MergeError> {
-    // Slice 5a doesn't read `_resolution`; the parameter is in the
-    // signature so 5b can wire it without an API change.
+    // Validation pass first — read-only, fail-fast. No mutation has
+    // occurred when this returns Err; caller can fix and retry.
+    validate_resolution(outcome, resolution)?;
 
     // Group-tree LWW first so any newly-added remote groups are in
     // place before `added_on_disk` looks for parent-group paths.
     apply_group_tree(local, remote);
+
+    // Conflict-driven mutations come *before* the auto-merge buckets:
+    // conflict resolution is the most opinionated mutation, so we land
+    // it first and then auto-merge against the resolved tree. Defends
+    // against any future bucket-overlap refactor at zero cost.
+    let kept_local = apply_delete_edit_resolutions(local, outcome, resolution);
+    apply_entry_conflict_resolutions(local, remote, outcome, resolution);
 
     // Entry-level mutations. Order is "remove → modify → add" so a
     // remote-add with the same id as a local-tombstoned entry can't
@@ -110,10 +135,214 @@ pub fn apply_merge(
     let _ = &outcome.local_deletions_pending_sync;
 
     // Tombstone union: take everything remote has that local doesn't,
-    // exact-tuple deduplicated by `(uuid, deleted_at)`.
-    union_tombstones(&mut local.deleted_objects, &remote.deleted_objects);
+    // exact-tuple deduplicated by `(uuid, deleted_at)`. Skip uuids
+    // covered by a `KeepLocal` delete-edit choice — those are the
+    // "user said keep mine, drop the remote tombstone" path.
+    union_tombstones(
+        &mut local.deleted_objects,
+        &remote.deleted_objects,
+        &kept_local,
+    );
 
     Ok(())
+}
+
+/// Read-only walk of the resolution against the outcome. Returns the
+/// first violation found (single-pass, first-violation-wins).
+fn validate_resolution(outcome: &MergeOutcome, resolution: &Resolution) -> Result<(), MergeError> {
+    let conflict_ids: HashSet<EntryId> =
+        outcome.entry_conflicts.iter().map(|c| c.entry_id).collect();
+    let delete_edit_ids: HashSet<EntryId> = outcome.delete_edit_conflicts.iter().copied().collect();
+
+    // 1. Every entry referenced in entry_field_choices must be in
+    //    entry_conflicts; every key inside must be in that conflict's
+    //    field_deltas.
+    for (entry_id, field_choices) in &resolution.entry_field_choices {
+        let Some(conflict) = outcome
+            .entry_conflicts
+            .iter()
+            .find(|c| c.entry_id == *entry_id)
+        else {
+            return Err(MergeError::UnknownEntryInResolution { entry: *entry_id });
+        };
+        let known_fields: HashSet<&str> = conflict
+            .field_deltas
+            .iter()
+            .map(|d| d.key.as_str())
+            .collect();
+        for field_key in field_choices.keys() {
+            if !known_fields.contains(field_key.as_str()) {
+                return Err(MergeError::UnknownFieldInResolution {
+                    entry: *entry_id,
+                    field: field_key.clone(),
+                });
+            }
+        }
+    }
+
+    // 2. Every entry referenced in delete_edit_choices must be in
+    //    delete_edit_conflicts.
+    for entry_id in resolution.delete_edit_choices.keys() {
+        if !delete_edit_ids.contains(entry_id) {
+            return Err(MergeError::UnknownEntryInResolution { entry: *entry_id });
+        }
+    }
+
+    // 3. Every conflict in either bucket must have a corresponding
+    //    resolution entry. `entry_field_choices` may carry an empty
+    //    inner map for an entry where the user chose `Local` for every
+    //    field; we still require the outer key to be present so the
+    //    caller's intent is explicit.
+    for id in &conflict_ids {
+        if !resolution.entry_field_choices.contains_key(id) {
+            return Err(MergeError::MissingResolutionForConflict { entry: *id });
+        }
+    }
+    for id in &delete_edit_ids {
+        if !resolution.delete_edit_choices.contains_key(id) {
+            return Err(MergeError::MissingResolutionForConflict { entry: *id });
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply each `delete_edit_conflicts` choice. Returns the set of
+/// uuids whose remote tombstone the caller chose to drop (consumed
+/// by the tombstone-union step).
+fn apply_delete_edit_resolutions(
+    local: &mut Vault,
+    outcome: &MergeOutcome,
+    resolution: &Resolution,
+) -> HashSet<Uuid> {
+    let mut kept_local = HashSet::new();
+    for id in &outcome.delete_edit_conflicts {
+        // Validation guarantees the key is present.
+        let choice = resolution.delete_edit_choices[id];
+        match choice {
+            DeleteEditChoice::KeepLocal => {
+                kept_local.insert(id.0);
+                // Drop any local tombstone for this uuid too — the
+                // local entry stays, so a tombstone for it would be
+                // contradictory state.
+                local.deleted_objects.retain(|t| t.uuid != id.0);
+            }
+            DeleteEditChoice::AcceptRemoteDelete => {
+                remove_entry(&mut local.root, *id);
+                // The tombstone-union step will pull in the remote's
+                // tombstone for this uuid via the standard path.
+            }
+        }
+    }
+    kept_local
+}
+
+/// Apply each `entry_conflicts` resolution by per-field merge:
+/// clone local as the base, then overwrite the fields the caller
+/// chose `Remote` for. History merge + pre-merge snapshot per slice 5a.
+fn apply_entry_conflict_resolutions(
+    local: &mut Vault,
+    _remote: &Vault,
+    outcome: &MergeOutcome,
+    resolution: &Resolution,
+) {
+    for conflict in &outcome.entry_conflicts {
+        // Validation guarantees the entry key exists in the resolution.
+        let field_choices = &resolution.entry_field_choices[&conflict.entry_id];
+        let merged = build_resolved_entry(conflict, field_choices);
+        replace_entry(&mut local.root, conflict.entry_id, merged);
+    }
+}
+
+/// Build the post-resolution entry: clone the local side, apply each
+/// `Remote`-chosen field from the conflict's `remote`, then stitch in
+/// the combined history plus a pre-merge snapshot of local.
+fn build_resolved_entry(
+    conflict: &EntryConflict,
+    field_choices: &HashMap<String, ConflictSide>,
+) -> Entry {
+    let mut merged = conflict.local.clone();
+
+    for delta in &conflict.field_deltas {
+        let choice = field_choices
+            .get(&delta.key)
+            .copied()
+            // Validation should prevent this, but be safe: default to
+            // Local (no-op). A missing inner choice means "keep mine".
+            .unwrap_or(ConflictSide::Local);
+        if matches!(choice, ConflictSide::Local) {
+            continue;
+        }
+        // ConflictSide::Remote — copy from conflict.remote per the
+        // delta's kind.
+        match delta.kind {
+            FieldDeltaKind::LocalOnly => {
+                // Remote chose: remove the field locally.
+                remove_field(&mut merged, &delta.key);
+            }
+            FieldDeltaKind::RemoteOnly | FieldDeltaKind::BothDiffer => {
+                // Take the remote's value (and protected bit for
+                // custom fields).
+                set_field_from(&mut merged, &conflict.remote, &delta.key);
+            }
+        }
+    }
+
+    // History stitching mirrors slice 5a's `build_merged_entry` for
+    // the auto-resolution paths.
+    let mut combined = merge_histories(&conflict.local.history, &conflict.remote.history);
+    let mut snapshot = conflict.local.clone();
+    snapshot.history.clear();
+    let snapshot_hash = entry_content_hash(&snapshot);
+    let already_present = combined.iter().any(|h| {
+        h.times.last_modification_time == snapshot.times.last_modification_time
+            && entry_content_hash(h) == snapshot_hash
+    });
+    if !already_present {
+        combined.push(snapshot);
+    }
+    merged.history = combined;
+    merged
+}
+
+fn remove_field(entry: &mut Entry, key: &str) {
+    match key {
+        "Title" => entry.title.clear(),
+        "UserName" => entry.username.clear(),
+        "Password" => entry.password.clear(),
+        "URL" => entry.url.clear(),
+        "Notes" => entry.notes.clear(),
+        _ => {
+            entry.custom_fields.retain(|f| f.key != key);
+        }
+    }
+}
+
+fn set_field_from(entry: &mut Entry, source: &Entry, key: &str) {
+    match key {
+        "Title" => entry.title.clone_from(&source.title),
+        "UserName" => entry.username.clone_from(&source.username),
+        "Password" => entry.password.clone_from(&source.password),
+        "URL" => entry.url.clone_from(&source.url),
+        "Notes" => entry.notes.clone_from(&source.notes),
+        _ => {
+            let from = source.custom_fields.iter().find(|f| f.key == key);
+            match from {
+                Some(src) => match entry.custom_fields.iter_mut().find(|f| f.key == key) {
+                    Some(target) => {
+                        target.value.clone_from(&src.value);
+                        target.protected = src.protected;
+                    }
+                    None => entry.custom_fields.push(CustomField::new(
+                        src.key.clone(),
+                        src.value.clone(),
+                        src.protected,
+                    )),
+                },
+                None => entry.custom_fields.retain(|f| f.key != key),
+            }
+        }
+    }
 }
 
 /// Take the later of each timestamp pair across both vaults for every
@@ -293,11 +522,15 @@ fn build_merged_entry(local: &Entry, remote: &Entry, winner: EntryWinner) -> Ent
             s
         }
     };
-    // Dedup the snapshot if a record at its mtime+content is already
-    // present (avoids spurious duplication on a no-op merge).
-    let already_present = combined
-        .iter()
-        .any(|h| h.times.last_modification_time == snapshot.times.last_modification_time);
+    // Dedup the snapshot if a record at its mtime *and content* is
+    // already present (avoids spurious duplication on a no-op merge).
+    // Tightened in slice 5b per #R21 to use the slice-2 content hash
+    // alongside the mtime, matching the slice-4 dedup discipline.
+    let snapshot_hash = entry_content_hash(&snapshot);
+    let already_present = combined.iter().any(|h| {
+        h.times.last_modification_time == snapshot.times.last_modification_time
+            && entry_content_hash(h) == snapshot_hash
+    });
     if !already_present {
         combined.push(snapshot);
     }
@@ -314,10 +547,20 @@ fn build_merged_entry(local: &Entry, remote: &Entry, winner: EntryWinner) -> Ent
 // Tombstone union
 // ---------------------------------------------------------------------------
 
-fn union_tombstones(local: &mut Vec<DeletedObject>, remote: &[DeletedObject]) {
-    let existing: std::collections::HashSet<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+fn union_tombstones(
+    local: &mut Vec<DeletedObject>,
+    remote: &[DeletedObject],
+    skip: &HashSet<Uuid>,
+) {
+    let existing: HashSet<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
         local.iter().map(|t| (t.uuid, t.deleted_at)).collect();
     for t in remote {
+        if skip.contains(&t.uuid) {
+            // Caller chose KeepLocal for this uuid — drop the remote
+            // tombstone from the union so the local entry isn't
+            // re-deleted by the format's own merge semantics.
+            continue;
+        }
         let key = (t.uuid, t.deleted_at);
         if !existing.contains(&key) {
             local.push(DeletedObject::new(t.uuid, t.deleted_at));
@@ -462,9 +705,12 @@ fn collect_group_ids(group: &Group) -> std::collections::HashSet<GroupId> {
 #[cfg(test)]
 mod tests {
     use super::{apply_merge, reconcile_timestamps};
-    use crate::{Resolution, merge};
+    use crate::conflict::{EntryConflict, FieldDelta, FieldDeltaKind};
+    use crate::resolution::{ConflictSide, DeleteEditChoice};
+    use crate::{MergeError, MergeOutcome, Resolution, merge};
     use chrono::{TimeZone, Utc};
     use keepass_core::model::{DeletedObject, Entry, EntryId, Group, GroupId, Timestamps, Vault};
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     fn at(year: i32, day: u32) -> Timestamps {
@@ -656,6 +902,278 @@ mod tests {
         apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
 
         assert!(local.root.groups.iter().any(|g| g.id == id));
+    }
+
+    // ---------- slice 5b: validation + conflict-driven apply ----------
+
+    fn make_entry_conflict(
+        id: u128,
+        local_title: &str,
+        remote_title: &str,
+        ts: Timestamps,
+    ) -> EntryConflict {
+        let l = entry(id, local_title, ts.clone());
+        let r = entry(id, remote_title, ts);
+        EntryConflict {
+            entry_id: EntryId(Uuid::from_u128(id)),
+            local: l,
+            remote: r,
+            field_deltas: vec![FieldDelta {
+                key: "Title".into(),
+                kind: FieldDeltaKind::BothDiffer,
+            }],
+        }
+    }
+
+    #[test]
+    fn validation_extra_entry_in_resolution_returns_unknown_entry() {
+        let outcome = MergeOutcome::default();
+        let mut resolution = Resolution::default();
+        resolution
+            .entry_field_choices
+            .insert(EntryId(Uuid::from_u128(99)), HashMap::new());
+        let mut local = Vault::empty(GroupId(Uuid::nil()));
+        let remote = Vault::empty(GroupId(Uuid::nil()));
+        let err = apply_merge(&mut local, &remote, &outcome, &resolution).unwrap_err();
+        assert!(matches!(err, MergeError::UnknownEntryInResolution { .. }));
+    }
+
+    #[test]
+    fn validation_extra_field_key_returns_unknown_field() {
+        let mut outcome = MergeOutcome::default();
+        outcome
+            .entry_conflicts
+            .push(make_entry_conflict(1, "L", "R", at(2026, 1)));
+        let mut resolution = Resolution::default();
+        let mut fields = HashMap::new();
+        fields.insert("Title".into(), ConflictSide::Local);
+        fields.insert("BogusField".into(), ConflictSide::Local);
+        resolution
+            .entry_field_choices
+            .insert(EntryId(Uuid::from_u128(1)), fields);
+        let mut local = vault_with(vec![entry(1, "L", at(2026, 1))]);
+        let remote = vault_with(vec![entry(1, "R", at(2026, 1))]);
+        let err = apply_merge(&mut local, &remote, &outcome, &resolution).unwrap_err();
+        assert!(matches!(err, MergeError::UnknownFieldInResolution { .. }));
+    }
+
+    #[test]
+    fn validation_missing_entry_conflict_returns_missing_resolution() {
+        let mut outcome = MergeOutcome::default();
+        outcome
+            .entry_conflicts
+            .push(make_entry_conflict(1, "L", "R", at(2026, 1)));
+        let resolution = Resolution::default();
+        let mut local = vault_with(vec![entry(1, "L", at(2026, 1))]);
+        let remote = vault_with(vec![entry(1, "R", at(2026, 1))]);
+        let err = apply_merge(&mut local, &remote, &outcome, &resolution).unwrap_err();
+        assert!(matches!(
+            err,
+            MergeError::MissingResolutionForConflict { .. }
+        ));
+    }
+
+    #[test]
+    fn validation_missing_delete_edit_returns_missing_resolution() {
+        let mut outcome = MergeOutcome::default();
+        outcome
+            .delete_edit_conflicts
+            .push(EntryId(Uuid::from_u128(1)));
+        let resolution = Resolution::default();
+        let mut local = Vault::empty(GroupId(Uuid::nil()));
+        let remote = Vault::empty(GroupId(Uuid::nil()));
+        let err = apply_merge(&mut local, &remote, &outcome, &resolution).unwrap_err();
+        assert!(matches!(
+            err,
+            MergeError::MissingResolutionForConflict { .. }
+        ));
+    }
+
+    #[test]
+    fn entry_conflict_apply_with_remote_choice_overwrites_field() {
+        let mut local_e = entry(1, "L", at(2026, 1));
+        local_e.username = "alice".into();
+        let mut remote_e = entry(1, "R", at(2026, 1));
+        remote_e.username = "bob".into();
+        let conflict = EntryConflict {
+            entry_id: EntryId(Uuid::from_u128(1)),
+            local: local_e.clone(),
+            remote: remote_e.clone(),
+            field_deltas: vec![
+                FieldDelta {
+                    key: "Title".into(),
+                    kind: FieldDeltaKind::BothDiffer,
+                },
+                FieldDelta {
+                    key: "UserName".into(),
+                    kind: FieldDeltaKind::BothDiffer,
+                },
+            ],
+        };
+        let mut outcome = MergeOutcome::default();
+        outcome.entry_conflicts.push(conflict);
+
+        let mut resolution = Resolution::default();
+        let mut choices = HashMap::new();
+        choices.insert("Title".into(), ConflictSide::Remote);
+        choices.insert("UserName".into(), ConflictSide::Local);
+        resolution
+            .entry_field_choices
+            .insert(EntryId(Uuid::from_u128(1)), choices);
+
+        let mut local = vault_with(vec![local_e]);
+        let remote = vault_with(vec![remote_e]);
+        apply_merge(&mut local, &remote, &outcome, &resolution).expect("apply");
+
+        let merged = &local.root.entries[0];
+        assert_eq!(merged.title, "R", "Title resolved Remote");
+        assert_eq!(merged.username, "alice", "UserName resolved Local");
+        // Pre-merge local snapshot landed in history.
+        assert!(
+            merged
+                .history
+                .iter()
+                .any(|h| h.title == "L" && h.username == "alice")
+        );
+    }
+
+    #[test]
+    fn delete_edit_keep_local_drops_remote_tombstone_and_keeps_entry() {
+        let when = Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap();
+        let mut local = vault_with(vec![entry(1, "kept", at(2026, 1))]);
+        let mut remote = Vault::empty(GroupId(Uuid::nil()));
+        remote
+            .deleted_objects
+            .push(DeletedObject::new(Uuid::from_u128(1), Some(when)));
+        // Override: pretend local edited after the tombstone so the
+        // bucket lands in delete_edit_conflicts.
+        local.root.entries[0].times.last_modification_time =
+            Some(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap());
+
+        let outcome = merge(&local, &remote).expect("merge");
+        assert_eq!(outcome.delete_edit_conflicts.len(), 1);
+
+        let mut resolution = Resolution::default();
+        resolution
+            .delete_edit_choices
+            .insert(EntryId(Uuid::from_u128(1)), DeleteEditChoice::KeepLocal);
+
+        apply_merge(&mut local, &remote, &outcome, &resolution).expect("apply");
+
+        assert!(
+            local
+                .root
+                .entries
+                .iter()
+                .any(|e| e.id == EntryId(Uuid::from_u128(1)))
+        );
+        assert!(
+            !local
+                .deleted_objects
+                .iter()
+                .any(|t| t.uuid == Uuid::from_u128(1)),
+            "KeepLocal must drop the remote tombstone"
+        );
+    }
+
+    #[test]
+    fn delete_edit_accept_remote_removes_entry_and_propagates_tombstone() {
+        let when = Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap();
+        let mut local = vault_with(vec![entry(1, "doomed", at(2026, 1))]);
+        let mut remote = Vault::empty(GroupId(Uuid::nil()));
+        remote
+            .deleted_objects
+            .push(DeletedObject::new(Uuid::from_u128(1), Some(when)));
+        local.root.entries[0].times.last_modification_time =
+            Some(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap());
+
+        let outcome = merge(&local, &remote).expect("merge");
+        let mut resolution = Resolution::default();
+        resolution.delete_edit_choices.insert(
+            EntryId(Uuid::from_u128(1)),
+            DeleteEditChoice::AcceptRemoteDelete,
+        );
+
+        apply_merge(&mut local, &remote, &outcome, &resolution).expect("apply");
+
+        assert!(local.root.entries.is_empty());
+        assert!(
+            local
+                .deleted_objects
+                .iter()
+                .any(|t| t.uuid == Uuid::from_u128(1))
+        );
+    }
+
+    #[test]
+    fn applied_conflict_is_idempotent_under_remerge() {
+        // Apply a resolution; re-merge the resulting vault against
+        // the original remote; outcome should be conflict-free.
+        let mut local_e = entry(1, "L", at(2026, 1));
+        local_e.username = "alice".into();
+        let mut remote_e = entry(1, "R", at(2026, 1));
+        remote_e.username = "bob".into();
+
+        let mut local = vault_with(vec![local_e.clone()]);
+        let remote = vault_with(vec![remote_e.clone()]);
+
+        let outcome = merge(&local, &remote).expect("merge");
+        assert_eq!(outcome.entry_conflicts.len(), 1);
+
+        let mut resolution = Resolution::default();
+        let mut choices = HashMap::new();
+        choices.insert("Title".into(), ConflictSide::Remote);
+        choices.insert("UserName".into(), ConflictSide::Remote);
+        resolution
+            .entry_field_choices
+            .insert(EntryId(Uuid::from_u128(1)), choices);
+
+        apply_merge(&mut local, &remote, &outcome, &resolution).expect("apply");
+
+        let outcome2 = merge(&local, &remote).expect("re-merge");
+        assert!(
+            outcome2.entry_conflicts.is_empty(),
+            "second merge should produce no further conflicts"
+        );
+    }
+
+    #[test]
+    fn snapshot_dedup_uses_content_hash_at_same_mtime() {
+        // Two entries share an mtime but differ in content; the
+        // pre-merge local snapshot must be preserved (not collapsed
+        // against an existing combined record at the same mtime
+        // whose content differs).
+        let ancestor = entry(1, "ancestor", at(2026, 1));
+        let mut local_e = entry(1, "local-now", at(2026, 5));
+        local_e.history = vec![ancestor.clone()];
+        let mut remote_e = entry(1, "remote-now", at(2026, 5));
+        // Insert a remote history record at the local-now mtime but
+        // with different content. Without the content-hash check the
+        // snapshot would collapse against this record.
+        let mut decoy = entry(1, "decoy", at(2026, 5));
+        decoy.history.clear();
+        remote_e.history = vec![ancestor, decoy];
+
+        let mut local = vault_with(vec![local_e.clone()]);
+        let remote = vault_with(vec![remote_e]);
+        let outcome = merge(&local, &remote).expect("merge");
+        // Both local and remote share an mtime → conflict; resolve
+        // remote so build_resolved_entry exercises the dedup path.
+        let mut resolution = Resolution::default();
+        let mut choices = HashMap::new();
+        choices.insert("Title".into(), ConflictSide::Remote);
+        resolution
+            .entry_field_choices
+            .insert(EntryId(Uuid::from_u128(1)), choices);
+
+        apply_merge(&mut local, &remote, &outcome, &resolution).expect("apply");
+
+        let merged = &local.root.entries[0];
+        // Snapshot of pre-merge local ("local-now") must be present.
+        assert!(
+            merged.history.iter().any(|h| h.title == "local-now"),
+            "snapshot of overwritten local content must be preserved despite mtime collision with decoy"
+        );
     }
 
     #[test]

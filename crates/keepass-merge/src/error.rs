@@ -12,6 +12,41 @@ pub enum MergeError {
     /// An error originating from the underlying `keepass-core` model.
     #[error(transparent)]
     Model(#[from] keepass_core::Error),
+
+    /// The caller's [`crate::Resolution`] referred to an entry that
+    /// isn't present in any conflict bucket of the [`crate::MergeOutcome`]
+    /// being applied. Usually a sign of a stale outcome (the resolution
+    /// was constructed against a previous merge).
+    #[error(
+        "resolution refers to entry {entry:?} which is not in any conflict bucket of the outcome"
+    )]
+    UnknownEntryInResolution {
+        /// The unexpected entry id.
+        entry: keepass_core::model::EntryId,
+    },
+
+    /// The caller's [`crate::Resolution`] supplied a per-field choice for
+    /// a key that isn't in the corresponding conflict's `field_deltas`.
+    /// Usually a sign of a stale outcome or a typo'd field key.
+    #[error(
+        "resolution for entry {entry:?} refers to field {field:?} which is not in the conflict's field_deltas"
+    )]
+    UnknownFieldInResolution {
+        /// The conflicted entry the bad field belongs to.
+        entry: keepass_core::model::EntryId,
+        /// The field key the caller supplied.
+        field: String,
+    },
+
+    /// An entry in the [`crate::MergeOutcome`]'s `entry_conflicts` or
+    /// `delete_edit_conflicts` bucket has no corresponding entry in the
+    /// caller's [`crate::Resolution`]. The caller forgot to provide a
+    /// choice for it.
+    #[error("no resolution provided for conflict on entry {entry:?}")]
+    MissingResolutionForConflict {
+        /// The conflicted entry the resolution is missing.
+        entry: keepass_core::model::EntryId,
+    },
 }
 
 #[cfg(test)]
