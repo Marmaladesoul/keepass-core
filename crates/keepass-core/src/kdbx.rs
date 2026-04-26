@@ -353,6 +353,32 @@ impl Kdbx<Unlocked> {
         &*self.state.clock
     }
 
+    /// Replace the in-memory vault wholesale.
+    ///
+    /// Intended for bulk-mutation consumers that produce a fully-formed
+    /// replacement [`Vault`] outside the editor methods — chiefly the
+    /// `keepass-merge` crate's `apply_merge`, which mutates a `&mut Vault`
+    /// it has been handed by the caller. Once the merge has run on a
+    /// caller-owned clone, the caller swaps the merged vault back in via
+    /// this method.
+    ///
+    /// **Invariants are the caller's responsibility.** The replacement
+    /// must satisfy every invariant the editor methods (`add_entry`,
+    /// `edit_entry`, `move_entry`, …) normally maintain: UUID uniqueness
+    /// across entries and groups, well-formed parent-id chains, internally
+    /// consistent `<DeletedObjects>` tombstones, custom-icon references
+    /// pointing at icons in the pool, etc. Use this only when the
+    /// replacement comes from a tool that asserts those invariants —
+    /// e.g. `keepass-merge::apply_merge`. There is no validation pass.
+    ///
+    /// The crypto envelope (composite key, header KDF parameters,
+    /// encryption IV) is **not** affected; only the decoded vault model
+    /// is replaced. The next [`Self::save_to_bytes`] re-encrypts the new
+    /// vault under the existing key.
+    pub fn replace_vault(&mut self, vault: Vault) {
+        self.state.vault = vault;
+    }
+
     /// Insert a new [`Entry`] under the group identified by `parent`.
     ///
     /// The library owns UUID generation (unless the builder set one
@@ -2907,5 +2933,52 @@ mod tests {
         assert!(inserted_a && inserted_b);
         assert_ne!(a, b);
         assert_eq!(vault.meta.custom_icons.len(), 2);
+    }
+
+    #[test]
+    fn replace_vault_swaps_in_replacement_and_subsequent_edits_work() {
+        use std::{fs, path::Path};
+
+        use crate::CompositeKey;
+        use crate::model::NewEntry;
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/kdbxweb/kdbx4-basic.kdbx");
+        let sidecar_text = fs::read_to_string(fixture.with_extension("json")).unwrap();
+        let password = sidecar_text
+            .split("\"master_password\"")
+            .nth(1)
+            .and_then(|s| s.split('"').nth(1))
+            .unwrap()
+            .to_owned();
+        let composite = CompositeKey::from_password(password.as_bytes());
+        let bytes = fs::read(&fixture).unwrap();
+        let mut unlocked = Kdbx::<Sealed>::open_from_bytes(bytes)
+            .unwrap()
+            .read_header()
+            .unwrap()
+            .unlock(&composite)
+            .unwrap();
+
+        // Build a replacement vault by cloning the current one and tagging
+        // the database name so we can prove the swap landed.
+        let mut replacement = unlocked.vault().clone();
+        replacement.meta.database_name = "replaced".to_owned();
+        let original_root_id = replacement.root.id;
+
+        unlocked.replace_vault(replacement);
+        assert_eq!(unlocked.vault().meta.database_name, "replaced");
+
+        // Subsequent editor methods continue to work against the new vault —
+        // proves the swap doesn't break internal state. add_entry needs a
+        // valid parent group, which the cloned vault carries unchanged.
+        let new_id = unlocked
+            .add_entry(original_root_id, NewEntry::new("post-swap entry"))
+            .expect("add_entry post-replace");
+        assert!(unlocked.vault().root.entries.iter().any(|e| e.id == new_id));
     }
 }
