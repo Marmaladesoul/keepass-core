@@ -623,6 +623,21 @@ pub struct DeletedObject {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+impl DeletedObject {
+    /// Construct a [`DeletedObject`] tombstone for the given uuid and
+    /// optional deletion timestamp.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates). Newly-added
+    /// fields default to whatever [`Default`] would produce; this
+    /// constructor's behaviour is therefore stable across additions —
+    /// the natural companion to the type's `#[non_exhaustive]` marker.
+    #[must_use]
+    pub fn new(uuid: Uuid, deleted_at: Option<DateTime<Utc>>) -> Self {
+        Self { uuid, deleted_at }
+    }
+}
+
 /// One binary payload — either an attachment or an embedded image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1075,5 +1090,18 @@ mod tests {
         assert_eq!(f.key, "OTPSecret");
         assert_eq!(f.value, "JBSWY3DPEHPK3PXP");
         assert!(f.protected);
+    }
+
+    #[test]
+    fn deleted_object_new_carries_uuid_and_optional_time() {
+        use chrono::TimeZone;
+        let id = Uuid::from_u128(0xdead);
+        let t = DeletedObject::new(id, None);
+        assert_eq!(t.uuid, id);
+        assert!(t.deleted_at.is_none());
+
+        let when = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t2 = DeletedObject::new(id, Some(when));
+        assert_eq!(t2.deleted_at, Some(when));
     }
 }
