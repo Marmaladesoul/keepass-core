@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use keepass_core::model::{Entry, EntryId, Group, GroupId, Vault};
+use keepass_core::model::{Entry, EntryId, Group, Vault};
 use uuid::Uuid;
 
 use crate::conflict::EntryConflict;
@@ -78,9 +78,9 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
 
     for id in all_ids {
         match (local_entries.get(&id), remote_entries.get(&id)) {
-            (Some(l), Some(r)) => route_both_present(id, l.entry, r.entry, &mut outcome),
-            (Some(l), None) => route_local_only(id, l.entry, &remote_tombstones, &mut outcome),
-            (None, Some(r)) => route_remote_only(id, r.entry, &local_tombstones, &mut outcome),
+            (Some(l), Some(r)) => route_both_present(id, l, r, &mut outcome),
+            (Some(l), None) => route_local_only(id, l, &remote_tombstones, &mut outcome),
+            (None, Some(r)) => route_remote_only(id, r, &local_tombstones, &mut outcome),
             (None, None) => unreachable!("id collected from union of local + remote"),
         }
     }
@@ -159,32 +159,21 @@ fn route_remote_only(
     }
 }
 
-/// Reference into a [`Vault`]'s entry tree, retaining parent-group
-/// context for slice 5's apply step.
-struct EntryRef<'a> {
-    entry: &'a Entry,
-    #[allow(dead_code)] // slice 5's apply step is the consumer
-    parent_group: GroupId,
-}
-
-/// Build a lookup from [`EntryId`] to [`EntryRef`] over the entire
-/// group tree rooted at `root`. Depth-first traversal; insertion
-/// order matches `iter_entries`.
-fn collect_entries_by_id(root: &Group) -> HashMap<EntryId, EntryRef<'_>> {
+/// Build a lookup from [`EntryId`] to its `&Entry` over the entire
+/// group tree rooted at `root`. Depth-first traversal.
+///
+/// Slice 5a's apply step walks remote independently to find parent
+/// groups for `added_on_disk` insertions, so the walker doesn't need
+/// to retain parent-group context here.
+fn collect_entries_by_id(root: &Group) -> HashMap<EntryId, &Entry> {
     let mut out = HashMap::new();
     walk_group(root, &mut out);
     out
 }
 
-fn walk_group<'a>(group: &'a Group, out: &mut HashMap<EntryId, EntryRef<'a>>) {
+fn walk_group<'a>(group: &'a Group, out: &mut HashMap<EntryId, &'a Entry>) {
     for entry in &group.entries {
-        out.insert(
-            entry.id,
-            EntryRef {
-                entry,
-                parent_group: group.id,
-            },
-        );
+        out.insert(entry.id, entry);
     }
     for sub in &group.groups {
         walk_group(sub, out);
