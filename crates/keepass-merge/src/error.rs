@@ -2,7 +2,7 @@
 //!
 //! Per the workspace convention (see `keepass-core::error`) this top-level
 //! enum is `#[non_exhaustive]` and transparently wraps upstream
-//! [`keepass_core::Error`] via the [`Self::Model`] arm. Merge-specific
+//! [`keepass_core::Error`] via the [`MergeError::Model`] arm. Merge-specific
 //! variants will be added in later slices as the merge algorithm grows.
 
 /// Errors produced by the merge crate.
