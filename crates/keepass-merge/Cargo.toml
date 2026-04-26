@@ -17,3 +17,5 @@ workspace = true
 
 [dependencies]
 keepass-core = { path = "../keepass-core", version = "0.0.0" }
+thiserror = "2"
+
