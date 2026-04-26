@@ -174,19 +174,18 @@ fn take_later_group_metadata(local: &mut Group, remote: &Group) {
 fn take_later_recursive(local_group: &mut Group, remote_by_id: &HashMap<GroupId, &Group>) {
     if let Some(r) = remote_by_id.get(&local_group.id) {
         let local_t = local_group.times.last_modification_time;
-        let remote_t = r.times.last_modification_time;
-        if let (Some(rt), local_opt) = (remote_t, local_t)
-            && local_opt.is_none_or(|lt| rt > lt)
-        {
-            local_group.name = r.name.clone();
-            local_group.notes = r.notes.clone();
-            local_group.icon_id = r.icon_id;
-            local_group.custom_icon_uuid = r.custom_icon_uuid;
-            local_group.previous_parent_group = r.previous_parent_group;
-            local_group.enable_auto_type = r.enable_auto_type;
-            local_group.enable_searching = r.enable_searching;
-            local_group.default_auto_type_sequence = r.default_auto_type_sequence.clone();
-            local_group.is_expanded = r.is_expanded;
+        if let Some(rt) = r.times.last_modification_time {
+            if local_t.is_none_or(|lt| rt > lt) {
+                local_group.name = r.name.clone();
+                local_group.notes = r.notes.clone();
+                local_group.icon_id = r.icon_id;
+                local_group.custom_icon_uuid = r.custom_icon_uuid;
+                local_group.previous_parent_group = r.previous_parent_group;
+                local_group.enable_auto_type = r.enable_auto_type;
+                local_group.enable_searching = r.enable_searching;
+                local_group.default_auto_type_sequence = r.default_auto_type_sequence.clone();
+                local_group.is_expanded = r.is_expanded;
+            }
         }
     }
     for sub in &mut local_group.groups {
