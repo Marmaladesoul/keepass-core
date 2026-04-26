@@ -20,6 +20,11 @@ pub mod outcome;
 
 mod entry_merge;
 mod hash;
+// Slice 4 introduces this private helper ahead of slice 5's apply step
+// (the only non-test consumer of `merge_histories`). The `dead_code`
+// allow comes off when slice 5 wires the call.
+#[allow(dead_code)]
+mod history_merge;
 mod merge;
 
 pub use crate::conflict::{EntryConflict, FieldDelta, FieldDeltaKind, GroupConflict};
