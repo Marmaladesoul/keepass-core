@@ -268,6 +268,34 @@ fn unlock_one(path: &Path) -> Result<(), String> {
         }
     }
 
+    // Sanity check on timestamps: KDBX postdates year 2000, so any
+    // populated timestamp on any entry must be after that. Catches
+    // parser regressions that produce year-1 sentinels (e.g. reading
+    // KDBX4 base64 timestamps with the wrong unit). Fixture sidecars
+    // don't pin individual timestamps, so this is the cheapest
+    // shape-check that scales across the whole corpus.
+    for entry in vault.iter_entries() {
+        for (label, ts) in [
+            ("creation_time", entry.times.creation_time),
+            ("last_modification_time", entry.times.last_modification_time),
+            ("last_access_time", entry.times.last_access_time),
+            ("location_changed", entry.times.location_changed),
+        ] {
+            if let Some(t) = ts {
+                use chrono::Datelike;
+                if t.year() < 2000 {
+                    return Err(format!(
+                        "entry {:?} has {} {} (year {}); expected modern date",
+                        entry.title,
+                        label,
+                        t,
+                        t.year()
+                    ));
+                }
+            }
+        }
+    }
+
     // Per-entry assertions when the sidecar lists entries.
     if let Some(entries) = sidecar.get("entries").and_then(Value::as_array) {
         // Index actual entries by title for order-independent matching.
