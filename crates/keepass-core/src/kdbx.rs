@@ -23,8 +23,8 @@
 //!   yet been applied. The only legal operation is `unlock`.
 //! - [`Unlocked`] — the master key has been derived, block HMACs verified
 //!   (on KDBX4), payload decrypted, decompressed, and the inner XML parsed
-//!   into the [`crate::model::Vault`] tree. Read operations are available;
-//!   write-back lands in a follow-up.
+//!   into the [`crate::model::Vault`] tree. Read and write operations
+//!   are both available — including [`Kdbx::<Unlocked>::save_to_bytes`].
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -101,11 +101,11 @@ pub struct Unlocked {
     /// so `unlock → save → re-open → unlock` produces the same vault
     /// without touching the KDF.
     outer_header: OuterHeader,
-    /// KDBX4 only: the inner-stream cipher's algorithm and key, retained
-    /// so `save_to_bytes` can spin up a fresh [`InnerStreamCipher`] that
+    /// The inner-stream cipher's algorithm and key, retained so
+    /// `save_to_bytes` can spin up a fresh [`InnerStreamCipher`] that
     /// encrypts protected values symmetrically with how they were
-    /// decrypted on unlock. On KDBX3 the equivalent lives in the outer
-    /// header, and save_to_bytes is not yet implemented for KDBX3.
+    /// decrypted on unlock. Sourced from the inner header on KDBX4 and
+    /// from the outer header's `InnerRandomStream*` TLVs on KDBX3.
     inner_stream: Option<InnerStreamParams>,
     /// The transformed (post-KDF) key derived at unlock time. Retained
     /// so that `save_to_bytes` can derive the cipher key and HMAC base
@@ -235,7 +235,7 @@ impl Kdbx<Sealed> {
 }
 
 // ---------------------------------------------------------------------------
-// HeaderRead: accessors; unlock lands in a follow-up
+// HeaderRead: accessors and unlock
 // ---------------------------------------------------------------------------
 
 impl Kdbx<HeaderRead> {
@@ -1279,17 +1279,11 @@ impl Kdbx<Unlocked> {
     ///
     /// # Supported configurations
     ///
-    /// This first implementation targets **KDBX4 with AES-256-CBC**,
-    /// which is the default emitted by KeePassXC and covers the bulk
-    /// of real-world vaults. Other configurations return
-    /// [`FormatError::MalformedHeader`] with a description of what's
-    /// not yet supported:
-    ///
-    /// - KDBX3 (the signature + outer header is emitted but the
-    ///   HashedBlockStream writer and the different inner-stream key
-    ///   path aren't wired up yet).
-    /// - ChaCha20 outer cipher.
-    /// - Twofish-CBC outer cipher (which `unlock` already rejects).
+    /// Both **KDBX3 and KDBX4** are supported, with either the
+    /// **AES-256-CBC** or **ChaCha20** outer cipher (whichever the
+    /// source file's outer header declares). Twofish-CBC is rejected
+    /// at save time with [`FormatError::MalformedHeader`] — the same
+    /// path `unlock` already takes for that cipher.
     ///
     /// # Errors
     ///
