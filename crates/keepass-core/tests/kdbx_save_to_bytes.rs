@@ -1,30 +1,30 @@
 //! End-to-end round-trip for [`Kdbx::<Unlocked>::save_to_bytes`].
 //!
-//! For every KDBX4 + AES-256-CBC fixture with a JSON sidecar:
+//! For every fixture with a JSON sidecar whose outer cipher the save
+//! path can write (today: AES-256-CBC and ChaCha20, on both KDBX3 and
+//! KDBX4):
 //! 1. Open, read header, derive composite key, unlock.
 //! 2. Call `save_to_bytes` to re-encrypt the vault as fresh KDBX bytes.
 //! 3. Open those bytes fresh, unlock with the same composite key, and
-//!    assert that the user-facing entry fields match the original.
+//!    assert the round-tripped vault equals the original on every
+//!    field the XML encoder covers.
 //!
-//! Skips Twofish fixtures — `save_to_bytes` rejects them with a typed
-//! error for now. AES-256-CBC and ChaCha20 (on both KDBX3 and KDBX4)
-//! are exercised.
+//! Twofish fixtures are skipped — `save_to_bytes` rejects them with a
+//! typed error for now.
 //!
 //! ## Scope of the equality assertion
 //!
-//! We do **not** assert full `Vault` equality. The XML encoder this
-//! crate currently ships is still "minimum viable" — it emits entry
-//! core fields (UUID, title, username, password, URL, notes, tags,
-//! custom fields) and group core fields (UUID, name, notes) but does
-//! not yet cover every timestamp, custom-data item, auto-type
-//! association, memory-protection flag, or recycle-bin state. A
-//! byte-for-byte round-trip of an arbitrary third-party vault is the
-//! long-term goal; this milestone demonstrates the crypto and framing
-//! pipeline works end-to-end on what the encoder does cover.
+//! We do **not** assert full `Vault` equality. The XML encoder still
+//! does not write the custom-data items pool or the memory-protection
+//! block, so those fields are excluded from [`PreservedSubset`].
+//! Everything else the encoder emits — entry/group core fields,
+//! timestamps, history, tags, custom fields, decorative fields, the
+//! custom-icon pool, the KDBX3 binaries pool, attachment payload
+//! bytes — is asserted via the subset.
 //!
-//! As the XML encoder grows coverage in follow-up PRs, move fields
-//! from the "skipped" list into `PreservedSubset` below. When the
-//! subset equals `Vault`, replace the helper with direct equality.
+//! As the encoder grows coverage in follow-up PRs, add the new fields
+//! to [`PreservedSubset`]. When the subset equals `Vault`, replace
+//! the helper with direct equality.
 
 use std::fs;
 use std::path::{Path, PathBuf};
