@@ -122,33 +122,33 @@ fn check_entry_against_sidecar(
                 "attachment filenames {got_names:?} ≠ expected {expected_names:?}"
             ));
         }
-        // For fixtures where the binary pool is populated (KDBX4 today;
-        // KDBX3 lands in a follow-up), verify each attachment's bytes
-        // hash to the sidecar's sha256.
-        if !vault.binaries.is_empty() {
-            for expected_att in atts {
-                let Some(filename) = expected_att.get("filename").and_then(Value::as_str) else {
-                    continue;
-                };
-                let Some(expected_sha) = expected_att.get("sha256").and_then(Value::as_str) else {
-                    continue;
-                };
-                let Some(att) = actual.attachments.iter().find(|a| a.name == filename) else {
-                    continue;
-                };
-                let Some(bin) = vault.binaries.get(att.ref_id as usize) else {
-                    return Err(format!(
-                        "attachment {filename:?} Ref={} out of pool bounds ({} binaries)",
-                        att.ref_id,
-                        vault.binaries.len()
-                    ));
-                };
-                let got_sha = format!("{:x}", Sha256::digest(&bin.data));
-                if got_sha != expected_sha {
-                    return Err(format!(
-                        "attachment {filename:?} sha256 {got_sha} ≠ expected {expected_sha}"
-                    ));
-                }
+        // Verify each attachment's bytes hash to the sidecar's sha256.
+        // Both KDBX3 (Meta/Binaries) and KDBX4 (inner header) populate
+        // `vault.binaries`; if it's empty here while the sidecar
+        // declares attachments with sidecar-side sha256s, that's a
+        // bug — fail loudly rather than silently skip.
+        for expected_att in atts {
+            let Some(filename) = expected_att.get("filename").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(expected_sha) = expected_att.get("sha256").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(att) = actual.attachments.iter().find(|a| a.name == filename) else {
+                continue;
+            };
+            let Some(bin) = vault.binaries.get(att.ref_id as usize) else {
+                return Err(format!(
+                    "attachment {filename:?} Ref={} out of pool bounds ({} binaries)",
+                    att.ref_id,
+                    vault.binaries.len()
+                ));
+            };
+            let got_sha = format!("{:x}", Sha256::digest(&bin.data));
+            if got_sha != expected_sha {
+                return Err(format!(
+                    "attachment {filename:?} sha256 {got_sha} ≠ expected {expected_sha}"
+                ));
             }
         }
     }
