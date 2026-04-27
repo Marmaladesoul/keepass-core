@@ -2413,9 +2413,11 @@ fn do_unlock(
     };
 
     // --- Version-specific plaintext framing --------------------------------
-    // Binaries come out of the KDBX4 inner header. KDBX3 stores them
-    // under Meta/Binaries which this pipeline does not yet read, so
-    // the pool is empty there.
+    // KDBX4 binaries come out of the inner header (decrypted + populated
+    // into the local `binaries` Vec below, then assigned to
+    // `vault.binaries` in the V4 arm). KDBX3 binaries come out of
+    // `<Meta><Binaries>` and are populated directly onto `vault.binaries`
+    // by `decode_vault_with_cipher` — the V3 arm leaves the local empty.
     let mut binaries: Vec<Binary> = Vec::new();
     let (xml_bytes, inner_stream_algorithm, inner_stream_key): (Vec<u8>, _, Vec<u8>) =
         match header.version {
@@ -2500,8 +2502,11 @@ fn do_unlock(
     // --- Inner-stream cipher + XML decode (KDBX3) --------------------------
     let mut cipher = InnerStreamCipher::new(inner_stream_algorithm, &inner_stream_key)
         .map_err(|_| CryptoError::Decrypt)?;
-    let mut vault = decode_vault_with_cipher(&xml_bytes, &mut cipher)?;
-    vault.binaries = binaries;
+    let vault = decode_vault_with_cipher(&xml_bytes, &mut cipher)?;
+    // `vault.binaries` is already populated from `<Meta><Binaries>` by the
+    // decoder. The KDBX4 arm above assigned the inner-header binaries to
+    // its own short-circuited return; on this V3 path the local `binaries`
+    // is empty and there is nothing to assign.
     Ok(Unlocked {
         vault,
         outer_header: header.clone(),
