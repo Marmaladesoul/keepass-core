@@ -18,15 +18,14 @@
 //!     - Entry: UUID, Title / UserName / Password / URL / Notes
 //!       as `<String>` K/V pairs, Tags, Times.
 //!
-//! Intentionally deferred to follow-up PRs:
+//! Subsequent slices have grown coverage well past the minimum:
+//! protected-value encryption, history snapshots, custom icons,
+//! deleted objects, decorative entry/group fields, KDBX3 binaries
+//! pool, and unknown-XML preservation are all emitted today.
 //!
-//! - Inner-stream cipher encryption of protected values (currently
-//!   all values are written plain; the encoder parallels
-//!   [`decode_vault`] rather than [`decode_vault_with_cipher`]).
-//! - Binaries pool, attachments, history snapshots, custom icons,
-//!   custom data, memory protection, recycle bin, deleted objects,
-//!   auto-type, entry/group decorative fields (colours, override
-//!   URL, custom-icon UUIDs).
+//! Still deferred to follow-up PRs:
+//!
+//! - Custom-data items, memory-protection block.
 //!
 //! Those will land alongside their own round-trip assertions once
 //! the scaffolding is merged.
@@ -45,7 +44,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
-use crate::model::{AutoType, Entry, Group, Meta, UnknownElement, Vault};
+use crate::model::{AutoType, Binary, Entry, Group, Meta, UnknownElement, Vault};
 
 /// Encode a [`Vault`] into a byte-for-byte legal KeePass inner XML
 /// document, **without** applying an inner-stream cipher.
@@ -90,6 +89,32 @@ pub fn encode_vault_with_cipher(
     vault: &Vault,
     cipher: &mut InnerStreamCipher,
 ) -> Result<Vec<u8>, XmlError> {
+    encode_vault_inner(vault, cipher, /* embed_binaries_pool */ false)
+}
+
+/// KDBX3-shaped encode: identical to [`encode_vault_with_cipher`] but
+/// also emits `<Meta><Binaries>` carrying every entry in
+/// [`Vault::binaries`].
+///
+/// KDBX3 has no inner header, so attachment bytes can only travel
+/// inside the XML's `<Binaries>` pool. KDBX4 deliberately leaves this
+/// element off — the bytes live in the inner-header binary pool there.
+///
+/// # Errors
+///
+/// See [`encode_vault_with_cipher`].
+pub fn encode_vault_kdbx3_with_cipher(
+    vault: &Vault,
+    cipher: &mut InnerStreamCipher,
+) -> Result<Vec<u8>, XmlError> {
+    encode_vault_inner(vault, cipher, /* embed_binaries_pool */ true)
+}
+
+fn encode_vault_inner(
+    vault: &Vault,
+    cipher: &mut InnerStreamCipher,
+    embed_binaries_pool: bool,
+) -> Result<Vec<u8>, XmlError> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     writer
         .write_event(Event::Decl(quick_xml::events::BytesDecl::new(
@@ -99,7 +124,12 @@ pub fn encode_vault_with_cipher(
         )))
         .map_err(xml_err)?;
     open(&mut writer, "KeePassFile")?;
-    write_meta(&mut writer, &vault.meta)?;
+    let pool = if embed_binaries_pool {
+        Some(vault.binaries.as_slice())
+    } else {
+        None
+    };
+    write_meta(&mut writer, &vault.meta, pool)?;
     open(&mut writer, "Root")?;
     write_group(&mut writer, &vault.root, cipher)?;
     if !vault.deleted_objects.is_empty() {
@@ -114,7 +144,11 @@ pub fn encode_vault_with_cipher(
 // Meta
 // ---------------------------------------------------------------------------
 
-fn write_meta<W: std::io::Write>(w: &mut Writer<W>, meta: &Meta) -> Result<(), XmlError> {
+fn write_meta<W: std::io::Write>(
+    w: &mut Writer<W>,
+    meta: &Meta,
+    binaries_pool: Option<&[Binary]>,
+) -> Result<(), XmlError> {
     open(w, "Meta")?;
     write_text_element(w, "Generator", &meta.generator)?;
     write_optional_text_element(w, "DatabaseName", &meta.database_name)?;
@@ -165,8 +199,51 @@ fn write_meta<W: std::io::Write>(w: &mut Writer<W>, meta: &Meta) -> Result<(), X
     if !meta.custom_icons.is_empty() {
         write_custom_icons(w, &meta.custom_icons)?;
     }
+    if let Some(pool) = binaries_pool {
+        // Always emit `<Binaries>` on the KDBX3 path — even when the
+        // pool is empty — so a freshly-created vault and a stripped
+        // vault encode the same shape KeePassXC produces. Decoder
+        // accepts both an absent and a present-but-empty element.
+        write_binaries_pool(w, pool)?;
+    }
     write_unknown_xml(w, &meta.unknown_xml)?;
     close(w, "Meta")
+}
+
+/// Emit the KDBX3 `<Binaries>` pool. Each entry becomes a
+/// `<Binary ID="N" Compressed="False">base64(data)</Binary>` element,
+/// indexed by its position in [`Vault::binaries`] (which is exactly
+/// the `Ref` value the decoder later resolves).
+///
+/// Compression is left off on write — the decoder gzip-decompresses
+/// transparently on read but the model only stores the decompressed
+/// bytes, so re-emitting compressed would require a second gzip pass
+/// for no fidelity gain.
+fn write_binaries_pool<W: std::io::Write>(
+    w: &mut Writer<W>,
+    pool: &[Binary],
+) -> Result<(), XmlError> {
+    open(w, "Binaries")?;
+    for (idx, bin) in pool.iter().enumerate() {
+        let id = idx.to_string();
+        let mut start = BytesStart::new("Binary");
+        start.push_attribute(("ID", id.as_str()));
+        start.push_attribute(("Compressed", "False"));
+        if bin.data.is_empty() {
+            // Self-closing `<Binary ID="N" Compressed="False"/>` mirrors
+            // the empty-payload shape KeePassXC emits and the decoder
+            // already handles via the Event::Empty arm.
+            w.write_event(Event::Empty(start)).map_err(xml_err)?;
+        } else {
+            w.write_event(Event::Start(start)).map_err(xml_err)?;
+            let encoded = BASE64.encode(&bin.data);
+            w.write_event(Event::Text(BytesText::new(&encoded)))
+                .map_err(xml_err)?;
+            w.write_event(Event::End(BytesEnd::new("Binary")))
+                .map_err(xml_err)?;
+        }
+    }
+    close(w, "Binaries")
 }
 
 /// Emit `<CustomIcons>` with one `<Icon>` child per entry in the

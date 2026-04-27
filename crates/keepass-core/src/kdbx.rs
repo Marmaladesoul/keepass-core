@@ -54,7 +54,9 @@ use crate::model::{
     SystemClock, Timestamps, Vault,
 };
 use crate::secret::{CompositeKey, TransformedKey};
-use crate::xml::{decode_vault_with_cipher, encode_vault_with_cipher};
+use crate::xml::{
+    decode_vault_with_cipher, encode_vault_kdbx3_with_cipher, encode_vault_with_cipher,
+};
 
 // ---------------------------------------------------------------------------
 // State markers
@@ -2687,10 +2689,12 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
     // --- Inner-stream cipher + XML encode --------------------------------
     // KDBX3 has no inner header and no inner-header binaries pool — any
     // attachment bytes live inside the XML's <Binaries> section. The
-    // inner-stream cipher only touches protected <Value> elements.
+    // inner-stream cipher only touches protected <Value> elements; the
+    // KDBX3-shaped encoder also emits the <Meta><Binaries> pool from
+    // `vault.binaries`, so attachments survive the round-trip.
     let mut inner_cipher = InnerStreamCipher::new(inner_params.algorithm, &inner_params.key)
         .map_err(|_| CryptoError::Decrypt)?;
-    let xml_bytes = encode_vault_with_cipher(vault, &mut inner_cipher)?;
+    let xml_bytes = encode_vault_kdbx3_with_cipher(vault, &mut inner_cipher)?;
 
     // --- Compress XML (if declared) --------------------------------------
     let compressed = compress(header.compression, &xml_bytes)
