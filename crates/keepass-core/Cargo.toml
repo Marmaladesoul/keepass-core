@@ -43,7 +43,7 @@ flate2 = "1"                        # gzip decompression (both KDBX3 and KDBX4 p
 
 # Parsing.
 quick-xml = "0.36"                  # streaming XML reader for KeePass inner document
-winnow    = "0.6"                   # binary header TLVs
+winnow    = "1.0"                   # binary header TLVs
 
 # Timestamps. `clock` enables `Utc::now()` via platform wall-clock
 # bindings — needed by the mutation API's SystemClock. `wasmbind` is
