@@ -52,6 +52,13 @@ struct PreservedSubset {
     /// pool); automatically guards every future fixture that carries
     /// icons.
     custom_icons: Vec<(uuid::Uuid, [u8; 32])>,
+    /// Sorted `(filename, sha256_of_bytes)` pairs across every entry's
+    /// attachments. Resolves each `Attachment.ref_id` through
+    /// [`Vault::binaries`] and hashes the resulting payload, so a
+    /// regression that drops the binaries pool on save (KDBX3) — or
+    /// shuffles the inner-header pool ordering (KDBX4) — surfaces as a
+    /// diff here rather than slipping through.
+    attachments: Vec<(String, [u8; 32])>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -77,6 +84,16 @@ fn preserved(v: &Vault) -> PreservedSubset {
         })
         .collect();
     custom_icons.sort_by_key(|(uuid, _)| *uuid);
+    let mut attachments: Vec<(String, [u8; 32])> = v
+        .iter_entries()
+        .flat_map(|e| e.attachments.iter())
+        .filter_map(|att| {
+            let bin = v.binaries.get(att.ref_id as usize)?;
+            let hash: [u8; 32] = Sha256::digest(&bin.data).into();
+            Some((att.name.clone(), hash))
+        })
+        .collect();
+    attachments.sort();
     PreservedSubset {
         generator: v.meta.generator.clone(),
         database_name: v.meta.database_name.clone(),
@@ -106,6 +123,7 @@ fn preserved(v: &Vault) -> PreservedSubset {
             })
             .collect(),
         custom_icons,
+        attachments,
     }
 }
 
