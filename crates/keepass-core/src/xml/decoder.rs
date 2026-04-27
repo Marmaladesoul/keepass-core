@@ -47,10 +47,10 @@ use crate::model::{
     UnknownElement, Vault,
 };
 
-/// .NET ticks between `0001-01-01T00:00:00Z` (KeePass's epoch) and
+/// Seconds between `0001-01-01T00:00:00Z` (KeePass's epoch) and
 /// `1970-01-01T00:00:00Z` (the Unix epoch). Used to convert KDBX4
-/// base64-encoded tick counts into `DateTime<Utc>`.
-const TICKS_FROM_YEAR_ONE_TO_UNIX_EPOCH: i64 = 621_355_968_000_000_000;
+/// base64-encoded second counts into `DateTime<Utc>`.
+const SECONDS_FROM_YEAR_ONE_TO_UNIX_EPOCH: i64 = 62_135_596_800;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -1703,10 +1703,20 @@ fn assign_times_field(times: &mut Timestamps, field: &str, text: &str) -> Result
 /// Parse a KeePass timestamp.
 ///
 /// KDBX3 uses ISO-8601 (`2024-03-01T12:34:56Z`). KDBX4 uses a base64
-/// encoding of a little-endian `i64` tick count since
-/// `0001-01-01T00:00:00Z`, with 100-nanosecond resolution. We
-/// auto-detect: if the trimmed text contains `T` or `-`, treat it as
-/// ISO-8601; otherwise try base64.
+/// encoding of a little-endian `i64` count of **seconds** since
+/// `0001-01-01T00:00:00Z` (whole-second resolution; sub-second
+/// precision is not represented on the wire). We auto-detect: if
+/// the trimmed text contains `T` or `-`, treat it as ISO-8601;
+/// otherwise try base64.
+///
+/// Earlier revisions of this parser misread the KDBX4 i64 as a count
+/// of 100-nanosecond ticks (the .NET `DateTime.Ticks` representation,
+/// which KeePass for Windows uses internally but does *not* serialise).
+/// Real-world KDBX4 writers — KeePass 2.x, KeePassXC, kdbxweb — all
+/// emit seconds, matching the format spec at
+/// <https://keepass.info/help/kb/kdbx_4.html>. Reading them as ticks
+/// produced timestamps roughly `1e7×` smaller than the real value,
+/// landing every entry near year 1.
 fn parse_timestamp(text: &str, element: &'static str) -> Result<DateTime<Utc>, XmlError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -1732,25 +1742,21 @@ fn parse_timestamp(text: &str, element: &'static str) -> Result<DateTime<Utc>, X
         .try_into()
         .map_err(|_| XmlError::InvalidValue {
             element,
-            detail: format!("expected 8 bytes of ticks, got {}", bytes.len()),
+            detail: format!("expected 8 bytes of seconds, got {}", bytes.len()),
         })?;
-    let ticks = i64::from_le_bytes(arr);
-    ticks_to_datetime(ticks).ok_or(XmlError::InvalidValue {
+    let secs_since_year_one = i64::from_le_bytes(arr);
+    seconds_to_datetime(secs_since_year_one).ok_or(XmlError::InvalidValue {
         element,
-        detail: "tick count out of representable UTC range".to_owned(),
+        detail: "second count out of representable UTC range".to_owned(),
     })
 }
 
-fn ticks_to_datetime(ticks: i64) -> Option<DateTime<Utc>> {
-    // ticks are 100-ns units since year-1 AD. Convert to Unix-epoch
-    // seconds + sub-second nanoseconds, then let chrono assemble the
-    // DateTime.
-    let from_unix = ticks.checked_sub(TICKS_FROM_YEAR_ONE_TO_UNIX_EPOCH)?;
-    let secs = from_unix.div_euclid(10_000_000);
-    let subsec_ticks = from_unix.rem_euclid(10_000_000);
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let nanos = (subsec_ticks * 100) as u32; // 0..=999_999_900 fits in u32
-    match Utc.timestamp_opt(secs, nanos) {
+fn seconds_to_datetime(secs_since_year_one: i64) -> Option<DateTime<Utc>> {
+    // secs_since_year_one is a whole-second count since
+    // 0001-01-01T00:00:00Z. Convert to Unix-epoch seconds, then let
+    // chrono assemble the DateTime.
+    let unix_secs = secs_since_year_one.checked_sub(SECONDS_FROM_YEAR_ONE_TO_UNIX_EPOCH)?;
+    match Utc.timestamp_opt(unix_secs, 0) {
         chrono::LocalResult::Single(dt) => Some(dt),
         _ => None,
     }
@@ -2323,11 +2329,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_kdbx4_base64_tick_timestamp_on_group() {
-        // Derive the ticks for a known UTC instant and round-trip it.
+    fn parses_kdbx4_base64_seconds_timestamp_on_group() {
+        // Derive seconds-since-year-1 for a known UTC instant and
+        // round-trip it through the base64 encoding KDBX4 writers use.
         let expected = Utc.with_ymd_and_hms(2026, 4, 21, 10, 11, 12).unwrap();
-        let ticks = expected.timestamp() * 10_000_000 + TICKS_FROM_YEAR_ONE_TO_UNIX_EPOCH;
-        let b64 = BASE64.encode(ticks.to_le_bytes());
+        let secs_since_year_one = expected.timestamp() + SECONDS_FROM_YEAR_ONE_TO_UNIX_EPOCH;
+        let b64 = BASE64.encode(secs_since_year_one.to_le_bytes());
         let xml = format!(
             r"<KeePassFile>
   <Meta><Generator>G</Generator></Meta>
