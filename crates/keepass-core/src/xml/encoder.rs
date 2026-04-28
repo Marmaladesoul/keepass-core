@@ -336,11 +336,11 @@ fn write_group<W: std::io::Write>(
     if let Some(b) = group.enable_searching {
         write_text_element(w, "EnableSearching", if b { "True" } else { "False" })?;
     }
-    if let Some(prev) = group.previous_parent_group {
-        write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
-    }
     if !group.custom_data.is_empty() {
         write_custom_data(w, &group.custom_data)?;
+    }
+    if let Some(prev) = group.previous_parent_group {
+        write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
     }
     for entry in &group.entries {
         write_entry(w, entry, cipher)?;
@@ -420,6 +420,9 @@ fn write_entry<W: std::io::Write>(
     if let Some(prev) = entry.previous_parent_group {
         write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
     }
+    if !entry.custom_data.is_empty() {
+        write_custom_data(w, &entry.custom_data)?;
+    }
     // AutoType — emit only when the block carries any non-default
     // setting. AutoType has no protected values, so its placement
     // does not affect the inner-stream cipher's keystream sync.
@@ -438,9 +441,6 @@ fn write_entry<W: std::io::Write>(
             write_entry(w, snap, cipher)?;
         }
         close(w, "History")?;
-    }
-    if !entry.custom_data.is_empty() {
-        write_custom_data(w, &entry.custom_data)?;
     }
     write_unknown_xml(w, &entry.unknown_xml)?;
     close(w, "Entry")
