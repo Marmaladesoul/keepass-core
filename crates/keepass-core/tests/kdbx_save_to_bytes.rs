@@ -269,3 +269,68 @@ fn every_writable_fixture_round_trips_save_to_bytes() {
     assert!(saw_v3, "no KDBX3 fixtures exercised under {root:?}");
     assert!(saw_v4, "no KDBX4 fixtures exercised under {root:?}");
 }
+
+/// KDBX3 spec: `<Meta><HeaderHash>` carries the base64-encoded
+/// SHA-256 of the outer header (signature + TLVs). After
+/// `save_to_bytes`, the freshly-written file's inner XML must
+/// declare a hash that matches the recomputed digest of the file's
+/// own outer header bytes — anything else means classic readers
+/// (KeePass 2.x, KeePassXC) will reject the file as corrupt.
+#[test]
+fn kdbx3_save_emits_a_correct_header_hash() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use sha2::{Digest, Sha256};
+
+    let root = fixtures_root();
+    let mut kdbxs: Vec<_> = find_kdbxs(&root.join("pykeepass"));
+    kdbxs.extend(find_kdbxs(&root.join("kdbxweb")));
+    kdbxs.extend(find_kdbxs(&root.join("keepassxc")));
+
+    let mut checked = 0;
+    for path in &kdbxs {
+        if !is_writable_cipher(path) {
+            continue;
+        }
+        let kdbx = Kdbx::<Sealed>::open(path)
+            .unwrap_or_else(|e| panic!("{path:?}: open: {e}"))
+            .read_header()
+            .unwrap_or_else(|e| panic!("{path:?}: read_header: {e}"));
+        if kdbx.version() != Version::V3 {
+            continue;
+        }
+        let sidecar = load_sidecar(path).unwrap_or_else(|| panic!("{path:?}: no sidecar"));
+        let composite =
+            composite_for(&sidecar, path).unwrap_or_else(|e| panic!("{path:?}: composite: {e}"));
+        let unlocked = kdbx
+            .unlock(&composite)
+            .unwrap_or_else(|e| panic!("{path:?}: unlock: {e}"));
+
+        let saved = unlocked
+            .save_to_bytes()
+            .unwrap_or_else(|e| panic!("{path:?}: save_to_bytes: {e}"));
+
+        // Re-open the saved bytes and pull `meta.header_hash` out of
+        // the inner XML (the decoder stores it verbatim there).
+        let reopened = Kdbx::<Sealed>::open_from_bytes(saved)
+            .unwrap_or_else(|e| panic!("{path:?}: re-open: {e}"))
+            .read_header()
+            .unwrap_or_else(|e| panic!("{path:?}: re-read_header: {e}"));
+        let expected = BASE64.encode(Sha256::digest(reopened.header_bytes()));
+        let unlocked2 = reopened
+            .unlock(&composite)
+            .unwrap_or_else(|e| panic!("{path:?}: re-unlock: {e}"));
+
+        let stored = unlocked2.vault().meta.header_hash.as_str();
+        assert!(
+            !stored.is_empty(),
+            "{path:?}: KDBX3 save did not emit <Meta><HeaderHash>"
+        );
+        assert_eq!(
+            stored, expected,
+            "{path:?}: <Meta><HeaderHash> does not match SHA-256 of outer header bytes"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no KDBX3 writable fixtures exercised");
+}
