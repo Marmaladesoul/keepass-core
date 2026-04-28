@@ -25,10 +25,10 @@
 //!
 //! Still deferred to follow-up PRs:
 //!
-//! - Custom-data items, memory-protection block.
+//! - Memory-protection block.
 //!
-//! Those will land alongside their own round-trip assertions once
-//! the scaffolding is merged.
+//! That will land alongside its own round-trip assertion once the
+//! scaffolding is merged.
 //!
 //! [`decode_vault`]: crate::xml::decode_vault
 //! [`decode_vault_with_cipher`]: crate::xml::decode_vault_with_cipher
@@ -44,7 +44,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
-use crate::model::{AutoType, Binary, Entry, Group, Meta, UnknownElement, Vault};
+use crate::model::{AutoType, Binary, CustomDataItem, Entry, Group, Meta, UnknownElement, Vault};
 
 /// Encode a [`Vault`] into a byte-for-byte legal KeePass inner XML
 /// document, **without** applying an inner-stream cipher.
@@ -206,6 +206,9 @@ fn write_meta<W: std::io::Write>(
         // accepts both an absent and a present-but-empty element.
         write_binaries_pool(w, pool)?;
     }
+    if !meta.custom_data.is_empty() {
+        write_custom_data(w, &meta.custom_data)?;
+    }
     write_unknown_xml(w, &meta.unknown_xml)?;
     close(w, "Meta")
 }
@@ -268,6 +271,30 @@ fn write_custom_icons<W: std::io::Write>(
     close(w, "CustomIcons")
 }
 
+/// Emit `<CustomData>` with one `<Item>` child per
+/// [`CustomDataItem`] — the symmetric encoder for `read_custom_data`
+/// in the decoder.
+///
+/// KeePass stores plugin and client-specific settings as opaque
+/// key/value pairs here. We don't know what downstream plugins care
+/// about, so the round-trip preserves them verbatim, including
+/// `<LastModificationTime>` when present (KDBX4 writers stamp it;
+/// KDBX3 writers typically don't).
+fn write_custom_data<W: std::io::Write>(
+    w: &mut Writer<W>,
+    items: &[CustomDataItem],
+) -> Result<(), XmlError> {
+    open(w, "CustomData")?;
+    for item in items {
+        open(w, "Item")?;
+        write_text_element(w, "Key", &item.key)?;
+        write_text_element(w, "Value", &item.value)?;
+        write_optional_timestamp(w, "LastModificationTime", item.last_modified)?;
+        close(w, "Item")?;
+    }
+    close(w, "CustomData")
+}
+
 // ---------------------------------------------------------------------------
 // Group / Entry
 // ---------------------------------------------------------------------------
@@ -308,6 +335,9 @@ fn write_group<W: std::io::Write>(
     }
     if let Some(b) = group.enable_searching {
         write_text_element(w, "EnableSearching", if b { "True" } else { "False" })?;
+    }
+    if !group.custom_data.is_empty() {
+        write_custom_data(w, &group.custom_data)?;
     }
     if let Some(prev) = group.previous_parent_group {
         write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
@@ -389,6 +419,9 @@ fn write_entry<W: std::io::Write>(
     // entirely in that case for a more minimal document.
     if let Some(prev) = entry.previous_parent_group {
         write_text_element(w, "PreviousParentGroup", &uuid_to_base64(prev.0))?;
+    }
+    if !entry.custom_data.is_empty() {
+        write_custom_data(w, &entry.custom_data)?;
     }
     // AutoType — emit only when the block carries any non-default
     // setting. AutoType has no protected values, so its placement
@@ -900,6 +933,95 @@ mod tests {
         let e = got.iter_entries().next().unwrap();
         assert_eq!(e.title, "<tag> & \"quoted\"");
         assert_eq!(e.notes, "line with & ampersand < and > angle brackets");
+    }
+
+    #[test]
+    fn custom_data_round_trips_on_meta_group_and_entry() {
+        use crate::model::{CustomDataItem, Entry, EntryId, GroupId, Timestamps};
+        use chrono::TimeZone;
+
+        let stamp = chrono::Utc.with_ymd_and_hms(2026, 4, 21, 10, 0, 0).unwrap();
+
+        let entry = Entry {
+            id: EntryId(uuid::Uuid::from_u128(0xE001)),
+            title: "Has plugin data".to_owned(),
+            username: String::new(),
+            password: String::new(),
+            url: String::new(),
+            notes: String::new(),
+            custom_fields: Vec::new(),
+            tags: Vec::new(),
+            history: Vec::new(),
+            attachments: Vec::new(),
+            foreground_color: String::new(),
+            background_color: String::new(),
+            override_url: String::new(),
+            custom_icon_uuid: None,
+            custom_data: vec![CustomDataItem {
+                key: "plugin.entry.flag".to_owned(),
+                value: "on".to_owned(),
+                last_modified: Some(stamp),
+            }],
+            quality_check: true,
+            previous_parent_group: None,
+            auto_type: AutoType::default(),
+            times: Timestamps::default(),
+            icon_id: 0,
+            unknown_xml: Vec::new(),
+        };
+        let root = Group {
+            id: GroupId(uuid::Uuid::nil()),
+            name: "Root".to_owned(),
+            notes: String::new(),
+            groups: Vec::new(),
+            entries: vec![entry],
+            is_expanded: true,
+            default_auto_type_sequence: String::new(),
+            enable_auto_type: None,
+            enable_searching: None,
+            custom_data: vec![CustomDataItem {
+                key: "plugin.group.flag".to_owned(),
+                value: "enabled".to_owned(),
+                last_modified: None,
+            }],
+            previous_parent_group: None,
+            last_top_visible_entry: None,
+            custom_icon_uuid: None,
+            times: Timestamps::default(),
+            icon_id: 0,
+            unknown_xml: Vec::new(),
+        };
+        let vault = Vault {
+            root,
+            meta: Meta {
+                generator: "keepass-core-tests".to_owned(),
+                custom_data: vec![
+                    CustomDataItem {
+                        key: "KPXC_DECRYPTION_TIME_PREFERENCE".to_owned(),
+                        value: "1000".to_owned(),
+                        last_modified: Some(stamp),
+                    },
+                    CustomDataItem {
+                        key: "plugin.example.flag".to_owned(),
+                        value: "true".to_owned(),
+                        last_modified: None,
+                    },
+                ],
+                ..Meta::default()
+            },
+            binaries: Vec::new(),
+            deleted_objects: Vec::new(),
+        };
+
+        let got = round_trip(&vault);
+
+        assert_eq!(got.meta.custom_data, vault.meta.custom_data, "meta");
+        assert_eq!(got.root.custom_data, vault.root.custom_data, "group");
+        let entry = got.iter_entries().next().expect("one entry");
+        assert_eq!(
+            entry.custom_data, vault.root.entries[0].custom_data,
+            "entry"
+        );
     }
 
     #[test]
