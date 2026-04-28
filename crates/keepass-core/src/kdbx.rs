@@ -2484,6 +2484,7 @@ fn do_unlock(
                     binaries.push(Binary { data, protected });
                 }
                 let mut vault = decode_vault_with_cipher(&xml, &mut c)?;
+                reject_kdbx4_inner_xml_binaries_pool(&vault)?;
                 vault.binaries = binaries;
                 return Ok(Unlocked {
                     vault,
@@ -2537,6 +2538,28 @@ fn do_save(signature: FileSignature, version: Version, state: &Unlocked) -> Resu
         Version::V3 => do_save_v3(signature, state, &vault),
         Version::V4 => do_save_v4(signature, state, &vault),
     }
+}
+
+/// Reject a KDBX4 unlock when the inner XML carries
+/// `<Meta><Binaries>`.
+///
+/// KDBX4 puts attachment payloads in the inner header, not the
+/// XML — but the decoder is permissive enough to populate
+/// `vault.binaries` from a stray `<Binaries>` block. Letting that
+/// through would mean the inner-header pool silently overwrites
+/// the XML pool on the next line, and any entries the XML pool
+/// carried would just vanish. Surface the malformation explicitly
+/// so it's loud instead of lossy.
+///
+/// Defence-in-depth against the bug shape the audit was kicked off
+/// by — KDBX3 binary-pool clobber masked by a permissive test gate.
+fn reject_kdbx4_inner_xml_binaries_pool(vault: &Vault) -> Result<(), Error> {
+    if !vault.binaries.is_empty() {
+        return Err(Error::Format(FormatError::MalformedHeader(
+            "KDBX4 inner XML carries <Meta><Binaries>; binaries belong in the inner header on V4",
+        )));
+    }
+    Ok(())
 }
 
 fn do_save_v4(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Result<Vec<u8>, Error> {
