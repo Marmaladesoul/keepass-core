@@ -661,9 +661,25 @@ fn read_binary_kv<R: std::io::BufRead>(
                         }
                         "Value" => {
                             ref_id = parse_ref_attribute(&e)?;
-                            // Consume the (possibly non-empty) <Value>
-                            // body so the cursor ends up past </Value>.
-                            let _ = read_text(reader, buf)?;
+                            // Consume the <Value> body so the cursor
+                            // ends up past </Value>. Per the KeePass
+                            // spec the body is always empty for binary
+                            // KVs (the bytes live in the Meta/Binaries
+                            // pool on KDBX3 or the inner-header pool
+                            // on KDBX4, indexed by `Ref`). An exotic
+                            // writer that inlines bytes here without a
+                            // `Ref` attribute is unsupported — surface
+                            // it loudly rather than silently dropping
+                            // the payload.
+                            let body = read_text(reader, buf)?;
+                            if ref_id.is_none() && !body.trim().is_empty() {
+                                return Err(XmlError::InvalidValue {
+                                    element: "Value",
+                                    detail:
+                                        "binary <Value> with inline content but no Ref attribute"
+                                            .to_owned(),
+                                });
+                            }
                             continue;
                         }
                         _ => depth += 1,
@@ -3186,6 +3202,72 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn binary_with_inline_value_and_no_ref_is_rejected() {
+        // Per spec the bytes live in the binaries pool indexed by
+        // `Ref`. A writer that inlines the payload directly into
+        // `<Value>...</Value>` without a `Ref` attribute is exotic;
+        // surface the failure rather than silently dropping the
+        // payload.
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <Binary><Key>oops</Key><Value>aGVsbG8=</Value></Binary>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let err = decode_vault(xml).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                XmlError::InvalidValue {
+                    element: "Value",
+                    ..
+                }
+            ),
+            "expected InvalidValue, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn binary_with_whitespace_only_value_body_is_accepted() {
+        // Pretty-printed XML may emit `<Value Ref="0"> </Value>` with
+        // newline + indent inside. The trim guard accepts that as
+        // empty so we don't reject otherwise-valid documents.
+        let xml = br#"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <Binaries>
+      <Binary ID="0" Compressed="False">YWJj</Binary>
+    </Binaries>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <Binary><Key>file.txt</Key><Value Ref="0">
+        </Value></Binary>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>"#;
+        let vault = decode_vault(xml).unwrap();
+        let entry = vault.iter_entries().next().unwrap();
+        assert_eq!(entry.attachments.len(), 1);
+        assert_eq!(entry.attachments[0].name, "file.txt");
+        assert_eq!(entry.attachments[0].ref_id, 0);
     }
 
     // -----------------------------------------------------------------
