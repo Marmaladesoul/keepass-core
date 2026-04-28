@@ -31,6 +31,8 @@ use std::fs;
 use std::marker::PhantomData;
 use std::path::Path;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -55,7 +57,8 @@ use crate::model::{
 };
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{
-    decode_vault_with_cipher, encode_vault_kdbx3_with_cipher, encode_vault_with_cipher,
+    decode_vault_with_cipher, encode_vault_kdbx3_with_cipher_and_header_hash,
+    encode_vault_with_cipher,
 };
 
 // ---------------------------------------------------------------------------
@@ -2680,6 +2683,22 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
                 "KDBX3 save_to_bytes requires StreamStartBytes in the outer header",
             ))?;
 
+    // --- Build outer header bytes (signature + TLVs) ---------------------
+    // We compute these *before* the XML encode so the SHA-256 of the
+    // header bytes can be threaded into `<Meta><HeaderHash>` per the
+    // KeePass V3 spec. None of the header TLVs depend on XML content,
+    // so the order swap is safe.
+    let mut header_bytes = Vec::with_capacity(256);
+    header_bytes.extend_from_slice(&SIGNATURE_1);
+    header_bytes.extend_from_slice(&SIGNATURE_2);
+    header_bytes.extend_from_slice(&signature.minor.to_le_bytes());
+    header_bytes.extend_from_slice(&signature.major.to_le_bytes());
+    let tlv_bytes = header
+        .write()
+        .map_err(|_| FormatError::MalformedHeader("failed to write outer header"))?;
+    header_bytes.extend_from_slice(&tlv_bytes);
+    let header_hash_b64 = BASE64.encode(compute_header_hash(&header_bytes));
+
     // --- Inner-stream cipher + XML encode --------------------------------
     // KDBX3 has no inner header and no inner-header binaries pool — any
     // attachment bytes live inside the XML's <Binaries> section. The
@@ -2688,7 +2707,8 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
     // `vault.binaries`, so attachments survive the round-trip.
     let mut inner_cipher = InnerStreamCipher::new(inner_params.algorithm, &inner_params.key)
         .map_err(|_| CryptoError::Decrypt)?;
-    let xml_bytes = encode_vault_kdbx3_with_cipher(vault, &mut inner_cipher)?;
+    let xml_bytes =
+        encode_vault_kdbx3_with_cipher_and_header_hash(vault, &mut inner_cipher, &header_hash_b64)?;
 
     // --- Compress XML (if declared) --------------------------------------
     let compressed = compress(header.compression, &xml_bytes)
@@ -2708,19 +2728,11 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
     let ciphertext = aes_256_cbc_encrypt(&cipher_key, &header.encryption_iv, &plaintext)
         .map_err(|_| CryptoError::Decrypt)?;
 
-    // --- Build outer header bytes (signature + TLVs) ---------------------
-    let mut out = Vec::with_capacity(256 + ciphertext.len());
-    out.extend_from_slice(&SIGNATURE_1);
-    out.extend_from_slice(&SIGNATURE_2);
-    out.extend_from_slice(&signature.minor.to_le_bytes());
-    out.extend_from_slice(&signature.major.to_le_bytes());
-    let tlv_bytes = header
-        .write()
-        .map_err(|_| FormatError::MalformedHeader("failed to write outer header"))?;
-    out.extend_from_slice(&tlv_bytes);
-
-    // KDBX3 has no header hash or HMAC — the encrypted StreamStartBytes
-    // sentinel is the integrity check. Just append the ciphertext.
+    // KDBX3 has no header HMAC — the encrypted StreamStartBytes
+    // sentinel is the integrity check. Just append the ciphertext to
+    // the header bytes we built up front.
+    let mut out = Vec::with_capacity(header_bytes.len() + ciphertext.len());
+    out.extend_from_slice(&header_bytes);
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }

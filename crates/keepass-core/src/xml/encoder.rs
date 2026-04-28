@@ -86,7 +86,7 @@ pub fn encode_vault_with_cipher(
     vault: &Vault,
     cipher: &mut InnerStreamCipher,
 ) -> Result<Vec<u8>, XmlError> {
-    encode_vault_inner(vault, cipher, /* embed_binaries_pool */ false)
+    encode_vault_inner(vault, cipher, /* embed_binaries_pool */ false, None)
 }
 
 /// KDBX3-shaped encode: identical to [`encode_vault_with_cipher`] but
@@ -104,13 +104,43 @@ pub fn encode_vault_kdbx3_with_cipher(
     vault: &Vault,
     cipher: &mut InnerStreamCipher,
 ) -> Result<Vec<u8>, XmlError> {
-    encode_vault_inner(vault, cipher, /* embed_binaries_pool */ true)
+    encode_vault_inner(vault, cipher, /* embed_binaries_pool */ true, None)
+}
+
+/// KDBX3-shaped encode that also embeds a fresh `<Meta><HeaderHash>`
+/// element. Per the KeePass V3 spec, the inner XML carries the
+/// SHA-256 of the file's outer header as a belt-and-braces integrity
+/// check; classic readers verify it against the header bytes they
+/// just parsed.
+///
+/// `header_hash_b64` must be the base64-encoded 32-byte digest. The
+/// caller (typically `do_save_v3`) computes it over the
+/// signature + TLV bytes before invoking this function.
+///
+/// KDBX4 moves header integrity to a binary `header_hash` slot
+/// outside the XML, so this entry point is KDBX3-only.
+///
+/// # Errors
+///
+/// See [`encode_vault_with_cipher`].
+pub fn encode_vault_kdbx3_with_cipher_and_header_hash(
+    vault: &Vault,
+    cipher: &mut InnerStreamCipher,
+    header_hash_b64: &str,
+) -> Result<Vec<u8>, XmlError> {
+    encode_vault_inner(
+        vault,
+        cipher,
+        /* embed_binaries_pool */ true,
+        Some(header_hash_b64),
+    )
 }
 
 fn encode_vault_inner(
     vault: &Vault,
     cipher: &mut InnerStreamCipher,
     embed_binaries_pool: bool,
+    header_hash_override: Option<&str>,
 ) -> Result<Vec<u8>, XmlError> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     writer
@@ -126,7 +156,7 @@ fn encode_vault_inner(
     } else {
         None
     };
-    write_meta(&mut writer, &vault.meta, pool)?;
+    write_meta(&mut writer, &vault.meta, pool, header_hash_override)?;
     open(&mut writer, "Root")?;
     write_group(&mut writer, &vault.root, cipher)?;
     if !vault.deleted_objects.is_empty() {
@@ -145,9 +175,22 @@ fn write_meta<W: std::io::Write>(
     w: &mut Writer<W>,
     meta: &Meta,
     binaries_pool: Option<&[Binary]>,
+    header_hash_override: Option<&str>,
 ) -> Result<(), XmlError> {
     open(w, "Meta")?;
     write_text_element(w, "Generator", &meta.generator)?;
+    // `<HeaderHash>` is a KDBX3-only spec field. Prefer the
+    // freshly-computed override (passed by the V3 save path); fall
+    // back to whatever the decoder stored, so a decode → encode
+    // round-trip on a KDBX3 file via `encode_vault_with_cipher`
+    // preserves the original hash verbatim. KDBX4 paths leave
+    // `meta.header_hash` empty and pass `None`, so nothing is
+    // emitted there.
+    if let Some(hash) = header_hash_override {
+        write_text_element(w, "HeaderHash", hash)?;
+    } else if !meta.header_hash.is_empty() {
+        write_text_element(w, "HeaderHash", &meta.header_hash)?;
+    }
     write_optional_text_element(w, "DatabaseName", &meta.database_name)?;
     write_optional_timestamp(w, "DatabaseNameChanged", meta.database_name_changed)?;
     write_optional_text_element(w, "DatabaseDescription", &meta.database_description)?;
