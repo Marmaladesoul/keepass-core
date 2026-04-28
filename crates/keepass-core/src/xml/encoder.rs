@@ -361,6 +361,9 @@ fn write_group<W: std::io::Write>(
     if let Some(b) = group.enable_searching {
         write_text_element(w, "EnableSearching", if b { "True" } else { "False" })?;
     }
+    if let Some(top) = group.last_top_visible_entry {
+        write_text_element(w, "LastTopVisibleEntry", &uuid_to_base64(top.0))?;
+    }
     if !group.custom_data.is_empty() {
         write_custom_data(w, &group.custom_data)?;
     }
@@ -958,6 +961,78 @@ mod tests {
         let e = got.iter_entries().next().unwrap();
         assert_eq!(e.title, "<tag> & \"quoted\"");
         assert_eq!(e.notes, "line with & ampersand < and > angle brackets");
+    }
+
+    #[test]
+    fn last_top_visible_entry_round_trips_when_set() {
+        use crate::model::{EntryId, GroupId, Timestamps};
+
+        let top = EntryId(uuid::Uuid::from_u128(
+            0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF,
+        ));
+        let root = Group {
+            id: GroupId(uuid::Uuid::nil()),
+            name: "Root".to_owned(),
+            notes: String::new(),
+            groups: Vec::new(),
+            entries: Vec::new(),
+            is_expanded: true,
+            default_auto_type_sequence: String::new(),
+            enable_auto_type: None,
+            enable_searching: None,
+            custom_data: Vec::new(),
+            previous_parent_group: None,
+            last_top_visible_entry: Some(top),
+            custom_icon_uuid: None,
+            times: Timestamps::default(),
+            icon_id: 0,
+            unknown_xml: Vec::new(),
+        };
+        let vault = Vault {
+            root,
+            meta: Meta::default(),
+            binaries: Vec::new(),
+            deleted_objects: Vec::new(),
+        };
+
+        let got = round_trip(&vault);
+        assert_eq!(got.root.last_top_visible_entry, Some(top));
+    }
+
+    #[test]
+    fn last_top_visible_entry_round_trips_when_absent() {
+        // Elision when None must round-trip to None — proves we don't
+        // accidentally emit an empty/nil-UUID element that would
+        // resurrect as a stray `Some(nil)`.
+        use crate::model::{GroupId, Timestamps};
+
+        let root = Group {
+            id: GroupId(uuid::Uuid::nil()),
+            name: "Root".to_owned(),
+            notes: String::new(),
+            groups: Vec::new(),
+            entries: Vec::new(),
+            is_expanded: true,
+            default_auto_type_sequence: String::new(),
+            enable_auto_type: None,
+            enable_searching: None,
+            custom_data: Vec::new(),
+            previous_parent_group: None,
+            last_top_visible_entry: None,
+            custom_icon_uuid: None,
+            times: Timestamps::default(),
+            icon_id: 0,
+            unknown_xml: Vec::new(),
+        };
+        let vault = Vault {
+            root,
+            meta: Meta::default(),
+            binaries: Vec::new(),
+            deleted_objects: Vec::new(),
+        };
+
+        let got = round_trip(&vault);
+        assert_eq!(got.root.last_top_visible_entry, None);
     }
 
     #[test]
