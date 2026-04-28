@@ -128,15 +128,23 @@ fn check_entry_against_sidecar(
         // declares attachments with sidecar-side sha256s, that's a
         // bug — fail loudly rather than silently skip.
         for expected_att in atts {
-            let Some(filename) = expected_att.get("filename").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(expected_sha) = expected_att.get("sha256").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(att) = actual.attachments.iter().find(|a| a.name == filename) else {
-                continue;
-            };
+            let filename = expected_att
+                .get("filename")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!("sidecar attachment entry missing `filename`: {expected_att}")
+                })?;
+            let expected_sha = expected_att
+                .get("sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("sidecar attachment {filename:?} missing `sha256`"))?;
+            let att = actual
+                .attachments
+                .iter()
+                .find(|a| a.name == filename)
+                .ok_or_else(|| {
+                    format!("entry {:?} missing attachment {filename:?}", actual.title)
+                })?;
             let Some(bin) = vault.binaries.get(att.ref_id as usize) else {
                 return Err(format!(
                     "attachment {filename:?} Ref={} out of pool bounds ({} binaries)",
@@ -190,9 +198,13 @@ fn unlock_one(path: &Path) -> Result<(), String> {
     let unlocked = match kdbx.unlock(&composite) {
         Ok(u) => u,
         Err(e) => {
+            // Twofish-CBC is the only outer cipher we deliberately reject;
+            // match its exact error message rather than a loose substring,
+            // so a regression in any *supported* cipher (AES-256-CBC,
+            // ChaCha20) surfaces loudly instead of being skipped.
             let msg = format!("{e}");
-            if msg.contains("ChaCha20") || msg.contains("Twofish") {
-                return Ok(()); // unsupported cipher — skip silently
+            if msg.contains("Twofish-CBC is not yet supported") {
+                return Ok(());
             }
             return Err(format!("unlock: {e}"));
         }
