@@ -42,7 +42,7 @@ salsa20  = "0.10"                   # inner-stream cipher for KDBX3 protected XM
 flate2 = "1"                        # gzip decompression (both KDBX3 and KDBX4 payloads)
 
 # Parsing.
-quick-xml = "0.36"                  # streaming XML reader for KeePass inner document
+quick-xml = "0.39"                  # streaming XML reader for KeePass inner document
 winnow    = "1.0"                   # binary header TLVs
 
 # Timestamps. `clock` enables `Utc::now()` via platform wall-clock
