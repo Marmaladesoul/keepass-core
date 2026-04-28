@@ -1498,10 +1498,12 @@ impl Kdbx<Unlocked> {
     // -----------------------------------------------------------------
     //
     // Each setter writes the requested field on `vault.meta` and
-    // stamps `meta.settings_changed = clock.now()`. The library never
-    // touches the per-field `*Changed` timestamps (e.g.
-    // `database_name_changed`) — those are KeePass's own field-level
-    // history and are out of scope for this slice.
+    // stamps `meta.settings_changed = clock.now()`. The high-level
+    // setter API deliberately does not auto-stamp the per-field
+    // `*Changed` timestamps (`database_name_changed` and friends) —
+    // those are KeePass's own field-level edit-history hooks and are
+    // left for the caller to manage. Encoder and decoder still
+    // round-trip them faithfully when set in-model.
 
     /// Set the user-visible vault name.
     pub fn set_database_name(&mut self, name: impl Into<String>) {
