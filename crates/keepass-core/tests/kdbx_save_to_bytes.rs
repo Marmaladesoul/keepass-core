@@ -6,25 +6,19 @@
 //! 1. Open, read header, derive composite key, unlock.
 //! 2. Call `save_to_bytes` to re-encrypt the vault as fresh KDBX bytes.
 //! 3. Open those bytes fresh, unlock with the same composite key, and
-//!    assert the round-tripped vault equals the original on every
-//!    field the XML encoder covers.
+//!    assert the round-tripped [`Vault`] equals the original.
 //!
 //! Twofish fixtures are skipped — `save_to_bytes` rejects them with a
 //! typed error for now.
 //!
 //! ## Scope of the equality assertion
 //!
-//! We do **not** assert full `Vault` equality. The XML encoder still
-//! does not write the custom-data items pool or the memory-protection
-//! block, so those fields are excluded from [`PreservedSubset`].
-//! Everything else the encoder emits — entry/group core fields,
-//! timestamps, history, tags, custom fields, decorative fields, the
-//! custom-icon pool, the KDBX3 binaries pool, attachment payload
-//! bytes — is asserted via the subset.
-//!
-//! As the encoder grows coverage in follow-up PRs, add the new fields
-//! to [`PreservedSubset`]. When the subset equals `Vault`, replace
-//! the helper with direct equality.
+//! Full `Vault` equality, with one principled exclusion:
+//! `meta.header_hash` is recomputed on every KDBX3 save against the
+//! file's own outer header bytes, so a re-saved file legitimately
+//! carries a different hash than the original. The dedicated
+//! [`kdbx3_save_emits_a_correct_header_hash`] test validates that the
+//! emitted hash actually matches the header it was written with.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,100 +26,8 @@ use std::path::{Path, PathBuf};
 use keepass_core::CompositeKey;
 use keepass_core::format::{FileSignature, KnownCipher, Version};
 use keepass_core::kdbx::{Kdbx, Sealed};
-use keepass_core::model::Vault;
 use keepass_core::secret::keyfile_hash;
 use serde_json::Value;
-
-/// The subset of a [`Vault`] that the current XML encoder round-trips
-/// losslessly. When the encoder's coverage catches up with the
-/// decoder, this can be retired.
-#[derive(Debug, PartialEq, Eq)]
-struct PreservedSubset {
-    generator: String,
-    database_name: String,
-    entry_count: usize,
-    entries: Vec<PreservedEntry>,
-    /// Sorted `(icon_uuid, sha256_of_bytes)` pairs — one per custom
-    /// icon in the pool. Represents icons as `[u8; 32]` hashes rather
-    /// than raw bytes so assertions surface a diff-sized `PartialEq`
-    /// failure at a glance. Added as part of slice 5 (custom-icon
-    /// pool); automatically guards every future fixture that carries
-    /// icons.
-    custom_icons: Vec<(uuid::Uuid, [u8; 32])>,
-    /// Sorted `(filename, sha256_of_bytes)` pairs across every entry's
-    /// attachments. Resolves each `Attachment.ref_id` through
-    /// [`Vault::binaries`] and hashes the resulting payload, so a
-    /// regression that drops the binaries pool on save (KDBX3) — or
-    /// shuffles the inner-header pool ordering (KDBX4) — surfaces as a
-    /// diff here rather than slipping through.
-    attachments: Vec<(String, [u8; 32])>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct PreservedEntry {
-    title: String,
-    username: String,
-    password: String,
-    url: String,
-    notes: String,
-    tags: Vec<String>,
-    custom_fields: Vec<(String, String, bool)>,
-}
-
-fn preserved(v: &Vault) -> PreservedSubset {
-    use sha2::{Digest as _, Sha256};
-    let mut custom_icons: Vec<(uuid::Uuid, [u8; 32])> = v
-        .meta
-        .custom_icons
-        .iter()
-        .map(|c| {
-            let hash: [u8; 32] = Sha256::digest(&c.data).into();
-            (c.uuid, hash)
-        })
-        .collect();
-    custom_icons.sort_by_key(|(uuid, _)| *uuid);
-    let mut attachments: Vec<(String, [u8; 32])> = v
-        .iter_entries()
-        .flat_map(|e| e.attachments.iter())
-        .filter_map(|att| {
-            let bin = v.binaries.get(att.ref_id as usize)?;
-            let hash: [u8; 32] = Sha256::digest(&bin.data).into();
-            Some((att.name.clone(), hash))
-        })
-        .collect();
-    attachments.sort();
-    PreservedSubset {
-        generator: v.meta.generator.clone(),
-        database_name: v.meta.database_name.clone(),
-        entry_count: v.total_entries(),
-        entries: v
-            .iter_entries()
-            .map(|e| PreservedEntry {
-                title: e.title.clone(),
-                username: e.username.clone(),
-                password: e.password.clone(),
-                url: e.url.clone(),
-                notes: e.notes.clone(),
-                tags: {
-                    let mut t = e.tags.clone();
-                    t.sort();
-                    t
-                },
-                custom_fields: {
-                    let mut cfs: Vec<_> = e
-                        .custom_fields
-                        .iter()
-                        .map(|c| (c.key.clone(), c.value.clone(), c.protected))
-                        .collect();
-                    cfs.sort();
-                    cfs
-                },
-            })
-            .collect(),
-        custom_icons,
-        attachments,
-    }
-}
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -259,11 +161,24 @@ fn every_writable_fixture_round_trips_save_to_bytes() {
             .unwrap_or_else(|e| panic!("{path:?}: re-unlock: {e}"));
         let vault2 = unlocked2.vault();
 
-        assert_eq!(
-            preserved(&vault1),
-            preserved(vault2),
-            "{path:?}: round-tripped vault differs from original (in the encoder-covered subset)"
-        );
+        // Full `Vault` equality, with `meta.header_hash` cleared on
+        // both sides — see the module doc-comment for the rationale.
+        let mut v1 = vault1.clone();
+        let mut v2 = vault2.clone();
+        v1.meta.header_hash.clear();
+        v2.meta.header_hash.clear();
+        if v1 != v2 {
+            // Identify which sub-tree differs so the failure is
+            // legible.
+            assert_eq!(v1.meta, v2.meta, "{path:?}: meta differs");
+            assert_eq!(v1.root, v2.root, "{path:?}: root group differs");
+            assert_eq!(v1.binaries, v2.binaries, "{path:?}: binaries differ");
+            assert_eq!(
+                v1.deleted_objects, v2.deleted_objects,
+                "{path:?}: deleted_objects differ"
+            );
+            panic!("{path:?}: round-tripped vault differs in some other field");
+        }
     }
 
     assert!(saw_v3, "no KDBX3 fixtures exercised under {root:?}");
