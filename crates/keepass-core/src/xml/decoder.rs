@@ -315,9 +315,18 @@ fn read_group<R: std::io::BufRead>(
             // empty-element shorthand for a content-free field. Nested
             // `Empty` events (depth > 0) are unreachable in practice:
             // unknown subtrees are drained by `capture_unknown_subtree`.
+            //
+            // Typed children that appear self-closing (e.g.
+            // `<CustomData/>`) are absorbed as no-ops — the typed slot
+            // is already at its empty default. Routing them here would
+            // duplicate emission on save: the typed encoder writes one
+            // element, `write_unknown_xml` re-emits the captured stub.
             Ok(Event::Empty(e)) if depth == 0 => {
-                let unknown = capture_unknown_empty(e)?;
-                group.unknown_xml.push(unknown);
+                let name = tag_name(&e)?;
+                if name != "CustomData" {
+                    let unknown = capture_unknown_empty(e)?;
+                    group.unknown_xml.push(unknown);
+                }
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -490,8 +499,11 @@ fn read_entry<R: std::io::BufRead>(
             // `<Value>` payload, so the inner-stream keystream is
             // unaffected.
             Ok(Event::Empty(e)) if depth == 0 => {
-                let unknown = capture_unknown_empty(e)?;
-                entry.unknown_xml.push(unknown);
+                let name = tag_name(&e)?;
+                if name != "CustomData" {
+                    let unknown = capture_unknown_empty(e)?;
+                    entry.unknown_xml.push(unknown);
+                }
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -1063,10 +1075,21 @@ fn read_meta<R: std::io::BufRead>(
                 depth += 1;
             }
             // Self-closing unknown child at top level — see the matching
-            // comment in `read_group`.
+            // comment in `read_group`. The four nested-structured
+            // typed children (`<Binaries/>`, `<MemoryProtection/>`,
+            // `<CustomData/>`, `<CustomIcons/>`) are absorbed as
+            // no-ops here, so they don't shadow-emit from
+            // `unknown_xml` after the typed encoder has already
+            // written the (still-empty) element.
             Ok(Event::Empty(e)) if depth == 0 => {
-                let unknown = capture_unknown_empty(e)?;
-                meta.unknown_xml.push(unknown);
+                let name = tag_name(&e)?;
+                if !matches!(
+                    name.as_str(),
+                    "Binaries" | "MemoryProtection" | "CustomData" | "CustomIcons"
+                ) {
+                    let unknown = capture_unknown_empty(e)?;
+                    meta.unknown_xml.push(unknown);
+                }
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -3372,6 +3395,86 @@ mod tests {
     fn missing_custom_data_is_empty() {
         let vault = decode_vault(sample_xml()).unwrap();
         assert!(vault.meta.custom_data.is_empty());
+    }
+
+    #[test]
+    fn self_closing_typed_meta_children_dont_leak_into_unknown_xml() {
+        // KeePassXC writes `<CustomIcons/>` self-closing on a fresh
+        // vault. The other three nested-typed Meta children
+        // (`<Binaries/>`, `<MemoryProtection/>`, `<CustomData/>`) are
+        // hypothetical today but defensible by symmetry — the bug
+        // class is "typed and unknown_xml both claim ownership of one
+        // element name." Routing the empty form to typed (no-op,
+        // since the typed slot is already at its empty default) keeps
+        // `unknown_xml` from shadow-emitting a stale stub on save.
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <Binaries/>
+    <CustomIcons/>
+    <CustomData/>
+    <MemoryProtection/>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert!(vault.meta.custom_data.is_empty());
+        assert!(vault.meta.custom_icons.is_empty());
+        assert!(vault.binaries.is_empty());
+        assert_eq!(vault.meta.memory_protection, MemoryProtection::default());
+        // None of the four typed elements should appear as unknown
+        // children — that's exactly the duplicate-emission risk this
+        // routing fix prevents.
+        for el in &vault.meta.unknown_xml {
+            assert!(
+                !matches!(
+                    el.tag.as_str(),
+                    "Binaries" | "CustomIcons" | "CustomData" | "MemoryProtection"
+                ),
+                "self-closing typed element leaked into unknown_xml: {:?}",
+                el.tag
+            );
+        }
+    }
+
+    #[test]
+    fn self_closing_custom_data_on_group_and_entry_dont_leak_into_unknown_xml() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+      <CustomData/>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <CustomData/>
+        <String><Key>Title</Key><Value>e</Value></String>
+      </Entry>
+    </Group>
+  </Root>
+</KeePassFile>";
+        let vault = decode_vault(xml).unwrap();
+        assert!(vault.root.custom_data.is_empty());
+        assert!(
+            !vault
+                .root
+                .unknown_xml
+                .iter()
+                .any(|el| el.tag == "CustomData"),
+            "self-closing <CustomData/> leaked into Group.unknown_xml"
+        );
+        let entry = vault.iter_entries().next().unwrap();
+        assert!(entry.custom_data.is_empty());
+        assert!(
+            !entry.unknown_xml.iter().any(|el| el.tag == "CustomData"),
+            "self-closing <CustomData/> leaked into Entry.unknown_xml"
+        );
     }
 
     #[test]
