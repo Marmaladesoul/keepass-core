@@ -23,12 +23,7 @@
 //! deleted objects, decorative entry/group fields, KDBX3 binaries
 //! pool, and unknown-XML preservation are all emitted today.
 //!
-//! Still deferred to follow-up PRs:
-//!
-//! - Memory-protection block.
-//!
-//! That will land alongside its own round-trip assertion once the
-//! scaffolding is merged.
+//! All in-model Meta children round-trip through the encoder today.
 //!
 //! [`decode_vault`]: crate::xml::decode_vault
 //! [`decode_vault_with_cipher`]: crate::xml::decode_vault_with_cipher
@@ -44,7 +39,9 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
 use super::reader::XmlError;
 use crate::crypto::InnerStreamCipher;
-use crate::model::{AutoType, Binary, CustomDataItem, Entry, Group, Meta, UnknownElement, Vault};
+use crate::model::{
+    AutoType, Binary, CustomDataItem, Entry, Group, MemoryProtection, Meta, UnknownElement, Vault,
+};
 
 /// Encode a [`Vault`] into a byte-for-byte legal KeePass inner XML
 /// document, **without** applying an inner-stream cipher.
@@ -196,6 +193,7 @@ fn write_meta<W: std::io::Write>(
     )?;
     write_text_element(w, "HistoryMaxItems", &meta.history_max_items.to_string())?;
     write_text_element(w, "HistoryMaxSize", &meta.history_max_size.to_string())?;
+    write_memory_protection(w, meta.memory_protection)?;
     if !meta.custom_icons.is_empty() {
         write_custom_icons(w, &meta.custom_icons)?;
     }
@@ -269,6 +267,33 @@ fn write_custom_icons<W: std::io::Write>(
         close(w, "Icon")?;
     }
     close(w, "CustomIcons")
+}
+
+/// Emit `<MemoryProtection>` with the five canonical `<Protect*>`
+/// flags — the symmetric encoder for `read_memory_protection` in
+/// the decoder.
+///
+/// All five children are always emitted, in spec order, mirroring
+/// KeePassXC's own writer. Eliding the block when the struct is
+/// at default would still round-trip logically (the decoder fills
+/// missing flags from `MemoryProtection::default`), but byte-shape
+/// compatibility with KPXC-written fixtures matters more here than
+/// document minimality.
+fn write_memory_protection<W: std::io::Write>(
+    w: &mut Writer<W>,
+    mp: MemoryProtection,
+) -> Result<(), XmlError> {
+    open(w, "MemoryProtection")?;
+    write_text_element(w, "ProtectTitle", bool_text(mp.protect_title))?;
+    write_text_element(w, "ProtectUserName", bool_text(mp.protect_username))?;
+    write_text_element(w, "ProtectPassword", bool_text(mp.protect_password))?;
+    write_text_element(w, "ProtectURL", bool_text(mp.protect_url))?;
+    write_text_element(w, "ProtectNotes", bool_text(mp.protect_notes))?;
+    close(w, "MemoryProtection")
+}
+
+fn bool_text(b: bool) -> &'static str {
+    if b { "True" } else { "False" }
 }
 
 /// Emit `<CustomData>` with one `<Item>` child per
@@ -933,6 +958,88 @@ mod tests {
         let e = got.iter_entries().next().unwrap();
         assert_eq!(e.title, "<tag> & \"quoted\"");
         assert_eq!(e.notes, "line with & ampersand < and > angle brackets");
+    }
+
+    #[test]
+    fn memory_protection_round_trips_with_non_default_flags() {
+        use crate::model::{GroupId, MemoryProtection, Timestamps};
+
+        let root = Group {
+            id: GroupId(uuid::Uuid::nil()),
+            name: "Root".to_owned(),
+            notes: String::new(),
+            groups: Vec::new(),
+            entries: Vec::new(),
+            is_expanded: true,
+            default_auto_type_sequence: String::new(),
+            enable_auto_type: None,
+            enable_searching: None,
+            custom_data: Vec::new(),
+            previous_parent_group: None,
+            last_top_visible_entry: None,
+            custom_icon_uuid: None,
+            times: Timestamps::default(),
+            icon_id: 0,
+            unknown_xml: Vec::new(),
+        };
+        // Flip every flag away from its default so a regression that
+        // resets one field would be caught by the equality assertion.
+        let mp = MemoryProtection {
+            protect_title: true,
+            protect_username: true,
+            protect_password: false,
+            protect_url: true,
+            protect_notes: true,
+        };
+        let vault = Vault {
+            root,
+            meta: Meta {
+                generator: "keepass-core-tests".to_owned(),
+                memory_protection: mp,
+                ..Meta::default()
+            },
+            binaries: Vec::new(),
+            deleted_objects: Vec::new(),
+        };
+
+        let got = round_trip(&vault);
+        assert_eq!(got.meta.memory_protection, mp);
+    }
+
+    #[test]
+    fn memory_protection_round_trips_at_defaults() {
+        use crate::model::{GroupId, MemoryProtection, Timestamps};
+
+        let root = Group {
+            id: GroupId(uuid::Uuid::nil()),
+            name: "Root".to_owned(),
+            notes: String::new(),
+            groups: Vec::new(),
+            entries: Vec::new(),
+            is_expanded: true,
+            default_auto_type_sequence: String::new(),
+            enable_auto_type: None,
+            enable_searching: None,
+            custom_data: Vec::new(),
+            previous_parent_group: None,
+            last_top_visible_entry: None,
+            custom_icon_uuid: None,
+            times: Timestamps::default(),
+            icon_id: 0,
+            unknown_xml: Vec::new(),
+        };
+        let vault = Vault {
+            root,
+            meta: Meta::default(),
+            binaries: Vec::new(),
+            deleted_objects: Vec::new(),
+        };
+
+        let got = round_trip(&vault);
+        // Defaults must survive an explicit emit-then-parse cycle —
+        // proves the always-emit policy doesn't accidentally encode
+        // a flag with the wrong polarity.
+        assert_eq!(got.meta.memory_protection, MemoryProtection::default());
     }
 
     #[test]
