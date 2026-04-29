@@ -4,6 +4,13 @@ Read this before touching anything that edits a `Vault`. This is the
 design contract: every mutation PR must uphold the invariants here, in
 the API shape here.
 
+> **Phase 1 closed 2026-04-25.** The original 9-slice rollout plan
+> shipped in PRs #74–#80 and has been archived to
+> [`_project-management/complete/keepass-core/MUTATION-slicing-history.md`](../../_project-management/complete/keepass-core/MUTATION-slicing-history.md).
+> The contract sections below (invariants, clock injection, history
+> policy, ownership model, error enum, API sketch) remain
+> load-bearing reference for any new mutation code.
+
 ## Goals
 
 1. **Impossible to violate bookkeeping invariants by accident.** The
@@ -322,36 +329,6 @@ pub enum CustomFieldValue {
 - Schema migration (KDBX3 → KDBX4 on save). Lives elsewhere.
 - Write-path concurrency. `&mut self` is the sync boundary; if
   multi-threaded access is ever needed, that's an outer wrapper.
-
-## Slicing plan
-
-One PR per bullet. Each ships with an integration test that opens a
-fixture, applies the mutation, saves, re-opens, and asserts the
-result.
-
-1. **`ModelError`; `Clock` trait + `SystemClock` + `FixedClock`;
-   `Kdbx<Unlocked>` gains a clock field; `unlock_with_clock`.** No
-   behaviour change yet, just the plumbing.
-2. **`NewEntry` builder + `Kdbx::add_entry` / `delete_entry`.**
-   Minimum viable mutation.
-3. **`move_entry`** — adds the `previous_parent_group` bookkeeping.
-4. **`HistoryPolicy` enum + `Kdbx::edit_entry` + `EntryEditor`
-   with canonical-field setters only** (Title / UserName / Password
-   / URL / Notes). History snapshot logic lives in this PR.
-5. **`EntryEditor` extended to cover custom fields, tags, colours,
-   override URL, custom icon, quality check, expiry.**
-6. **`EntryEditor::attach` / `detach`** with pool-management: new
-   binaries are appended to `vault.binaries`; detaches are
-   refcount-aware so a binary shared across entries isn't removed
-   until the last reference goes.
-7. **`NewGroup` + `add_group` / `delete_group` / `move_group` /
-   `edit_group` / `GroupEditor`.**
-8. **Meta setters** (database name, description, default username,
-   colour, recycle bin, icon pool management).
-9. **`Kdbx::rekey`.**
-
-Each PR follows `AGENTS.md`: CI-green, round-trip test against a
-real fixture, one concept.
 
 ## Story-test (the shape check)
 
