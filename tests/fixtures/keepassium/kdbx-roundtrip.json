@@ -1,0 +1,91 @@
+{
+  "database_name": "Passwords",
+  "description": "Round-trip fixture: keepassxc/kdbx3-basic.kdbx opened in KeePassium.app and saved. Captures KeePassium's on-disk output shape — Generator string, KDF parameters, and any unknown elements it adds. KeePassium preserves KDBX3 format on save (does not auto-upgrade to KDBX4).",
+  "entries": [
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Personal",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Acme Banking",
+      "url": "https://bank.acme.example",
+      "username": "dave@example.net"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Personal",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Acme Cloud",
+      "url": "https://cloud.acme.example",
+      "username": "eve@example.net"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Personal",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Tailspin Toys",
+      "url": "https://toys.tailspin.example",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Work",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Adventure Works",
+      "url": "https://adventure-works.example",
+      "username": "charlie@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Work",
+      "notes": "Primary work email.",
+      "password_length": 12,
+      "tags": [],
+      "title": "Contoso Mail",
+      "url": "https://mail.contoso.example",
+      "username": "alice@example.com"
+    },
+    {
+      "attachment_count": 0,
+      "attachments": [],
+      "custom_field_count": 0,
+      "group": "/Work",
+      "notes": "",
+      "password_length": 12,
+      "tags": [],
+      "title": "Fabrikam VPN",
+      "url": "https://vpn.fabrikam.example",
+      "username": "bob@example.org"
+    }
+  ],
+  "entry_count": 6,
+  "format": "KDBX3",
+  "generated_by": "manual: opened keepassxc/kdbx3-basic.kdbx in KeePassium.app and saved",
+  "generator": "KeePassium",
+  "group_count": 3,
+  "group_paths": [
+    "Personal",
+    "Work"
+  ],
+  "key_file": null,
+  "master_password": "test-basic-002",
+  "source": "keepassium-app",
+  "source_seed": "keepassxc/kdbx3-basic.kdbx"
+}
