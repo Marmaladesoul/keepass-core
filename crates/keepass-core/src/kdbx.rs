@@ -276,8 +276,8 @@ impl Kdbx<HeaderRead> {
     ///    against the caller's key.
     /// 4. Assemble the ciphertext — from the HMAC-block stream (KDBX4)
     ///    or directly from the raw payload (KDBX3).
-    /// 5. Decrypt with the outer cipher (currently AES-256-CBC only;
-    ///    ChaCha20 and Twofish-CBC land in follow-up PRs).
+    /// 5. Decrypt with the outer cipher (AES-256-CBC and ChaCha20 are
+    ///    supported; Twofish-CBC is rejected with an explicit error).
     /// 6. KDBX3: verify the 32-byte stream-start-bytes sentinel and
     ///    reassemble the hashed-block stream.
     /// 7. Decompress if the header declared gzip.
