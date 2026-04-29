@@ -2467,25 +2467,27 @@ fn do_unlock(
                 let inner = InnerHeader::parse(&decompressed)
                     .map_err(|_| FormatError::MalformedHeader("malformed inner header"))?;
                 let xml = decompressed[inner.consumed_bytes..].to_vec();
-                // Inner-stream cipher is shared between inner-header
-                // binaries and XML protected values: binaries consume
-                // keystream first (in inner-header order), then XML
-                // values pick up where they left off. We build the
-                // cipher here so that we can pre-decrypt the protected
-                // binaries, then hand the (advanced) cipher on to the
-                // XML decoder.
-                let mut c =
+                // The inner-stream cipher is reserved for XML
+                // `<Value Protected="True">` payloads. KDBX4 inner-header
+                // binaries are *not* part of the keystream — they ride on
+                // disk as plaintext, with their per-binary flag byte (`0x01`
+                // for "protected") acting only as an in-memory hint to
+                // downstream consumers. Earlier revisions of this loop
+                // mistakenly XOR-ed the binaries' bytes through the cipher,
+                // which both corrupted the attachment payloads and shifted
+                // the keystream offset for every subsequent protected XML
+                // value. See kdbxweb's `readBinary` and KeePassXC's
+                // `Kdbx4Reader::readInnerHeaderField` for the same
+                // convention.
+                let mut cipher =
                     InnerStreamCipher::new(inner.inner_stream_algorithm, &inner.inner_stream_key)
                         .map_err(|_| CryptoError::Decrypt)?;
                 for inner_bin in inner.binaries {
                     let protected = inner_bin.is_protected();
-                    let mut data = inner_bin.data;
-                    if protected {
-                        c.process(&mut data);
-                    }
+                    let data = inner_bin.data;
                     binaries.push(Binary { data, protected });
                 }
-                let mut vault = decode_vault_with_cipher(&xml, &mut c)?;
+                let mut vault = decode_vault_with_cipher(&xml, &mut cipher)?;
                 reject_kdbx4_inner_xml_binaries_pool(&vault)?;
                 vault.binaries = binaries;
                 return Ok(Unlocked {
@@ -2598,13 +2600,17 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
     let mut inner_binaries: Vec<InnerBinary> = Vec::with_capacity(vault.binaries.len());
     for b in &vault.binaries {
         let flags: u8 = u8::from(b.protected);
-        let mut data = b.data.clone();
-        if b.protected {
-            // Stream cipher: XOR in the same keystream direction to
-            // re-encrypt. The cipher advances by `data.len()` bytes.
-            inner_cipher.process(&mut data);
-        }
-        inner_binaries.push(InnerBinary { flags, data });
+        // KDBX4 inner-header binaries are written as plaintext on disk;
+        // the `protected` flag is an in-memory hint for consumers, not
+        // an instruction to XOR with the inner-stream keystream. The
+        // inner-stream cipher is reserved exclusively for XML
+        // `<Value Protected="True">` payloads — see kdbxweb's
+        // `readBinary`/`writeBinary` and KeePassXC's `Kdbx4Reader`/
+        // `Kdbx4Writer` for the same convention.
+        inner_binaries.push(InnerBinary {
+            flags,
+            data: b.data.clone(),
+        });
     }
 
     let inner_header = InnerHeader {
@@ -2617,7 +2623,10 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
         .write()
         .map_err(|_| FormatError::MalformedHeader("failed to write inner header"))?;
 
-    // --- XML encode with the same cipher (now advanced past binaries) ----
+    // --- XML encode with the inner-stream cipher ------------------------
+    // Inner-header binaries above did not advance the cipher (they ride as
+    // plaintext on disk), so the keystream starts at offset 0 here — the
+    // same offset the reader will see for the first protected `<Value>`.
     let xml_bytes = encode_vault_with_cipher(vault, &mut inner_cipher)?;
 
     // --- Decompressed plaintext = inner header || XML --------------------
