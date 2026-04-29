@@ -1,0 +1,17 @@
+{
+  "description": "One entry whose `<LastModificationTime>` element is empty (written via lxml after pykeepass save). Regression guard for the optional-timestamp decoder accepting empty elements as None instead of erroring with 'premature end of input'.",
+  "entries": [
+    {
+      "password_length": 16,
+      "title": "Contoso Mail",
+      "url": "https://mail.contoso.example",
+      "username": "alice@example.com"
+    }
+  ],
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "key_file": null,
+  "master_password": "test-empty-ts-107",
+  "source": "pykeepass+lxml"
+}
