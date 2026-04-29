@@ -2304,19 +2304,24 @@ fn truncate_history(history: &mut Vec<Entry>, max_items: i32, max_size: i64) {
     // Item-count budget first, since it's cheapest and common.
     if max_items >= 0 {
         let cap = usize::try_from(max_items).unwrap_or(usize::MAX);
-        while history.len() > cap {
-            history.remove(0);
+        if history.len() > cap {
+            history.drain(0..history.len() - cap);
         }
     }
 
-    // Size budget, if one is declared.
+    // Size budget, if one is declared. Compute the prefix length to
+    // drop in one walk, then drain — `Vec::remove(0)` in a loop is
+    // O(N²) on the worst-case path.
     if max_size >= 0 {
         let cap = u64::try_from(max_size).unwrap_or(u64::MAX);
         let mut total: u64 = history.iter().map(approx_entry_size).sum();
-        while total > cap && !history.is_empty() {
-            let dropped = approx_entry_size(&history[0]);
-            history.remove(0);
-            total = total.saturating_sub(dropped);
+        let mut drop_count = 0;
+        while total > cap && drop_count < history.len() {
+            total = total.saturating_sub(approx_entry_size(&history[drop_count]));
+            drop_count += 1;
+        }
+        if drop_count > 0 {
+            history.drain(0..drop_count);
         }
     }
 }
