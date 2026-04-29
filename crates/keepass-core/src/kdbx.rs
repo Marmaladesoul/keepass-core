@@ -480,6 +480,12 @@ impl Kdbx<Unlocked> {
             uuid: removed.id.0,
             deleted_at: Some(now),
         });
+        // The deleted entry may have been the last referent of one or
+        // more pool binaries. Reap them now so the post-condition
+        // "vault.binaries holds only bytes still reachable from a live
+        // entry" holds for any caller reading the vault between
+        // `delete_entry` and `save_to_bytes`.
+        gc_binaries_pool(&mut self.state.vault);
         Ok(())
     }
 
@@ -1404,6 +1410,12 @@ impl Kdbx<Unlocked> {
         // to the group itself.
         let tombstones = collect_subtree_tombstones(&removed, now);
         self.state.vault.deleted_objects.extend(tombstones);
+        // Same rationale as `delete_entry`: a whole subtree's worth of
+        // attachments may have just lost their last referent, and the
+        // worst case (delete a group full of attachments) is exactly
+        // the situation where leaking orphan binaries to the next save
+        // hurts most.
+        gc_binaries_pool(&mut self.state.vault);
         Ok(())
     }
 
@@ -1966,10 +1978,12 @@ fn apply_pending_attaches(vault: &mut Vault, id: EntryId, pending: PendingBinary
 /// pool entry not in that set and renumbers the surviving
 /// references so the indexes stay contiguous from 0.
 ///
-/// Called once at the end of `edit_entry` so a `detach` shrinks the
-/// pool only when the very last reference (in any entry, this one or
-/// another) is gone — a binary shared between two entries survives a
-/// detach from one of them.
+/// Called from every mutation that can orphan a binary —
+/// `edit_entry` (after `detach`), `delete_entry`, `delete_group`,
+/// `restore_history` — and once more inside `do_save` as defence in
+/// depth. A `detach` shrinks the pool only when the very last
+/// reference (in any entry, this one or another) is gone, so a binary
+/// shared between two entries survives a detach from one of them.
 fn gc_binaries_pool(vault: &mut Vault) {
     let mut in_use: HashSet<u32> = HashSet::new();
     collect_attachment_refs(&vault.root, &mut in_use);
@@ -2035,15 +2049,18 @@ fn collect_attachment_refs(group: &Group, out: &mut HashSet<u32>) {
 /// `None`. The on-disk invariant "every `<CustomIconUUID>` resolves
 /// in `<CustomIcons>`" is restored before the bytes hit the wire.
 ///
-/// **Rhythm divergence from `gc_binaries_pool`**: the binary-pool
-/// GC runs inside every mutation post-pass because attachments can
-/// go orphan mid-session and the `Attachment` surface exposes
-/// per-entry iteration callers may rely on. Icons neither have a
-/// bulk accessor yet nor can they be orphaned by a content edit
-/// (only by the explicit `remove_custom_icon`, whose docstring
-/// already warns callers), so the icon GC runs only on save. This
-/// keeps the hot `edit_entry` path from paying for a tree walk it
-/// doesn't need.
+/// **Rhythm divergence from `gc_binaries_pool`**: the binary-pool GC
+/// runs inside every mutation that can orphan a binary
+/// (`edit_entry`/`detach`, `delete_entry`, `delete_group`,
+/// `restore_history`) so that `vault.binaries` reflects only
+/// reachable bytes for any caller reading the vault between mutations
+/// — the per-entry `attachments` accessor is part of the public
+/// surface and callers can plausibly index into the pool. Icons
+/// neither have a bulk accessor yet nor can they be orphaned by a
+/// content edit (only by the explicit `remove_custom_icon`, whose
+/// docstring already warns callers), so the icon GC runs only on
+/// save. This keeps the hot `edit_entry` path from paying for a tree
+/// walk it doesn't need.
 fn gc_custom_icons_pool(vault: &mut Vault) {
     let mut in_use: HashSet<uuid::Uuid> = HashSet::new();
     collect_custom_icon_refs(&vault.root, &mut in_use);
@@ -2533,10 +2550,16 @@ fn do_unlock(
 
 fn do_save(signature: FileSignature, version: Version, state: &Unlocked) -> Result<Vec<u8>, Error> {
     // Save-time GC mutates a local clone of the vault so the
-    // caller-visible in-memory state stays byte-stable across a
-    // save. See `gc_custom_icons_pool` for the rhythm divergence
-    // from the binary-pool GC (which runs on every mutation).
+    // caller-visible in-memory state stays byte-stable across a save.
+    // The binary-pool GC also runs eagerly inside the mutations that
+    // can orphan a binary (`edit_entry`/`detach`, `delete_entry`,
+    // `delete_group`, `restore_history`); the call here is
+    // defence-in-depth so a future mutation that forgets the post-pass
+    // can't leak orphan attachment bytes to disk. The icon-pool GC
+    // runs only here — see `gc_custom_icons_pool` for why icons skip
+    // the per-mutation rhythm.
     let mut vault = state.vault.clone();
+    gc_binaries_pool(&mut vault);
     gc_custom_icons_pool(&mut vault);
     match version {
         Version::V3 => do_save_v3(signature, state, &vault),
