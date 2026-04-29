@@ -1764,7 +1764,14 @@ fn parse_timestamp(text: &str, element: &'static str) -> Result<DateTime<Utc>, X
             detail: "empty timestamp".to_owned(),
         });
     }
-    if trimmed.contains(['T', '-']) {
+    // KDBX4 base64-encoded timestamps are exactly 12 ASCII characters
+    // drawn from the base64 alphabet (`A-Za-z0-9+/=`) — no hyphens. ISO-8601
+    // dates always carry a `-` between year/month/day. Earlier revisions
+    // routed on `T`-or-`-`, but base64 happily emits a `T` (it's in the
+    // alphabet), so a real KDBX4 timestamp like `RbTk0Q4AAAA=` was sent
+    // down the ISO-8601 path and rejected with "premature end of input".
+    // Discriminate on `-` alone — present iff ISO-8601.
+    if trimmed.contains('-') {
         return DateTime::parse_from_rfc3339(trimmed)
             .map(|dt| dt.with_timezone(&Utc))
             .map_err(|e| XmlError::InvalidValue {
@@ -3987,5 +3994,36 @@ mod tests {
         let entry = vault.iter_entries().next().unwrap();
         let entry_tags: Vec<_> = entry.unknown_xml.iter().map(|u| &u.tag).collect();
         assert_eq!(entry_tags, vec!["EntryFlag"]);
+    }
+
+    /// KDBX4 timestamps are base64 of an 8-byte little-endian seconds-
+    /// since-year-one count, padded with `=`. The base64 alphabet
+    /// includes `T`, so the discriminant between ISO-8601 and base64
+    /// must rest on the hyphen alone — earlier revisions routed any
+    /// `T`-containing payload to `parse_from_rfc3339` and rejected real
+    /// KDBX4 timestamps like `RbTk0Q4AAAA=` with "premature end of
+    /// input". Real-world surface: a KeePassXC-emitted vault whose
+    /// `<LastModificationTime>` happened to base64-encode with a `T`.
+    #[test]
+    fn parse_timestamp_routes_base64_with_t_to_base64_path() {
+        // `RbTk0Q4AAAA=` was lifted from a KeePassXC-emitted KDBX4
+        // vault's `<LastModificationTime>`. Pre-fix this routed to
+        // `parse_from_rfc3339` because of the embedded `T` and was
+        // rejected with "premature end of input"; post-fix it parses
+        // as a base64 i64 of seconds-since-year-one.
+        let dt = parse_timestamp("RbTk0Q4AAAA=", "LastModificationTime").expect("base64 path");
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2018-01-08T00:37:25Z"
+        );
+    }
+
+    #[test]
+    fn parse_timestamp_still_accepts_iso8601() {
+        let dt = parse_timestamp("2024-03-01T12:34:56Z", "CreationTime").expect("iso path");
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2024-03-01T12:34:56Z"
+        );
     }
 }
