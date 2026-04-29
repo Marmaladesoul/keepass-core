@@ -90,17 +90,20 @@ pub struct InnerHeader {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct InnerBinary {
-    /// The single flags byte: bit 0 = "protected" (applies inner-stream
-    /// cipher), upper bits reserved.
+    /// The single flags byte: bit 0 = "protected" (memory-protect the
+    /// payload after load), upper bits reserved. The flag does *not*
+    /// imply on-disk cipher wrapping — KDBX4 inner-header binaries are
+    /// always stored as plaintext, regardless of this bit.
     pub flags: u8,
-    /// The raw attachment bytes — decompressed but still cipher-wrapped
-    /// if `flags & 1 != 0`.
+    /// The raw attachment bytes as they appear on disk — plaintext, not
+    /// passed through the inner-stream cipher.
     pub data: Vec<u8>,
 }
 
 impl InnerBinary {
-    /// `true` if the attachment's bytes are protected by the
-    /// inner-stream cipher. A flags byte with bit 0 set.
+    /// `true` if the writer requested in-memory protection for this
+    /// attachment (flags byte with bit 0 set). The on-disk bytes are
+    /// always plaintext — see [`Self::data`].
     #[must_use]
     pub fn is_protected(&self) -> bool {
         self.flags & 0x01 != 0

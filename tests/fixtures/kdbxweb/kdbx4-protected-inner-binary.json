@@ -1,0 +1,20 @@
+{
+  "attachments": [
+    {
+      "entry": "Protected Bin Demo",
+      "filename": "demo.txt",
+      "size": 27,
+      "sha256": "b31f44e063d7c3cbe93f04665cb74978ba097f37c6bb2d3228f99c150a9194d0"
+    }
+  ],
+  "database_name": "kdbxweb Protected Inner Binary Fixture",
+  "description": "KDBX4 with a single inner-header attachment marked protected (flag byte 0x01). kdbxweb writes a `ProtectedValue`-wrapped binary as plaintext on disk plus the protected flag — the same convention KeePassXC uses. Earlier revisions of the unlock pipeline mistakenly XOR-ed protected inner-header binaries with the inner-stream keystream, corrupting attachment payloads and desynchronising the cipher for every following protected `<Value>` in XML; this fixture pins the regression. The entry also carries a non-default protected custom field (`TOTP Seed`), which decrypts cleanly only after the cipher fix.",
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/.node/gen-protected-inner-binary.js",
+  "generator": "KdbxWeb",
+  "group_count": 2,
+  "key_file": null,
+  "master_password": "test-protected-bin-001",
+  "source": "kdbxweb (node)"
+}
