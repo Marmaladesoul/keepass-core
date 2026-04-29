@@ -1111,6 +1111,74 @@ def _uuid_to_b64(hyphenated: str) -> str:
     return base64.b64encode(_uuid.UUID(hyphenated).bytes).decode("ascii")
 
 
+def gen_pykeepass_empty_timestamps() -> None:
+    """Vault with one entry whose `<LastModificationTime>` element is empty.
+
+    Real-world KDBX vaults (observed in the wild on entries that have never
+    been edited after creation) emit an empty optional-timestamp element
+    instead of omitting it. The decoder must treat that as `None`, not as
+    a parse failure: pre-fix the empty text reached `parse_timestamp` and
+    surfaced as
+        Xml(InvalidValue {
+            element: "LastModificationTime",
+            detail: "not a valid ISO-8601 timestamp: premature end of input",
+        })
+
+    pykeepass's high-level setters always write a real timestamp, so the
+    empty element is injected via lxml after pykeepass has saved the tree.
+    """
+    from pykeepass import create_database, PyKeePass
+
+    name = "empty-timestamps"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    pw = "test-empty-ts-107"
+    PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
+
+    kp = create_database(str(db_path), password=pw)
+    kp.add_entry(kp.root_group, title="Contoso Mail",
+                 username="alice@example.com",
+                 password="p4ss-empty-ts-01",
+                 url="https://mail.contoso.example")
+    kp.save()
+
+    # Re-open and blank the entry's <LastModificationTime> via lxml.
+    kp = PyKeePass(str(db_path), password=pw)
+    root_group = kp.tree.find("Root/Group")
+    entry = root_group.find("Entry")
+    times = entry.find("Times")
+    last_mod = times.find("LastModificationTime")
+    # Blank both text and tail so the element serialises as
+    # `<LastModificationTime></LastModificationTime>` (or `<… />`).
+    last_mod.text = ""
+    kp.save()
+
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": (
+            "One entry whose `<LastModificationTime>` element is empty "
+            "(written via lxml after pykeepass save). Regression guard for "
+            "the optional-timestamp decoder accepting empty elements as None "
+            "instead of erroring with 'premature end of input'."
+        ),
+        "format": "KDBX4",
+        "source": "pykeepass+lxml",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": None,
+        "entry_count": 1,
+        "entries": [
+            {
+                "title": "Contoso Mail",
+                "username": "alice@example.com",
+                "url": "https://mail.contoso.example",
+                "password_length": len("p4ss-empty-ts-01"),
+            },
+        ],
+    })
+    log(f"wrote pykeepass/{name}")
+
+
 def gen_pykeepass_large() -> None:
     """Large vault — 1000 entries. Tests scaling + stable parse time."""
     from pykeepass import create_database, PyKeePass
@@ -1237,6 +1305,7 @@ GENERATORS: dict[str, list[Callable[[], None]]] = {
         gen_pykeepass_history_unknown_xml,
         gen_pykeepass_editor_fields,
         gen_pykeepass_custom_icons,
+        gen_pykeepass_empty_timestamps,
         gen_pykeepass_large,
     ],
     "malformed": [
