@@ -1007,7 +1007,7 @@ fn read_one_deleted_object<R: std::io::BufRead>(
                     match name.as_str() {
                         "UUID" => uuid = Some(parse_uuid(&text)?),
                         "DeletionTime" => {
-                            deleted_at = Some(parse_timestamp(&text, "DeletionTime")?);
+                            deleted_at = parse_optional_timestamp(&text, "DeletionTime")?;
                         }
                         _ => { /* unknown child — ignore */ }
                     }
@@ -1292,7 +1292,8 @@ fn read_one_custom_icon<R: std::io::BufRead>(
                         }
                         "Name" => name = text,
                         "LastModificationTime" => {
-                            last_modified = Some(parse_timestamp(&text, "LastModificationTime")?);
+                            last_modified =
+                                parse_optional_timestamp(&text, "LastModificationTime")?;
                         }
                         _ => { /* unknown child — ignore */ }
                     }
@@ -1383,7 +1384,8 @@ fn read_custom_data_item<R: std::io::BufRead>(
                         "Key" => key = Some(text),
                         "Value" => value = Some(text),
                         "LastModificationTime" => {
-                            last_modified = Some(parse_timestamp(&text, "LastModificationTime")?);
+                            last_modified =
+                                parse_optional_timestamp(&text, "LastModificationTime")?;
                         }
                         _ => { /* unknown — ignore */ }
                     }
@@ -1619,15 +1621,16 @@ fn assign_meta_field(meta: &mut Meta, field: &str, text: String) -> Result<(), X
         "DatabaseName" => meta.database_name = text,
         "DatabaseDescription" => meta.database_description = text,
         "DatabaseNameChanged" => {
-            meta.database_name_changed = Some(parse_timestamp(&text, "DatabaseNameChanged")?);
+            meta.database_name_changed = parse_optional_timestamp(&text, "DatabaseNameChanged")?;
         }
         "DatabaseDescriptionChanged" => {
             meta.database_description_changed =
-                Some(parse_timestamp(&text, "DatabaseDescriptionChanged")?);
+                parse_optional_timestamp(&text, "DatabaseDescriptionChanged")?;
         }
         "DefaultUserName" => meta.default_username = text,
         "DefaultUserNameChanged" => {
-            meta.default_username_changed = Some(parse_timestamp(&text, "DefaultUserNameChanged")?);
+            meta.default_username_changed =
+                parse_optional_timestamp(&text, "DefaultUserNameChanged")?;
         }
         "RecycleBinEnabled" => meta.recycle_bin_enabled = parse_bool(&text, "RecycleBinEnabled")?,
         "RecycleBinUUID" => {
@@ -1642,13 +1645,13 @@ fn assign_meta_field(meta: &mut Meta, field: &str, text: String) -> Result<(), X
             };
         }
         "RecycleBinChanged" => {
-            meta.recycle_bin_changed = Some(parse_timestamp(&text, "RecycleBinChanged")?);
+            meta.recycle_bin_changed = parse_optional_timestamp(&text, "RecycleBinChanged")?;
         }
         "SettingsChanged" => {
-            meta.settings_changed = Some(parse_timestamp(&text, "SettingsChanged")?);
+            meta.settings_changed = parse_optional_timestamp(&text, "SettingsChanged")?;
         }
         "MasterKeyChanged" => {
-            meta.master_key_changed = Some(parse_timestamp(&text, "MasterKeyChanged")?);
+            meta.master_key_changed = parse_optional_timestamp(&text, "MasterKeyChanged")?;
         }
         "MasterKeyChangeRec" => {
             meta.master_key_change_rec = parse_int(&text, "MasterKeyChangeRec")?;
@@ -1730,17 +1733,17 @@ fn read_times<R: std::io::BufRead>(
 
 fn assign_times_field(times: &mut Timestamps, field: &str, text: &str) -> Result<(), XmlError> {
     match field {
-        "CreationTime" => times.creation_time = Some(parse_timestamp(text, "CreationTime")?),
+        "CreationTime" => times.creation_time = parse_optional_timestamp(text, "CreationTime")?,
         "LastModificationTime" => {
-            times.last_modification_time = Some(parse_timestamp(text, "LastModificationTime")?);
+            times.last_modification_time = parse_optional_timestamp(text, "LastModificationTime")?;
         }
         "LastAccessTime" => {
-            times.last_access_time = Some(parse_timestamp(text, "LastAccessTime")?);
+            times.last_access_time = parse_optional_timestamp(text, "LastAccessTime")?;
         }
         "LocationChanged" => {
-            times.location_changed = Some(parse_timestamp(text, "LocationChanged")?);
+            times.location_changed = parse_optional_timestamp(text, "LocationChanged")?;
         }
-        "ExpiryTime" => times.expiry_time = Some(parse_timestamp(text, "ExpiryTime")?),
+        "ExpiryTime" => times.expiry_time = parse_optional_timestamp(text, "ExpiryTime")?,
         "Expires" => times.expires = parse_bool(text, "Expires")?,
         "UsageCount" => {
             times.usage_count = text
@@ -1773,6 +1776,25 @@ fn assign_times_field(times: &mut Timestamps, field: &str, text: &str) -> Result
 /// <https://keepass.info/help/kb/kdbx_4.html>. Reading them as ticks
 /// produced timestamps roughly `1e7×` smaller than the real value,
 /// landing every entry near year 1.
+/// Parse an optional KeePass timestamp.
+///
+/// Returns `Ok(None)` if `text` is empty or whitespace — every timestamp
+/// element on the wire is optional in our model (`Option<DateTime<Utc>>`),
+/// and real-world KDBX writers do occasionally emit an empty
+/// `<LastModificationTime />` element on entries that have never been
+/// modified. Treating an empty element as "absent" matches that
+/// observed behaviour and keeps the decoder from failing on otherwise
+/// healthy vaults.
+fn parse_optional_timestamp(
+    text: &str,
+    element: &'static str,
+) -> Result<Option<DateTime<Utc>>, XmlError> {
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_timestamp(text, element).map(Some)
+}
+
 fn parse_timestamp(text: &str, element: &'static str) -> Result<DateTime<Utc>, XmlError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -4102,6 +4124,79 @@ mod tests {
         assert_eq!(
             dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "2024-03-01T12:34:56Z"
+        );
+    }
+
+    /// `<LastModificationTime />` and `<LastModificationTime></LastModificationTime>`
+    /// both reach `parse_optional_timestamp` with empty text. Real-world KDBX
+    /// vaults emit empty optional-timestamp elements (observed on a
+    /// KeePassXC-written entry that had never been modified after creation),
+    /// so the decoder must treat them as `None` rather than a parse failure.
+    #[test]
+    fn parse_optional_timestamp_treats_empty_as_none() {
+        assert!(
+            parse_optional_timestamp("", "LastModificationTime")
+                .expect("empty must not error")
+                .is_none()
+        );
+        assert!(
+            parse_optional_timestamp("   ", "LastModificationTime")
+                .expect("whitespace-only must not error")
+                .is_none()
+        );
+        assert!(
+            parse_optional_timestamp("\t\n", "LastModificationTime")
+                .expect("whitespace-only must not error")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_optional_timestamp_passes_non_empty_through() {
+        let dt = parse_optional_timestamp("2024-03-01T12:34:56Z", "CreationTime")
+            .expect("iso path")
+            .expect("non-empty must yield Some");
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2024-03-01T12:34:56Z"
+        );
+
+        let err = parse_optional_timestamp("not-a-timestamp", "CreationTime")
+            .expect_err("invalid text must still error");
+        assert!(matches!(
+            err,
+            XmlError::InvalidValue {
+                element: "CreationTime",
+                ..
+            }
+        ));
+    }
+
+    /// End-to-end: feed `read_times` a `<Times>` block with an empty
+    /// `<LastModificationTime />` element. Pre-fix this surfaced as
+    /// `Xml(InvalidValue { element: "LastModificationTime",
+    /// detail: "not a valid ISO-8601 timestamp: premature end of input" })`.
+    #[test]
+    fn read_times_accepts_empty_last_modification_time_element() {
+        let xml = "<Times>\
+            <CreationTime>2024-03-01T12:34:56Z</CreationTime>\
+            <LastModificationTime></LastModificationTime>\
+            <Expires>False</Expires>\
+            <UsageCount>0</UsageCount>\
+        </Times>";
+        let mut reader = Reader::from_str(xml);
+        let mut buf = Vec::new();
+        // Consume the opening <Times> tag so read_times sees children directly.
+        match reader.read_event_into(&mut buf).expect("start") {
+            Event::Start(_) => {}
+            other => panic!("expected <Times> start, got {other:?}"),
+        }
+        buf.clear();
+        let times = read_times(&mut reader, &mut buf).expect("read_times must succeed");
+        assert!(times.creation_time.is_some());
+        assert!(
+            times.last_modification_time.is_none(),
+            "empty <LastModificationTime /> must round-trip to None"
         );
     }
 }
