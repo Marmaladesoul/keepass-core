@@ -245,15 +245,24 @@ fn unlock_one(path: &Path) -> Result<(), String> {
     // referenced binary's SHA-256.
     if let Some(atts) = sidecar.get("attachments").and_then(Value::as_array) {
         for a in atts {
-            let (Some(entry_title), Some(filename)) = (
-                a.get("entry").and_then(Value::as_str),
-                a.get("filename").and_then(Value::as_str),
-            ) else {
-                continue;
-            };
-            let Some(expected_sha) = a.get("sha256").and_then(Value::as_str) else {
-                continue;
-            };
+            // Match the per-entry attachments path (above) and fail
+            // hard on missing fields rather than silently skip. A
+            // top-level sidecar attachment entry that's missing
+            // `entry`/`filename`/`sha256` is a fixture authoring
+            // error, not a "soft" record — letting it pass would
+            // hide both authoring typos *and* future regressions
+            // that drop the byte-level check entirely.
+            let entry_title = a
+                .get("entry")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("sidecar attachment entry missing `entry` field: {a}"))?;
+            let filename = a.get("filename").and_then(Value::as_str).ok_or_else(|| {
+                format!("sidecar attachment {entry_title:?} missing `filename` field: {a}")
+            })?;
+            let expected_sha = a
+                .get("sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("sidecar attachment {filename:?} missing `sha256` field"))?;
             let Some(entry) = vault.iter_entries().find(|e| e.title == entry_title) else {
                 return Err(format!(
                     "attachment {filename:?} refers to missing entry {entry_title:?}"
