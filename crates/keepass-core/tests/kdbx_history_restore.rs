@@ -588,3 +588,141 @@ fn restore_round_trips_through_save_and_reopen() {
     assert_eq!(e.history[2].password, "v3");
     assert_eq!(e.times.last_modification_time, Some(t_restore));
 }
+
+// ---------------------------------------------------------------------
+// Kdbx::prune_history_older_than
+// ---------------------------------------------------------------------
+
+#[test]
+fn prune_history_older_than_drops_only_snapshots_older_than_cutoff() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    // Snapshots end up with last_modification_time at t0, t0+1m, t0+2m,
+    // t0+3m (each pre-edit live state inherits the *current* clock).
+    let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4", "v5"]);
+    assert_eq!(find_entry(&kdbx, id).history.len(), 4);
+
+    // Cutoff between t0+1m and t0+2m drops the two oldest (t0, t0+1m).
+    let cutoff = t0 + Duration::seconds(90);
+    let removed = kdbx.prune_history_older_than(cutoff);
+    assert_eq!(removed, 2);
+
+    let e = find_entry(&kdbx, id);
+    assert_eq!(e.history.len(), 2);
+    // Surviving snapshots are the two newest.
+    assert_eq!(e.history[0].password, "v3");
+    assert_eq!(e.history[1].password, "v4");
+}
+
+#[test]
+fn prune_history_older_than_does_not_stamp_last_modification_time() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3"]);
+    let last_mod_before = find_entry(&kdbx, id).times.last_modification_time;
+
+    // Advance the clock so that *if* prune incorrectly stamped, we'd see
+    // the new value rather than the seed-time value.
+    clock.set(t0 + Duration::hours(5));
+    let _ = kdbx.prune_history_older_than(t0 + Duration::hours(1));
+
+    let e = find_entry(&kdbx, id);
+    assert_eq!(
+        e.times.last_modification_time, last_mod_before,
+        "pruning is bookkeeping, not a content edit — must not stamp last_modification_time"
+    );
+}
+
+#[test]
+fn prune_history_older_than_uses_strict_cutoff() {
+    // "Older than" means strictly older — a snapshot whose mtime
+    // equals cutoff survives (the comparison is `mtime < cutoff`,
+    // not `<=`).
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3"]);
+    // History snapshots inherit the *pre-edit* live mtime, so:
+    //   history[0] = snap_pre_v2  → mtime = t0
+    //   history[1] = snap_pre_v3  → mtime = t0+1m
+
+    // Cutoff equal to the oldest snapshot's mtime: it survives.
+    let removed = kdbx.prune_history_older_than(t0);
+    assert_eq!(removed, 0, "mtime == cutoff is not 'older than'");
+    assert_eq!(find_entry(&kdbx, id).history.len(), 2);
+
+    // Cutoff between the two snapshots' mtimes drops exactly one.
+    let removed = kdbx.prune_history_older_than(t0 + Duration::seconds(30));
+    assert_eq!(removed, 1);
+    assert_eq!(find_entry(&kdbx, id).history.len(), 1);
+}
+
+#[test]
+fn prune_history_older_than_round_trips_through_save_and_reopen() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4"]);
+    let removed = kdbx.prune_history_older_than(t0 + Duration::seconds(90));
+    assert_eq!(removed, 2);
+
+    let bytes = kdbx.save_to_bytes().unwrap();
+    let reopened = reopen_with_clock(bytes, t0 + Duration::hours(2));
+    let e = find_entry(&reopened, id);
+    assert_eq!(e.history.len(), 1);
+    assert_eq!(e.history[0].password, "v3");
+    assert_eq!(e.password, "v4");
+}
+
+#[test]
+fn prune_history_older_than_walks_into_subgroups() {
+    use keepass_core::model::NewGroup;
+
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let root = kdbx.vault().root.id;
+    let sub = kdbx.add_group(root, NewGroup::new("Nested")).unwrap();
+
+    // Entry at root with two snapshots.
+    let root_id = seed_entry_with_history(&mut kdbx, &clock, t0, &["a1", "a2", "a3"]);
+
+    // Entry inside the subgroup with two snapshots, time-shifted.
+    let t_sub = t0 + Duration::hours(1);
+    clock.set(t_sub);
+    let sub_id = kdbx
+        .add_entry(sub, NewEntry::new("Sub").password(SecretString::from("b1")))
+        .unwrap();
+    clock.set(t_sub + Duration::minutes(1));
+    kdbx.edit_entry(sub_id, HistoryPolicy::Snapshot, |e| {
+        e.set_password(SecretString::from("b2"));
+    })
+    .unwrap();
+    clock.set(t_sub + Duration::minutes(2));
+    kdbx.edit_entry(sub_id, HistoryPolicy::Snapshot, |e| {
+        e.set_password(SecretString::from("b3"));
+    })
+    .unwrap();
+
+    // Cutoff drops root's entire history (both snapshots at t0, t0+1m)
+    // and one of sub's (the t_sub snapshot at +1h+0m), leaving sub's
+    // newer snapshot.
+    let cutoff = t_sub + Duration::seconds(30);
+    let removed = kdbx.prune_history_older_than(cutoff);
+    assert_eq!(removed, 3, "2 from root entry + 1 from subgroup entry");
+
+    assert_eq!(find_entry(&kdbx, root_id).history.len(), 0);
+    assert_eq!(find_entry(&kdbx, sub_id).history.len(), 1);
+}
+
+#[test]
+fn prune_history_older_than_with_empty_vault_returns_zero() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, _clock) = open_basic_with_clock(t0);
+
+    // Drop everything from the fixture's existing entries first so the
+    // assertion is meaningful.
+    let removed = kdbx.prune_history_older_than(t0 + Duration::days(365 * 100));
+    let _ = removed; // any value is fine; assertion is on a follow-up no-op
+
+    // A second call against an already-pruned vault is a clean no-op.
+    let removed2 = kdbx.prune_history_older_than(t0 + Duration::days(365 * 100));
+    assert_eq!(removed2, 0);
+}

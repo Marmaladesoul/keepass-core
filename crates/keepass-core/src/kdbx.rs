@@ -785,6 +785,46 @@ impl Kdbx<Unlocked> {
         Ok(())
     }
 
+    /// Drop every history snapshot whose own
+    /// [`crate::model::Timestamps::last_modification_time`] is older
+    /// than `cutoff`, across the entire vault. Returns the total
+    /// number of snapshots removed.
+    ///
+    /// Pruning is a *bookkeeping* operation, not a content edit:
+    /// `entry.times.last_modification_time` is **not** stamped on the
+    /// affected live entries. This matches how the auto-truncation
+    /// path in [`Self::edit_entry`] already behaves — silent
+    /// trimming of the history list, no live-side timestamp churn.
+    ///
+    /// Snapshots whose own `last_modification_time` is `None` are
+    /// treated as ancient and pruned, mirroring the
+    /// `is_none_or` rule in
+    /// [`crate::model::HistoryPolicy::SnapshotIfOlderThan`].
+    ///
+    /// `meta.settings_changed` is **not** stamped — pruning
+    /// touches per-entry history, not Meta. No `DeletedObject`
+    /// records are written: history snapshots are a per-entry
+    /// implementation detail, not first-class vault objects.
+    pub fn prune_history_older_than(&mut self, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
+        fn walk(group: &mut Group, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
+            let mut removed = 0;
+            for entry in &mut group.entries {
+                let before = entry.history.len();
+                entry.history.retain(|snap| {
+                    snap.times
+                        .last_modification_time
+                        .is_some_and(|t| t >= cutoff)
+                });
+                removed += before - entry.history.len();
+            }
+            for child in &mut group.groups {
+                removed += walk(child, cutoff);
+            }
+            removed
+        }
+        walk(&mut self.state.vault.root, cutoff)
+    }
+
     // -----------------------------------------------------------------
     // Custom-icon pool
     // -----------------------------------------------------------------
