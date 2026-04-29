@@ -1548,6 +1548,28 @@ fn parse_binary_attributes(e: &BytesStart<'_>) -> Result<(u32, bool), XmlError> 
                     .map_err(|err| XmlError::Malformed(err.to_string()))?;
                 compressed = s.eq_ignore_ascii_case("true");
             }
+            b"Protected" => {
+                // KeePass 2.x and kdbxweb both support marking pool
+                // binaries as protected (the `<Binary>` payload is
+                // base64 of the inner-stream-cipher ciphertext, not
+                // the plaintext). The decoder doesn't model this
+                // shape — pulling the inner-stream cipher into
+                // `<Meta><Binaries>` interleaves with `<Value
+                // Protected="True">` keystream consumption in a way
+                // we haven't built — so reject loudly rather than
+                // silently store ciphertext as `Binary::data` with
+                // `protected: false`. Loud-reject mirrors the
+                // Twofish-CBC stance.
+                let s = std::str::from_utf8(&a.value)
+                    .map_err(|err| XmlError::Malformed(err.to_string()))?;
+                if s.eq_ignore_ascii_case("true") {
+                    return Err(XmlError::InvalidValue {
+                        element: "Binary",
+                        detail: "KDBX3 protected binaries-pool entries are not yet supported"
+                            .to_owned(),
+                    });
+                }
+            }
             _ => { /* ignore unknown attrs */ }
         }
     }
@@ -3243,6 +3265,67 @@ mod tests {
             ),
             "expected InvalidValue, got {err:?}"
         );
+    }
+
+    #[test]
+    fn rejects_kdbx3_protected_binaries_pool_entry() {
+        // KeePass 2.x and kdbxweb both support `<Binary ... Protected="True">`
+        // in `<Meta><Binaries>`, where the payload is base64 of the
+        // inner-stream-cipher *ciphertext*. The decoder doesn't model
+        // that shape — pre-fix we silently stored the ciphertext as
+        // `Binary::data` with `protected: false`, so any consumer
+        // reading the attachment got garbage bytes with no error.
+        // The reject keeps the bug visible until proper support
+        // lands.
+        let xml = br#"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <Binaries>
+      <Binary ID="0" Compressed="False" Protected="True">YWJj</Binary>
+    </Binaries>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>"#;
+        let err = decode_vault(xml).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                XmlError::InvalidValue {
+                    element: "Binary",
+                    ref detail,
+                } if detail.contains("KDBX3 protected binaries-pool entries are not yet supported")
+            ),
+            "expected loud reject for protected pool binary, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_kdbx3_binaries_pool_entry_with_explicit_protected_false() {
+        // `Protected="False"` is just a noisy default — the decoder
+        // accepts it like any other unrecognised-but-parseable attr.
+        let xml = br#"<KeePassFile>
+  <Meta>
+    <Generator>G</Generator>
+    <Binaries>
+      <Binary ID="0" Compressed="False" Protected="False">YWJj</Binary>
+    </Binaries>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>"#;
+        let vault = decode_vault(xml).unwrap();
+        assert_eq!(vault.binaries.len(), 1);
+        assert_eq!(vault.binaries[0].data, b"abc");
+        assert!(!vault.binaries[0].protected);
     }
 
     #[test]
