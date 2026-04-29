@@ -1,17 +1,12 @@
 //! Typed decoder: KeePass inner XML → [`crate::model::Vault`].
 //!
 //! Takes the decrypted, decompressed inner XML and produces a typed
-//! [`Vault`] with its group tree and entries. This is the "minimum
-//! viable slice" — enough to answer "what entries does this vault
-//! contain?" for downstream interop tests and early integration work.
-//!
-//! Deferred to follow-up PRs:
-//!
-//! - Deleted objects (`<DeletedObjects>`)
-//! - `<Meta>` fields beyond the basic name/description/generator set
-//!   (memory protection flags, recycle-bin config, custom icons,
-//!   custom data, header hash, history settings)
-//! - Binary references (`<Value Ref="N"/>`)
+//! [`Vault`] with its group tree and entries — including
+//! `<DeletedObjects>` tombstones, the full `<Meta>` field set
+//! (memory-protection flags, recycle-bin config, custom icons,
+//! custom data, header hash, history settings, etc.), and binary
+//! references via `<Value Ref="N"/>`. Unknown elements are captured
+//! verbatim under `unknown_xml` so they survive a save round-trip.
 //!
 //! ## Protected values
 //!
