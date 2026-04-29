@@ -325,9 +325,20 @@ fn unlock_one(path: &Path) -> Result<(), String> {
             by_title.entry(e.title.clone()).or_default().push(e);
         }
         for expected in entries {
-            let Some(title) = expected.get("title").and_then(Value::as_str) else {
-                continue;
-            };
+            // The block's whole purpose is to assert per-entry fields
+            // against a vault entry matched by title. A `title`-less
+            // block has nothing to match against; treating it as
+            // "skip" silently elides every assertion (`username`,
+            // `password_length`, `tags`, `attachments`) inside it,
+            // which is exactly the masking shape the previous audit
+            // was kicked off by. Fail loudly so a typo like `titel`
+            // surfaces as a test failure instead of a silent pass.
+            let title = expected
+                .get("title")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!("sidecar entry block missing required `title` key: {expected}")
+                })?;
             let Some(candidates) = by_title.get(title) else {
                 return Err(format!("missing entry with title {title:?}"));
             };
