@@ -66,6 +66,32 @@ pub enum HistoryPolicy {
     /// `since`. Implements "coalesce edits within a window" — e.g.
     /// `chrono::Duration::hours(24)` means at most one snapshot per
     /// day. If there is no prior history, always snapshots.
+    ///
+    /// **Window anchor.** The window is measured against the most
+    /// recent history snapshot's *own* `times.last_modification_time`
+    /// — i.e. *when the state inside that snapshot was last
+    /// modified*, which in canonical KeePass usage is "when that
+    /// snapshot was created" (the snapshot is a copy of the live
+    /// entry's pre-edit state, including its timestamp).
+    ///
+    /// In linear-edit cases this is the same as "when the previous
+    /// snapshot happened", but the two diverge for editing patterns
+    /// like *burst → silence → burst*. Worked example with a 24h
+    /// window:
+    ///
+    /// ```text
+    /// t=00:00  edit + Snapshot      → history: [snap@00:00]
+    /// t=00:05  edit + IfOlderThan   → last snapshot last-modified
+    ///                                  was at 00:00; 5 min < 24h,
+    ///                                  so SKIP. history unchanged.
+    /// t=01:00  edit + IfOlderThan   → last snapshot still 00:00;
+    ///                                  60 min < 24h, so SKIP.
+    /// t=25:00  edit + IfOlderThan   → 25h ≥ 24h, SNAPSHOT.
+    ///                                  history: [snap@00:00, snap@25:00]
+    /// ```
+    ///
+    /// If the most recent history entry is missing
+    /// `last_modification_time` it's treated as ancient — snapshot.
     SnapshotIfOlderThan(chrono::Duration),
 }
 
