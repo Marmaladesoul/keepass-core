@@ -246,8 +246,8 @@ pub struct Entry {
     /// default handler.
     pub override_url: String,
     /// `<CustomIconUUID>` — reference to a custom icon in the
-    /// (not-yet-modelled) Meta/CustomIcons pool. `None` when the
-    /// entry uses one of the built-in icons.
+    /// [`Meta::custom_icons`] pool. `None` when the entry uses one of
+    /// the built-in icons.
     pub custom_icon_uuid: Option<Uuid>,
     /// `<IconID>` — index into KeePass's built-in icon set (0–68 in
     /// KeePass 2.x, with `0` being the "Key" default). A separate
@@ -658,10 +658,6 @@ pub struct Binary {
 /// Only fields present in the on-disk XML populate here; every field
 /// is either a string (possibly empty) or an `Option`, so a minimal
 /// document with just `<Generator>` round-trips cleanly.
-///
-/// Fields beyond this set — memory-protection flags, custom icons,
-/// custom data, header hash, history settings — land in follow-up
-/// PRs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Meta {
