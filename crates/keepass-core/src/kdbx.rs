@@ -2607,7 +2607,10 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
         // `<Value Protected="True">` payloads — see kdbxweb's
         // `readBinary`/`writeBinary` and KeePassXC's `Kdbx4Reader`/
         // `Kdbx4Writer` for the same convention.
-        inner_binaries.push(InnerBinary { flags, data: b.data.clone() });
+        inner_binaries.push(InnerBinary {
+            flags,
+            data: b.data.clone(),
+        });
     }
 
     let inner_header = InnerHeader {
