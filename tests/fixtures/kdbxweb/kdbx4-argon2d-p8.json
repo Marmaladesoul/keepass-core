@@ -1,0 +1,27 @@
+{
+  "database_name": "kdbxweb Argon2d P=8 Fixture",
+  "description": "KDBX4 vault with Argon2d KDF and parallelism = 8. Independently produced via kdbxweb + native argon2; regression guard for the unlock pipeline threading P through to the Argon2d derivation correctly. Replaces the JTL.kdbx reproduction test.",
+  "entries": [
+    {
+      "title": "Contoso Mail",
+      "username": "alice@example.com",
+      "url": "https://mail.contoso.example",
+      "tags": [
+        "work"
+      ]
+    }
+  ],
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/.node/gen-kdbxweb.js",
+  "generator": "KdbxWeb",
+  "group_count": 2,
+  "group_paths": [
+    "/Recycle Bin"
+  ],
+  "kdf": "Argon2d",
+  "kdf_parallelism": 8,
+  "key_file": null,
+  "master_password": "test-kdbxweb-argon2d-p8-204",
+  "source": "kdbxweb (node)"
+}

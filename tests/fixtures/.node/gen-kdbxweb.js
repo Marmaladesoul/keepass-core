@@ -251,6 +251,75 @@ async function genKeewebChaCha20() {
   console.log(`wrote kdbxweb/${name}`);
 }
 
+async function genKeewebArgon2dP8() {
+  // Real-world KDBX vaults sometimes pin Argon2 parallelism to a high value
+  // (commonly P=8 — KeePassXC's auto-tuner emits this on multicore machines).
+  // The unlock pipeline must thread parallelism through to the `argon2`
+  // crate correctly; an earlier revision derived a different transformed
+  // key for P=8 vaults than the reference implementation, surfacing as a
+  // spurious "wrong key" on real-world Argon2d/P=8 files. This fixture is
+  // an independently-produced (kdbxweb → npm `argon2`) regression guard.
+  const name = 'kdbx4-argon2d-p8';
+  const pw = 'test-kdbxweb-argon2d-p8-204';
+
+  const cred = new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(pw));
+  const db = kdbxweb.Kdbx.create(cred, 'kdbxweb Argon2d P=8 Fixture');
+  // kdbxweb defaults the KDBX4 KDF to Argon2d. Pin the UUID explicitly so
+  // an upstream default flip wouldn't silently switch the fixture to
+  // Argon2id (the variant we're specifically *not* testing here).
+  const kdf = db.header.kdfParameters;
+  const ARGON2D_UUID_BYTES = Buffer.from([
+    0xef, 0x63, 0x6d, 0xdf, 0x8c, 0x29, 0x44, 0x4b,
+    0x91, 0xf7, 0xa9, 0xa4, 0x03, 0xe3, 0x0a, 0x0c,
+  ]);
+  kdf.set('$UUID', kdbxweb.VarDictionary.ValueType.Bytes,
+    ARGON2D_UUID_BYTES.buffer.slice(
+      ARGON2D_UUID_BYTES.byteOffset,
+      ARGON2D_UUID_BYTES.byteOffset + ARGON2D_UUID_BYTES.byteLength,
+    ));
+  kdf.set('I', kdbxweb.VarDictionary.ValueType.UInt64, new kdbxweb.Int64(2, 0));
+  kdf.set('M', kdbxweb.VarDictionary.ValueType.UInt64, new kdbxweb.Int64(1024 * 1024, 0));
+  // P = 8 — the regression guard. argon2 npm requires P >= 1.
+  kdf.set('P', kdbxweb.VarDictionary.ValueType.UInt32, 8);
+
+  const root = db.getDefaultGroup();
+  addEntry(db, root, 'Contoso Mail', 'alice@example.com',
+    'https://mail.contoso.example', 'p4ss-a2d-p8-01', '', ['work']);
+
+  const buf = await db.save();
+  const outPath = path.join(OUT_DIR, `${name}.kdbx`);
+  await fs.mkdir(OUT_DIR, { recursive: true });
+  await fs.writeFile(outPath, Buffer.from(buf));
+
+  await writeSidecar(outPath, {
+    description: (
+      'KDBX4 vault with Argon2d KDF and parallelism = 8. Independently '
+      + 'produced via kdbxweb + native argon2; regression guard for the '
+      + 'unlock pipeline threading P through to the Argon2d derivation '
+      + 'correctly. Replaces the JTL.kdbx reproduction test.'
+    ),
+    format: 'KDBX4',
+    source: 'kdbxweb (node)',
+    generated_by: 'tests/fixtures/.node/gen-kdbxweb.js',
+    master_password: pw,
+    key_file: null,
+    database_name: 'kdbxweb Argon2d P=8 Fixture',
+    generator: 'KdbxWeb',
+    kdf: 'Argon2d',
+    kdf_parallelism: 8,
+    entry_count: 1,
+    group_count: 2,
+    group_paths: ['/Recycle Bin'],
+    entries: [{
+      title: 'Contoso Mail',
+      username: 'alice@example.com',
+      url: 'https://mail.contoso.example',
+      tags: ['work'],
+    }],
+  });
+  console.log(`wrote kdbxweb/${name}`);
+}
+
 // -----------------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------------
@@ -260,6 +329,7 @@ async function genKeewebChaCha20() {
     await genKeewebBasic();
     await genKeewebAttachments();
     await genKeewebChaCha20();
+    await genKeewebArgon2dP8();
     console.log('done');
   } catch (e) {
     console.error('FAILED:', e);
