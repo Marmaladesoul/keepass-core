@@ -18,7 +18,7 @@
 use chrono::{DateTime, Utc};
 use keepass_core::CompositeKey;
 use keepass_core::kdbx::{Kdbx, Sealed};
-use keepass_core::model::{FixedClock, HistoryPolicy, NewEntry};
+use keepass_core::model::{FixedClock, HistoryPolicy, NewEntry, NewGroup};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -184,4 +184,114 @@ fn attach_then_save_round_trips_payload_and_protected_flag() {
     };
     assert_eq!(resolve("note.txt"), (plain_bytes, false));
     assert_eq!(resolve("secret.bin"), (secret_bytes, true));
+}
+
+#[test]
+fn delete_entry_reaps_orphan_binaries_in_memory_and_on_disk() {
+    // Pre-fix, `delete_entry` removed the entry but left its
+    // attachment bytes parked in `vault.binaries`. The next
+    // `save_to_bytes` then wrote those orphan bytes back to the new
+    // file — a small but real privacy bug, since the user explicitly
+    // asked us to forget the entry.
+    let path = kdbx4_basic();
+    let password = password_from_sidecar(&path);
+    let composite = CompositeKey::from_password(password.as_bytes());
+    let at: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+
+    let mut kdbx = Kdbx::<Sealed>::open(&path)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock_with_clock(&composite, Box::new(FixedClock(at)))
+        .unwrap();
+
+    let pool_before = kdbx.vault().binaries.len();
+    let root = kdbx.vault().root.id;
+    let id = kdbx
+        .add_entry(root, NewEntry::new("DoomedAttachmentOwner"))
+        .unwrap();
+
+    let payload = b"bytes that must not survive deletion\n".to_vec();
+    kdbx.edit_entry(id, HistoryPolicy::NoSnapshot, |e| {
+        e.attach("doomed.bin", payload.clone(), false);
+    })
+    .unwrap();
+    assert_eq!(kdbx.vault().binaries.len(), pool_before + 1);
+
+    // Delete the entry — the only referent of the binary.
+    kdbx.delete_entry(id).unwrap();
+    assert_eq!(
+        kdbx.vault().binaries.len(),
+        pool_before,
+        "in-memory pool must shrink once the last referent is deleted"
+    );
+
+    // Save + re-open round-trips a clean pool: the orphan bytes are
+    // gone from the on-disk artefact too.
+    let bytes = kdbx.save_to_bytes().unwrap();
+    let reopened = Kdbx::<Sealed>::open_from_bytes(bytes)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock(&composite)
+        .unwrap();
+    assert_eq!(
+        reopened.vault().binaries.len(),
+        pool_before,
+        "on-disk pool must not carry the deleted entry's attachment bytes"
+    );
+    let payload_str = String::from_utf8(payload).unwrap();
+    let any_match = reopened
+        .vault()
+        .binaries
+        .iter()
+        .any(|b| b.data == payload_str.as_bytes());
+    assert!(
+        !any_match,
+        "deleted attachment bytes leaked into the reopened pool"
+    );
+}
+
+#[test]
+fn delete_group_reaps_attachments_owned_only_by_its_subtree() {
+    // Same shape as `delete_entry_reaps_orphan_binaries_in_memory_and_on_disk`
+    // but exercises the multi-entry, multi-attachment path through
+    // `delete_group`. Worst-case for the pre-fix bug: a whole branch
+    // of attachments orphaned in one go.
+    let path = kdbx4_basic();
+    let password = password_from_sidecar(&path);
+    let composite = CompositeKey::from_password(password.as_bytes());
+    let at: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+
+    let mut kdbx = Kdbx::<Sealed>::open(&path)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock_with_clock(&composite, Box::new(FixedClock(at)))
+        .unwrap();
+
+    let pool_before = kdbx.vault().binaries.len();
+    let root = kdbx.vault().root.id;
+    let doomed_group = kdbx
+        .add_group(root, NewGroup::new("DoomedSubtree"))
+        .unwrap();
+    let id_a = kdbx.add_entry(doomed_group, NewEntry::new("A")).unwrap();
+    let id_b = kdbx.add_entry(doomed_group, NewEntry::new("B")).unwrap();
+
+    kdbx.edit_entry(id_a, HistoryPolicy::NoSnapshot, |e| {
+        e.attach("a.bin", b"alpha bytes\n".to_vec(), false);
+    })
+    .unwrap();
+    kdbx.edit_entry(id_b, HistoryPolicy::NoSnapshot, |e| {
+        e.attach("b.bin", b"beta bytes\n".to_vec(), true);
+    })
+    .unwrap();
+    assert_eq!(kdbx.vault().binaries.len(), pool_before + 2);
+
+    kdbx.delete_group(doomed_group).unwrap();
+    assert_eq!(
+        kdbx.vault().binaries.len(),
+        pool_before,
+        "in-memory pool must shrink once the entire subtree is deleted"
+    );
 }
