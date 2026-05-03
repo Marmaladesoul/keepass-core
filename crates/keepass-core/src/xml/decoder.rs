@@ -762,6 +762,16 @@ fn assign_well_known_field(entry: &mut Entry, key: &str, value: String, protecte
 /// Read the text content of the current open element until its close.
 /// Assumes the opening tag has just been consumed. Leaves the reader
 /// positioned past the matching close tag.
+///
+/// Performs XML 1.0 §2.11 end-of-line normalisation on the collected
+/// text: `\r\n` and any standalone `\r` (not followed by `\n`) collapse
+/// to a single `\n`. `quick-xml` reports text bytes verbatim; the spec
+/// requires the processor to behave as if it normalised line breaks
+/// before parsing. Without this, KDBX files authored with content
+/// containing literal CR characters (Windows / classic-Mac line
+/// endings, paste from Word, etc.) round-trip as different bytes
+/// through this decoder than through spec-compliant readers like
+/// libxml2-backed parsers.
 fn read_text<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
@@ -774,7 +784,7 @@ fn read_text<R: std::io::BufRead>(
             Ok(Event::Start(_)) => depth += 1,
             Ok(Event::End(_)) => {
                 if depth == 0 {
-                    return Ok(collected);
+                    return Ok(normalise_xml_line_endings(collected));
                 }
                 depth -= 1;
             }
@@ -795,6 +805,39 @@ fn read_text<R: std::io::BufRead>(
         }
         buf.clear();
     }
+}
+
+/// XML 1.0 §2.11 end-of-line normalisation. Translates the two-byte
+/// sequence `\r\n` and any standalone `\r` (not followed by `\n`) to
+/// a single `\n`. All other characters pass through unchanged.
+///
+/// Buffers the trailing-CR state across the entire input so a `\r\n`
+/// pair never escapes intact even if it straddles internal chunk
+/// boundaries — defensively sound, though `read_text` collects all
+/// text into a single `String` before calling this.
+fn normalise_xml_line_endings(s: String) -> String {
+    if !s.contains('\r') {
+        return s;
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut prev_was_cr = false;
+    for c in s.chars() {
+        match c {
+            '\r' => {
+                out.push('\n');
+                prev_was_cr = true;
+            }
+            '\n' if prev_was_cr => {
+                // Collapse `\r\n` — `\n` already pushed when we saw `\r`.
+                prev_was_cr = false;
+            }
+            _ => {
+                out.push(c);
+                prev_was_cr = false;
+            }
+        }
+    }
+    out
 }
 
 fn tag_name(e: &BytesStart<'_>) -> Result<String, XmlError> {
@@ -4197,6 +4240,195 @@ mod tests {
         assert!(
             times.last_modification_time.is_none(),
             "empty <LastModificationTime /> must round-trip to None"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // XML §2.11 line-ending normalisation
+    // -----------------------------------------------------------------
+
+    /// Spec compliance: the XML processor MUST behave as if it normalised
+    /// all line breaks on input — `\r\n` and any standalone `\r` collapse
+    /// to a single `\n` before parsing. `quick-xml` doesn't normalise on
+    /// its own, so the decoder applies the transformation in `read_text`.
+    /// Without this, KDBX files whose text content contains literal CR
+    /// characters (Windows / classic-Mac editors, paste from Word, etc.)
+    /// round-trip as different bytes through this decoder than through
+    /// libxml2-backed parsers.
+    #[test]
+    fn notes_with_crlf_normalises_to_lf() {
+        let xml = "<KeePassFile>\
+            <Meta><Generator>G</Generator></Meta>\
+            <Root><Group>\
+                <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>\
+                <Entry>\
+                    <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>\
+                    <String><Key>Title</Key><Value>T</Value></String>\
+                    <String><Key>Notes</Key><Value>line1\r\nline2\r\nline3</Value></String>\
+                </Entry>\
+            </Group></Root>\
+        </KeePassFile>";
+        let vault = decode_vault(xml.as_bytes()).expect("decode");
+        let entry = vault.iter_entries().next().expect("one entry");
+        assert_eq!(entry.notes, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn notes_with_bare_cr_normalises_to_lf() {
+        // The smoking-gun case for #I59 / Keys-Mac slice 2E soak: a
+        // production vault entry whose Notes content contains a lone
+        // `\r` (no following `\n`). Pre-fix this preserved the `\r`
+        // verbatim; libxml2-backed Swift readers normalised it to `\n`,
+        // producing same-length-different-bytes diffs in the
+        // structural-equivalence harness.
+        let xml = "<KeePassFile>\
+            <Meta><Generator>G</Generator></Meta>\
+            <Root><Group>\
+                <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>\
+                <Entry>\
+                    <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>\
+                    <String><Key>Title</Key><Value>T</Value></String>\
+                    <String><Key>Notes</Key><Value>line1\rline2</Value></String>\
+                </Entry>\
+            </Group></Root>\
+        </KeePassFile>";
+        let vault = decode_vault(xml.as_bytes()).expect("decode");
+        let entry = vault.iter_entries().next().expect("one entry");
+        assert_eq!(entry.notes, "line1\nline2");
+    }
+
+    #[test]
+    fn notes_with_mixed_endings_normalises() {
+        let xml = "<KeePassFile>\
+            <Meta><Generator>G</Generator></Meta>\
+            <Root><Group>\
+                <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>\
+                <Entry>\
+                    <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>\
+                    <String><Key>Title</Key><Value>T</Value></String>\
+                    <String><Key>Notes</Key><Value>a\r\nb\rc\nd</Value></String>\
+                </Entry>\
+            </Group></Root>\
+        </KeePassFile>";
+        let vault = decode_vault(xml.as_bytes()).expect("decode");
+        let entry = vault.iter_entries().next().expect("one entry");
+        assert_eq!(entry.notes, "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn notes_with_only_lf_passes_through_unchanged() {
+        // No-op path — important because the helper short-circuits when
+        // the source contains no `\r`. Asserts the common LF-only case
+        // doesn't accrue any cost or transformation.
+        let xml = "<KeePassFile>\
+            <Meta><Generator>G</Generator></Meta>\
+            <Root><Group>\
+                <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>\
+                <Entry>\
+                    <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>\
+                    <String><Key>Title</Key><Value>T</Value></String>\
+                    <String><Key>Notes</Key><Value>line1\nline2\nline3</Value></String>\
+                </Entry>\
+            </Group></Root>\
+        </KeePassFile>";
+        let vault = decode_vault(xml.as_bytes()).expect("decode");
+        let entry = vault.iter_entries().next().expect("one entry");
+        assert_eq!(entry.notes, "line1\nline2\nline3");
+    }
+
+    /// Character references (`&#xD;`, `&#xA;`, `&#xD;&#xA;`) decode to
+    /// raw bytes via `quick-xml`'s `unescape`, then the same §2.11
+    /// normalisation applies — so the user-facing output is a single
+    /// `\n` regardless of how the source authored the line break.
+    #[test]
+    fn notes_with_character_references_normalises() {
+        let xml = "<KeePassFile>\
+            <Meta><Generator>G</Generator></Meta>\
+            <Root><Group>\
+                <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>\
+                <Entry>\
+                    <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>\
+                    <String><Key>Title</Key><Value>T</Value></String>\
+                    <String><Key>Notes</Key><Value>a&#xD;&#xA;b&#xD;c</Value></String>\
+                </Entry>\
+            </Group></Root>\
+        </KeePassFile>";
+        let vault = decode_vault(xml.as_bytes()).expect("decode");
+        let entry = vault.iter_entries().next().expect("one entry");
+        assert_eq!(entry.notes, "a\nb\nc");
+    }
+
+    /// Round-trip stability: the model post-decode holds clean `\n`,
+    /// so encoding it and decoding the result must be a no-op on the
+    /// notes content. Pins the encoder/decoder asymmetry rule from
+    /// AGENTS.md — every decoder change ships with a round-trip check.
+    #[test]
+    fn line_ending_normalisation_is_round_trip_idempotent() {
+        let xml = "<KeePassFile>\
+            <Meta><Generator>G</Generator></Meta>\
+            <Root><Group>\
+                <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>\
+                <Entry>\
+                    <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>\
+                    <String><Key>Title</Key><Value>T</Value></String>\
+                    <String><Key>Notes</Key><Value>line1\r\nline2</Value></String>\
+                </Entry>\
+            </Group></Root>\
+        </KeePassFile>";
+        let vault1 = decode_vault(xml.as_bytes()).expect("decode 1");
+        let entry1 = vault1.iter_entries().next().expect("one entry");
+        let notes_after_first_decode = entry1.notes.clone();
+
+        // Re-encode, then decode again. The model holds `\n` only;
+        // the encoder writes it back as `\n`; second decode is a
+        // no-op transform.
+        let encoded = crate::xml::encoder::encode_vault(&vault1).expect("encode");
+        let vault2 = decode_vault(&encoded).expect("decode 2");
+        let entry2 = vault2.iter_entries().next().expect("one entry");
+        assert_eq!(entry2.notes, notes_after_first_decode);
+        assert_eq!(entry2.notes, "line1\nline2");
+    }
+
+    // -----------------------------------------------------------------
+    // normalise_xml_line_endings unit coverage
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn normalise_no_cr_short_circuits_to_input() {
+        let s = String::from("hello\nworld");
+        assert_eq!(normalise_xml_line_endings(s), "hello\nworld");
+    }
+
+    #[test]
+    fn normalise_collapses_crlf() {
+        assert_eq!(normalise_xml_line_endings("a\r\nb".to_owned()), "a\nb");
+    }
+
+    #[test]
+    fn normalise_translates_lone_cr() {
+        assert_eq!(normalise_xml_line_endings("a\rb".to_owned()), "a\nb");
+    }
+
+    #[test]
+    fn normalise_handles_trailing_cr() {
+        assert_eq!(normalise_xml_line_endings("a\r".to_owned()), "a\n");
+    }
+
+    #[test]
+    fn normalise_handles_consecutive_crs() {
+        // Each lone `\r` becomes its own `\n` (no collapsing).
+        assert_eq!(
+            normalise_xml_line_endings("a\r\r\rb".to_owned()),
+            "a\n\n\nb"
+        );
+    }
+
+    #[test]
+    fn normalise_handles_cr_then_other_then_crlf() {
+        // `\r` (lone) → `\n`, then `\r\n` → `\n`. Boundary state.
+        assert_eq!(
+            normalise_xml_line_endings("a\rb\r\nc".to_owned()),
+            "a\nb\nc"
         );
     }
 }
