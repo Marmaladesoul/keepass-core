@@ -29,13 +29,24 @@
 //! Per-attachment / per-tag conflict surface is logged in
 //! `MERGE_BACKLOG.md` for v0.1.x.
 //!
+//! ## Ancestor candidate set
+//!
+//! [`find_common_ancestor`] considers each side's *current* entry as
+//! well as every `<History>` snapshot when searching for a shared
+//! record. This matters for the asymmetric case where one side edited
+//! and the other did not: the editor pushes the pre-edit version into
+//! its own history, but the unedited side's current state IS that
+//! same pre-edit version — and was never pushed into its own history,
+//! because no edit was made. Treating current entries as ancestor
+//! candidates recovers the real LCA in this case.
+//!
 //! ## No-ancestor fallback
 //!
 //! When [`find_common_ancestor`] returns `None` (truncated histories
-//! diverged on both sides, or one side has no history at all), every
-//! field that differs between the two sides is classified as a
-//! conflict — never as an auto-resolution. Conservative: never
-//! overwrites a user edit silently.
+//! diverged on both sides and neither current state matches the
+//! other side's history), every field that differs between the two
+//! sides is classified as a conflict — never as an auto-resolution.
+//! Conservative: never overwrites a user edit silently.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -173,20 +184,38 @@ pub(crate) fn local_edited_after(
 /// timestamp are excluded — KDBX writers fill this and untimed records
 /// carry no meaningful ancestry. On a timestamp collision the
 /// content-hash decides.
+///
+/// **Candidate set includes each side's *current* entry**, not just
+/// `<History>` snapshots. The common case for LCA-by-current is:
+///
+/// 1. Both sides start in sync at state X (mtime T0).
+/// 2. The remote writer edits the entry. KDBX semantics: the writer
+///    pushes the pre-edit copy (still at content X, mtime T0) into
+///    `remote.history`, then mutates the current to state Y at T1.
+/// 3. The local writer hasn't touched the entry. `local.current` is
+///    still (X, T0). Crucially, `local.history` does **not** contain
+///    a snapshot of (X, T0) — local never edited, so no snapshot was
+///    pushed.
+///
+/// Without considering current entries as candidates, the only shared
+/// records would be older snapshots predating T0 — and from one of
+/// those older ancestors, both sides look like edits, producing a
+/// false-positive conflict. Including `local.current` in the candidate
+/// pool lets us recognise (X, T0) as the genuine LCA, after which the
+/// per-field 3-way classifier auto-resolves every difference to remote.
 pub(crate) fn find_common_ancestor<'a>(local: &'a Entry, remote: &'a Entry) -> Option<&'a Entry> {
-    // Group remote history by mtime so a single mtime can map to multiple records.
+    // Group remote candidates by mtime. Candidates = current + history.
     let mut remote_by_mtime: HashMap<chrono::DateTime<chrono::Utc>, Vec<&Entry>> = HashMap::new();
-    for snap in &remote.history {
+    for snap in std::iter::once(remote).chain(remote.history.iter()) {
         if let Some(t) = snap.times.last_modification_time {
             remote_by_mtime.entry(t).or_default().push(snap);
         }
     }
 
-    // Walk local history newest → oldest so the first content-matching
-    // hit is the most recent shared record.
-    let mut local_iter: Vec<&Entry> = local
-        .history
-        .iter()
+    // Walk local candidates (current + history) newest → oldest so the
+    // first content-matching hit is the most recent shared record.
+    let mut local_iter: Vec<&Entry> = std::iter::once(local)
+        .chain(local.history.iter())
         .filter(|e| e.times.last_modification_time.is_some())
         .collect();
     local_iter.sort_by_key(|e| std::cmp::Reverse(e.times.last_modification_time));
@@ -383,6 +412,71 @@ mod tests {
         let out = merge_entry(&local, &remote);
         assert_eq!(out.conflicts.len(), 1);
         assert_eq!(out.conflicts[0].kind, FieldDeltaKind::LocalOnly);
+    }
+
+    #[test]
+    fn remote_edit_pushed_pre_edit_into_history_local_unchanged_auto_resolves_remote() {
+        // Reproduces the common external-edit pattern:
+        // 1. Both sides start in sync at (Title="A", mtime=day1). Local
+        //    has no history snapshot of this state — local was the
+        //    creator and never edited.
+        // 2. Remote writer edits the entry: pushes (A, day1) into
+        //    remote.history, mutates current to (Title="B", mtime=day2).
+        // 3. Local hasn't touched it: current is still (A, day1).
+        //
+        // The LCA *is* local.current itself (matches remote.history[0]
+        // by mtime + content). With the broadened candidate set the
+        // walker recognises this and the per-field 3-way classifier
+        // sees local == ancestor → auto-resolves Title to Remote.
+        let pre_edit = snapshot("A", at(2026, 1));
+
+        let mut local = entry();
+        local.title = "A".into();
+        local.times = at(2026, 1);
+        // No local.history — local never edited.
+
+        let mut remote = entry();
+        remote.title = "B".into();
+        remote.times = at(2026, 2);
+        remote.history = vec![pre_edit];
+
+        let lca = find_common_ancestor(&local, &remote).expect("LCA via local.current");
+        assert_eq!(lca.title, "A");
+
+        let out = merge_entry(&local, &remote);
+        assert!(out.had_ancestor);
+        assert!(
+            out.conflicts.is_empty(),
+            "expected auto-resolve, got conflicts: {:?}",
+            out.conflicts
+        );
+        assert_eq!(out.auto_resolutions, vec![("Title".into(), Side::Remote)]);
+    }
+
+    #[test]
+    fn local_edit_pushed_pre_edit_into_history_remote_unchanged_auto_resolves_local() {
+        // Symmetric: local edited (pushed pre-edit into local.history,
+        // moved current forward). Remote.current is the unedited
+        // pre-edit state with no history of its own. LCA is
+        // remote.current.
+        let pre_edit = snapshot("A", at(2026, 1));
+
+        let mut local = entry();
+        local.title = "B".into();
+        local.times = at(2026, 2);
+        local.history = vec![pre_edit];
+
+        let mut remote = entry();
+        remote.title = "A".into();
+        remote.times = at(2026, 1);
+
+        let lca = find_common_ancestor(&local, &remote).expect("LCA via remote.current");
+        assert_eq!(lca.title, "A");
+
+        let out = merge_entry(&local, &remote);
+        assert!(out.had_ancestor);
+        assert!(out.conflicts.is_empty());
+        assert_eq!(out.auto_resolutions, vec![("Title".into(), Side::Local)]);
     }
 
     #[test]
