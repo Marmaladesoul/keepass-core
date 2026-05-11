@@ -35,3 +35,9 @@ Cargo.lock.bak
 # Author-only design notes, scratch work, and future-work scratchpads.
 # Referenced by AGENTS.md as "git-ignored, author-only".
 _design/
+
+# Author-only design docs
+/_localdocs/
+
+# Python fixture-generator cache
+tests/fixtures/__pycache__/
