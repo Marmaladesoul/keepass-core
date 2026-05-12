@@ -56,11 +56,13 @@ use crate::model::{
     Group, GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, PortableEntry,
     SystemClock, Timestamps, Vault,
 };
+use crate::protector::{FieldProtector, ProtectorError};
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{
     decode_vault_with_cipher, encode_vault_kdbx3_with_cipher_and_header_hash,
     encode_vault_with_cipher,
 };
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // State markers
@@ -115,6 +117,63 @@ pub struct Unlocked {
     /// so that `save_to_bytes` can derive the cipher key and HMAC base
     /// key directly, skipping the expensive Argon2 / AES-KDF round.
     transformed_key: TransformedKey,
+    /// Optional in-memory wrap layer for protected-field plaintext.
+    ///
+    /// When `Some`, the unlock pipeline wraps every protected field's
+    /// plaintext (entry password + custom fields with `protected =
+    /// true`, including the same fields on history snapshots) and
+    /// stores the wrapped bytes in the per-entry [`ProtectedFieldMap`].
+    /// The matching plaintext slot in [`Entry::password`] /
+    /// [`crate::model::CustomField::value`] is cleared to an empty
+    /// string so the canonical in-memory model never holds the
+    /// cleartext after unlock. Save-time unwrap restores the plaintext
+    /// on a local clone of the vault before the encoder runs.
+    ///
+    /// When `None`, behaviour matches the pre-protector default:
+    /// plaintext rides in the model `String` fields exactly as it
+    /// does today. See [`crate::protector`] for the trait contract.
+    protector: Option<Arc<dyn FieldProtector>>,
+    /// Per-entry map of wrapped protected-field bytes.
+    ///
+    /// Empty when [`Self::protector`] is `None`. Otherwise keyed by
+    /// [`EntryId`]; the value carries the wrapped password and any
+    /// wrapped custom-field values for that entry's current state and
+    /// every history snapshot. See [`ProtectedFields`] for shape.
+    protected_fields: ProtectedFieldMap,
+}
+
+/// Side-table of wrapped protected-field bytes keyed by [`EntryId`].
+///
+/// Populated on unlock when a [`FieldProtector`] is configured; the
+/// in-model [`Entry::password`] / [`crate::model::CustomField::value`]
+/// strings are cleared in tandem so plaintext is not duplicated in
+/// memory. Reveal-side accessors and the save pipeline consult this
+/// table to recover the plaintext on demand.
+type ProtectedFieldMap = std::collections::HashMap<EntryId, ProtectedFields>;
+
+/// Wrapped protected-field bytes for a single [`Entry`] and its
+/// [`history`](Entry::history) snapshots.
+///
+/// The shape mirrors the entry model: the entry's password lives in
+/// [`Self::password`]; per-key custom fields live in
+/// [`Self::custom_fields`]; one [`Self::history`] entry exists per
+/// history snapshot, in the same order as
+/// [`Entry::history`](crate::model::Entry::history).
+#[derive(Debug, Clone, Default)]
+struct ProtectedFields {
+    /// Wrapped bytes for the entry's password. `None` means the
+    /// password was empty at unlock time (and remains empty after
+    /// wrap, since wrapping an empty string is meaningless and would
+    /// just add an empty-wrap round-trip cost for no benefit).
+    password: Option<Vec<u8>>,
+    /// Wrapped bytes for each `CustomField` with `protected = true`,
+    /// keyed by `CustomField::key`. Non-protected custom fields are
+    /// not included.
+    custom_fields: std::collections::HashMap<String, Vec<u8>>,
+    /// One entry per snapshot in [`Entry::history`](crate::model::Entry::history),
+    /// in the same order. Each carries the wrapped form of the
+    /// snapshot's password and protected custom fields.
+    history: Vec<ProtectedFields>,
 }
 
 /// Inner-stream cipher parameters retained across [`Kdbx::<Unlocked>`]
@@ -337,6 +396,67 @@ impl Kdbx<HeaderRead> {
             state,
         })
     }
+
+    /// Like [`Self::unlock`] but installs a [`FieldProtector`] so
+    /// protected-field plaintext is wrapped at the wrap boundary and
+    /// not held as a `String` on the in-memory model.
+    ///
+    /// After unlock, the configured protector is invoked once per
+    /// protected field (entry password + each `protected = true`
+    /// custom field on the current entry state and every history
+    /// snapshot). The plaintext slot on the model is cleared to an
+    /// empty `String`; the wrapped bytes live in an internal side
+    /// table reachable via [`Kdbx::<Unlocked>::reveal_password`] and
+    /// [`Kdbx::<Unlocked>::reveal_custom_field`]. On save the
+    /// plaintext is reconstituted on a local clone of the vault
+    /// before the encoder runs; the canonical in-memory state stays
+    /// wrapped across the save.
+    ///
+    /// Passing `None` as the protector is equivalent to
+    /// [`Self::unlock`]: no wrapping is performed and the model
+    /// behaves exactly as it did before the trait existed.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::unlock`], plus [`Error::Protector`] if any
+    /// `wrap` call fails on a non-empty protected field. A wrap
+    /// failure surfaces immediately; the resulting `Kdbx` is
+    /// discarded so a partially-wrapped vault is never exposed.
+    pub fn unlock_with_protector(
+        self,
+        composite: &CompositeKey,
+        protector: Option<Arc<dyn FieldProtector>>,
+    ) -> Result<Kdbx<Unlocked>, Error> {
+        self.unlock_with_clock_and_protector(composite, Box::new(SystemClock), protector)
+    }
+
+    /// Combination of [`Self::unlock_with_clock`] and
+    /// [`Self::unlock_with_protector`] — caller-supplied clock plus
+    /// optional protector. Intended for tests; production callers
+    /// pick one of the two narrower entry points.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::unlock_with_protector`].
+    pub fn unlock_with_clock_and_protector(
+        self,
+        composite: &CompositeKey,
+        clock: Box<dyn Clock>,
+        protector: Option<Arc<dyn FieldProtector>>,
+    ) -> Result<Kdbx<Unlocked>, Error> {
+        let mut state = do_unlock(&self.bytes, &self.state, composite)?;
+        state.clock = clock;
+        if let Some(p) = protector {
+            state.protected_fields = wrap_vault_protected_fields(&mut state.vault, p.as_ref())?;
+            state.protector = Some(p);
+        }
+        Ok(Kdbx {
+            bytes: self.bytes,
+            signature: self.signature,
+            version: self.version,
+            state,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -450,14 +570,114 @@ impl Kdbx<Unlocked> {
                     key: inner_stream_key,
                 }),
                 transformed_key,
+                protector: None,
+                protected_fields: ProtectedFieldMap::new(),
             },
         })
+    }
+
+    /// Like [`Self::create_empty_v4`] but installs a
+    /// [`FieldProtector`] for the fresh vault.
+    ///
+    /// The empty vault has no protected fields to wrap, so the
+    /// protector is simply stored on the resulting [`Kdbx<Unlocked>`]
+    /// and used as entries are added (their freshly-set password /
+    /// custom-field values are wrapped via the entry editor before
+    /// any subsequent save). Passing `None` is equivalent to
+    /// [`Self::create_empty_v4`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::create_empty_v4`].
+    pub fn create_empty_v4_with_protector(
+        composite: &CompositeKey,
+        database_name: impl Into<String>,
+        protector: Option<Arc<dyn FieldProtector>>,
+    ) -> Result<Self, Error> {
+        let mut kdbx = Self::create_empty_v4(composite, database_name)?;
+        kdbx.state.protector = protector;
+        Ok(kdbx)
     }
 
     /// The decoded vault.
     #[must_use]
     pub fn vault(&self) -> &Vault {
         &self.state.vault
+    }
+
+    /// The configured [`FieldProtector`], if any.
+    ///
+    /// `None` when the vault was unlocked via [`Self::unlock`] or
+    /// constructed via [`Self::create_empty_v4`]; `Some(...)` when
+    /// unlocked via [`Self::unlock_with_protector`] /
+    /// [`Self::unlock_with_clock_and_protector`] or built via
+    /// [`Self::create_empty_v4_with_protector`].
+    #[must_use]
+    pub fn field_protector(&self) -> Option<&Arc<dyn FieldProtector>> {
+        self.state.protector.as_ref()
+    }
+
+    /// Reveal an entry's password as plaintext.
+    ///
+    /// When no protector is configured, returns the stored
+    /// [`Entry::password`] verbatim (it already holds plaintext).
+    /// When a protector is configured, looks up the wrapped bytes in
+    /// the internal side table and unwraps via the protector. An
+    /// empty password (no wrapped bytes recorded) returns
+    /// `Ok(String::new())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelError::EntryNotFound`] if no entry matches
+    /// `id`. Returns [`ProtectorError::Unwrap`] (wrapped in
+    /// [`Error::Protector`]) if the protector rejects the wrapped
+    /// bytes or unwrap produces non-UTF-8 output.
+    pub fn reveal_password(&self, id: EntryId) -> Result<String, Error> {
+        let entry = find_entry(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        match (
+            self.state.protector.as_ref(),
+            self.state.protected_fields.get(&id),
+        ) {
+            (Some(protector), Some(record)) => match &record.password {
+                Some(bytes) => Ok(decode_wrapped(bytes, protector.as_ref())?),
+                None => Ok(String::new()),
+            },
+            _ => Ok(entry.password.clone()),
+        }
+    }
+
+    /// Reveal a custom field's value as plaintext.
+    ///
+    /// `Ok(None)` when no custom field with `key` exists on the
+    /// entry. For non-protected custom fields, returns the stored
+    /// value verbatim (it is already plaintext regardless of whether
+    /// a protector is configured). For protected custom fields,
+    /// behaves analogously to [`Self::reveal_password`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelError::EntryNotFound`] if no entry matches
+    /// `id`. Returns [`ProtectorError::Unwrap`] (wrapped in
+    /// [`Error::Protector`]) on protector failure or non-UTF-8
+    /// output.
+    pub fn reveal_custom_field(&self, id: EntryId, key: &str) -> Result<Option<String>, Error> {
+        let entry = find_entry(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let Some(cf) = entry.custom_fields.iter().find(|c| c.key == key) else {
+            return Ok(None);
+        };
+        if !cf.protected {
+            return Ok(Some(cf.value.clone()));
+        }
+        match (
+            self.state.protector.as_ref(),
+            self.state.protected_fields.get(&id),
+        ) {
+            (Some(protector), Some(record)) => match record.custom_fields.get(key) {
+                Some(bytes) => Ok(Some(decode_wrapped(bytes, protector.as_ref())?)),
+                None => Ok(Some(String::new())),
+            },
+            _ => Ok(Some(cf.value.clone())),
+        }
     }
 
     /// The [`Clock`] this unlocked database uses to stamp timestamps
@@ -2672,6 +2892,8 @@ fn do_unlock(
                     }),
                     transformed_key: transformed,
                     clock: Box::new(SystemClock),
+                    protector: None,
+                    protected_fields: ProtectedFieldMap::new(),
                 });
             }
         };
@@ -2697,7 +2919,160 @@ fn do_unlock(
         }),
         transformed_key: transformed,
         clock: Box::new(SystemClock),
+        protector: None,
+        protected_fields: ProtectedFieldMap::new(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// FieldProtector plumbing — wrap on unlock, unwrap on save / reveal.
+// ---------------------------------------------------------------------------
+
+/// Walk every entry in `vault` (and each entry's history snapshots),
+/// wrap its protected-field plaintext via `protector`, blank the
+/// matching `String` slot on the model, and return the resulting
+/// [`ProtectedFieldMap`].
+///
+/// Called from [`Kdbx::<HeaderRead>::unlock_with_protector`] after the
+/// inner-stream cipher has decrypted the protected XML values; this
+/// pass is what makes "no plaintext in `Entry`" true for a vault that
+/// was unlocked with a protector.
+///
+/// Empty plaintext is left as-is — wrapping an empty `String` is a
+/// no-op round-trip and would just consume protector cycles. Reveal
+/// returns the empty `String` straight from the model in that case.
+fn wrap_vault_protected_fields(
+    vault: &mut Vault,
+    protector: &dyn FieldProtector,
+) -> Result<ProtectedFieldMap, ProtectorError> {
+    let mut map = ProtectedFieldMap::new();
+    walk_groups_for_wrap(&mut vault.root, protector, &mut map)?;
+    Ok(map)
+}
+
+fn walk_groups_for_wrap(
+    group: &mut Group,
+    protector: &dyn FieldProtector,
+    map: &mut ProtectedFieldMap,
+) -> Result<(), ProtectorError> {
+    for entry in &mut group.entries {
+        let wrapped = wrap_entry(entry, protector)?;
+        map.insert(entry.id, wrapped);
+    }
+    for child in &mut group.groups {
+        walk_groups_for_wrap(child, protector, map)?;
+    }
+    Ok(())
+}
+
+/// Wrap an entry's protected fields (and those of every history
+/// snapshot) in place, returning the resulting wrapped-bytes record.
+fn wrap_entry(
+    entry: &mut Entry,
+    protector: &dyn FieldProtector,
+) -> Result<ProtectedFields, ProtectorError> {
+    let mut out = ProtectedFields {
+        password: wrap_string_in_place(&mut entry.password, protector)?,
+        ..ProtectedFields::default()
+    };
+    for cf in &mut entry.custom_fields {
+        if cf.protected {
+            if let Some(b) = wrap_string_in_place(&mut cf.value, protector)? {
+                out.custom_fields.insert(cf.key.clone(), b);
+            }
+        }
+    }
+    for snap in &mut entry.history {
+        // History snapshots are full Entry values with their own
+        // protected-field state; recurse, but they themselves never
+        // nest further history (per `Entry::history` doc).
+        let snap_wrapped = wrap_entry(snap, protector)?;
+        out.history.push(snap_wrapped);
+    }
+    Ok(out)
+}
+
+/// Wrap `value`'s bytes via `protector` and replace the contents with
+/// an empty string. Returns `None` if the input is already empty (no
+/// wrap performed — saves a protector round-trip on entries with no
+/// password).
+fn wrap_string_in_place(
+    value: &mut String,
+    protector: &dyn FieldProtector,
+) -> Result<Option<Vec<u8>>, ProtectorError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let bytes = protector.wrap(value.as_bytes())?;
+    value.clear();
+    Ok(Some(bytes))
+}
+
+/// Walk `vault` and restore plaintext on every protected field by
+/// looking up the wrapped bytes in `map` and unwrapping via
+/// `protector`.
+///
+/// Mirror of [`wrap_vault_protected_fields`], used by the save
+/// pipeline on a local clone of the vault so the canonical
+/// [`Unlocked::vault`] state stays wrapped across the save.
+fn unwrap_vault_protected_fields(
+    vault: &mut Vault,
+    map: &ProtectedFieldMap,
+    protector: &dyn FieldProtector,
+) -> Result<(), ProtectorError> {
+    walk_groups_for_unwrap(&mut vault.root, map, protector)
+}
+
+fn walk_groups_for_unwrap(
+    group: &mut Group,
+    map: &ProtectedFieldMap,
+    protector: &dyn FieldProtector,
+) -> Result<(), ProtectorError> {
+    for entry in &mut group.entries {
+        if let Some(record) = map.get(&entry.id) {
+            unwrap_entry(entry, record, protector)?;
+        }
+    }
+    for child in &mut group.groups {
+        walk_groups_for_unwrap(child, map, protector)?;
+    }
+    Ok(())
+}
+
+fn unwrap_entry(
+    entry: &mut Entry,
+    record: &ProtectedFields,
+    protector: &dyn FieldProtector,
+) -> Result<(), ProtectorError> {
+    if let Some(b) = &record.password {
+        entry.password = decode_wrapped(b, protector)?;
+    }
+    for cf in &mut entry.custom_fields {
+        if cf.protected {
+            if let Some(b) = record.custom_fields.get(&cf.key) {
+                cf.value = decode_wrapped(b, protector)?;
+            }
+        }
+    }
+    // History snapshots align by position with the record's history.
+    // Skip silently if lengths diverge: that can happen mid-edit before
+    // a save (the entry editor records new history while the protector
+    // map hasn't been refreshed) — encoder writes whatever the entry
+    // currently holds, which is the same shape as the no-protector
+    // path.
+    for (snap, snap_record) in entry.history.iter_mut().zip(record.history.iter()) {
+        unwrap_entry(snap, snap_record, protector)?;
+    }
+    Ok(())
+}
+
+fn decode_wrapped(
+    wrapped: &[u8],
+    protector: &dyn FieldProtector,
+) -> Result<String, ProtectorError> {
+    let bytes = protector.unwrap(wrapped)?;
+    String::from_utf8(bytes)
+        .map_err(|e| ProtectorError::Unwrap(format!("unwrapped bytes are not valid UTF-8: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -2717,6 +3092,13 @@ fn do_save(signature: FileSignature, version: Version, state: &Unlocked) -> Resu
     let mut vault = state.vault.clone();
     gc_binaries_pool(&mut vault);
     gc_custom_icons_pool(&mut vault);
+    // Unwrap protected fields back into the cloned vault before the
+    // encoder runs. The canonical `state.vault` keeps its wrapped /
+    // empty-plaintext shape, so the in-memory posture is unaffected
+    // by the save round-trip. No-op when no protector is configured.
+    if let Some(protector) = state.protector.as_ref() {
+        unwrap_vault_protected_fields(&mut vault, &state.protected_fields, protector.as_ref())?;
+    }
     match version {
         Version::V3 => do_save_v3(signature, state, &vault),
         Version::V4 => do_save_v4(signature, state, &vault),

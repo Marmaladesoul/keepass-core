@@ -35,4 +35,11 @@ pub enum Error {
     /// duplicate UUID, etc. See [`crate::model::ModelError`].
     #[error(transparent)]
     Model(#[from] crate::model::ModelError),
+
+    /// A [`FieldProtector`](crate::protector::FieldProtector) wrap or
+    /// unwrap call failed. Surfaced from unlock (wrap fails after the
+    /// cipher decrypts the inner XML), from save (unwrap fails before
+    /// the encoder re-encrypts), and from reveal-side accessors.
+    #[error(transparent)]
+    Protector(#[from] crate::protector::ProtectorError),
 }
