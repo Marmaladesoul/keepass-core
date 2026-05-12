@@ -1116,6 +1116,47 @@ impl Kdbx<Unlocked> {
         Ok(())
     }
 
+    /// Apply the vault's current
+    /// [`crate::model::Meta::history_max_items`] +
+    /// [`crate::model::Meta::history_max_size`] limits to one entry's
+    /// `history` list. Returns the number of snapshots dropped.
+    ///
+    /// This is the same truncation pass [`Self::edit_entry`] runs
+    /// after pushing a fresh snapshot, exposed as a standalone
+    /// operation so callers can re-apply the current limits without
+    /// performing a content edit — useful after the user lowers
+    /// `history_max_items` or `history_max_size` and wants the new
+    /// caps to take immediate effect across existing entries.
+    ///
+    /// Semantics match the in-edit truncation:
+    /// - Negative limits mean "unlimited" and skip that budget.
+    /// - The item-count budget is enforced first.
+    /// - The size budget is an approximate soft cap on serialised
+    ///   canonical-field byte count; entries are dropped oldest-first
+    ///   until the estimate fits.
+    ///
+    /// Like [`Self::prune_history_older_than`], this is a bookkeeping
+    /// operation, not a content edit:
+    /// `entry.times.last_modification_time` is **not** stamped, and
+    /// [`crate::model::Meta::settings_changed`] is **not** touched.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
+    pub fn trim_entry_history(&mut self, id: EntryId) -> Result<u32, ModelError> {
+        let history_max_items = self.state.vault.meta.history_max_items;
+        let history_max_size = self.state.vault.meta.history_max_size;
+        let entry =
+            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let before = entry.history.len();
+        truncate_history(&mut entry.history, history_max_items, history_max_size);
+        let removed = before - entry.history.len();
+        // `before - after` is bounded by history length; `u32::MAX`
+        // snapshots is many orders of magnitude past anything KeePass
+        // emits in practice, so the cast is safe.
+        Ok(u32::try_from(removed).unwrap_or(u32::MAX))
+    }
+
     /// Drop every history snapshot whose own
     /// [`crate::model::Timestamps::last_modification_time`] is older
     /// than `cutoff`, across the entire vault. Returns the total
