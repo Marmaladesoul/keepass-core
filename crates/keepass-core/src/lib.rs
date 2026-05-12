@@ -58,6 +58,7 @@ pub mod error;
 pub mod format;
 pub mod kdbx;
 pub mod model;
+pub mod protector;
 pub mod secret;
 pub mod xml;
 
