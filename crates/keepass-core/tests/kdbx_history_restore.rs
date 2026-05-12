@@ -726,3 +726,97 @@ fn prune_history_older_than_with_empty_vault_returns_zero() {
     let removed2 = kdbx.prune_history_older_than(t0 + Duration::days(365 * 100));
     assert_eq!(removed2, 0);
 }
+
+// ---------------------------------------------------------------------
+// Kdbx::trim_entry_history
+// ---------------------------------------------------------------------
+
+#[test]
+fn trim_entry_history_applies_current_item_limit() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    // Build five snapshots (history.len() == 4 after the seed).
+    let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4", "v5"]);
+    assert_eq!(find_entry(&kdbx, id).history.len(), 4);
+
+    // Lower the item cap; existing entry's history exceeds it.
+    kdbx.set_history_max_items(2);
+
+    let removed = kdbx.trim_entry_history(id).unwrap();
+    assert_eq!(removed, 2);
+
+    let e = find_entry(&kdbx, id);
+    assert_eq!(e.history.len(), 2);
+    // Oldest-first drop: surviving snapshots are the two newest.
+    assert_eq!(e.history[0].password, "v3");
+    assert_eq!(e.history[1].password, "v4");
+}
+
+#[test]
+fn trim_entry_history_returns_zero_when_within_limits() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3"]);
+    // history.len() == 2; default cap (10) is well above that.
+    assert_eq!(find_entry(&kdbx, id).history.len(), 2);
+
+    let removed = kdbx.trim_entry_history(id).unwrap();
+    assert_eq!(removed, 0);
+    assert_eq!(find_entry(&kdbx, id).history.len(), 2);
+}
+
+#[test]
+fn trim_entry_history_respects_size_limit() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4", "v5"]);
+    assert_eq!(find_entry(&kdbx, id).history.len(), 4);
+
+    // Disable the item budget so size is the only constraint, then set
+    // a size cap small enough that only one snapshot can fit. Each
+    // snapshot's approximate size is dominated by the 200-byte wrapper
+    // constant; 250 bytes leaves room for exactly one.
+    kdbx.set_history_max_items(-1);
+    kdbx.set_history_max_size(250);
+
+    let removed = kdbx.trim_entry_history(id).unwrap();
+    assert!(
+        removed >= 3,
+        "expected at least 3 snapshots dropped, got {removed}"
+    );
+    let surviving = find_entry(&kdbx, id).history.len();
+    assert!(
+        surviving <= 1,
+        "size cap left {surviving} snapshots; expected <= 1"
+    );
+}
+
+#[test]
+fn trim_entry_history_does_not_stamp_last_modification_time() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4"]);
+    let last_mod_before = find_entry(&kdbx, id).times.last_modification_time;
+
+    kdbx.set_history_max_items(1);
+    // Advance the clock so an erroneous stamp would be visible.
+    clock.set(t0 + Duration::hours(5));
+    let _ = kdbx.trim_entry_history(id).unwrap();
+
+    let e = find_entry(&kdbx, id);
+    assert_eq!(
+        e.times.last_modification_time, last_mod_before,
+        "trim is bookkeeping, not a content edit — must not stamp last_modification_time"
+    );
+}
+
+#[test]
+fn trim_entry_history_unknown_entry_errors() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, _clock) = open_basic_with_clock(t0);
+    let bogus = EntryId(Uuid::new_v4());
+    match kdbx.trim_entry_history(bogus) {
+        Err(ModelError::EntryNotFound(id)) => assert_eq!(id, bogus),
+        other => panic!("expected EntryNotFound, got {other:?}"),
+    }
+}
