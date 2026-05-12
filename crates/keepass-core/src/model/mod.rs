@@ -571,6 +571,23 @@ impl Group {
         )
     }
 
+    /// Collect every group reachable from this one's subtree (recursive
+    /// descendants only — `self` is **not** included), depth-first.
+    ///
+    /// Useful for callers that need to validate a candidate move (the
+    /// destination must not be a descendant of the moved group) or
+    /// enumerate icon / entry refs across a whole subtree without
+    /// touching `self`.
+    #[must_use]
+    pub fn all_subgroups(&self) -> Vec<&Group> {
+        let mut out = Vec::with_capacity(self.total_subgroups());
+        for child in &self.groups {
+            out.push(child);
+            out.extend(child.all_subgroups());
+        }
+        out
+    }
+
     /// Construct a minimal [`Group`] with the given id and default
     /// everything else.
     ///
@@ -929,6 +946,36 @@ impl Vault {
         self.root.iter_entries()
     }
 
+    /// Return the [`GroupId`] of the group that directly contains
+    /// `child`. Returns `None` when `child` is the root group itself,
+    /// or when no group with that id exists in the vault.
+    ///
+    /// Walks the tree from the root; cost is O(N) in the total group
+    /// count. The model does not store parent links — parenthood is
+    /// purely positional in the group tree — so this is a search rather
+    /// than a field read.
+    #[must_use]
+    pub fn group_parent(&self, child: GroupId) -> Option<GroupId> {
+        find_parent_group(&self.root, child)
+    }
+
+    /// Borrow the raw bytes for the custom icon identified by `id`.
+    /// Returns `None` if no such icon is registered.
+    ///
+    /// Mirror of [`crate::kdbx::Kdbx::custom_icon`] for callers that
+    /// hold a [`Vault`] directly (read-only walks, downstream FFI
+    /// surfaces that expose the vault model without the mutating
+    /// `Kdbx` wrapper). Bytes are opaque to the library — typically
+    /// PNG, but whatever the writing client emitted.
+    #[must_use]
+    pub fn custom_icon(&self, id: Uuid) -> Option<&[u8]> {
+        self.meta
+            .custom_icons
+            .iter()
+            .find(|c| c.uuid == id)
+            .map(|c| c.data.as_slice())
+    }
+
     /// Construct a minimal [`Vault`] with the given root-group id, an
     /// empty root group, default [`Meta`], and no binaries or
     /// tombstones.
@@ -947,6 +994,22 @@ impl Vault {
             deleted_objects: Vec::new(),
         }
     }
+}
+
+/// Walk `root`'s subtree looking for the group with id `child`,
+/// returning the id of its immediate parent group. Returns `None` if
+/// `child == root.id` (the root has no parent) or if `child` is not
+/// present in the tree at all.
+fn find_parent_group(root: &Group, child: GroupId) -> Option<GroupId> {
+    for g in &root.groups {
+        if g.id == child {
+            return Some(root.id);
+        }
+        if let Some(p) = find_parent_group(g, child) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
