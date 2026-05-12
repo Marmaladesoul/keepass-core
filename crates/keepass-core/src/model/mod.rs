@@ -946,6 +946,35 @@ impl Vault {
         self.root.iter_entries()
     }
 
+    /// Collect every entry in the vault, depth-first through the group
+    /// tree.
+    ///
+    /// Convenience eager-collected mirror of [`Self::iter_entries`] for
+    /// FFI surfaces that prefer a concrete `Vec` over a borrowed
+    /// iterator. Includes entries in the recycle-bin group (if any) —
+    /// callers that want to exclude them can filter using
+    /// [`Self::recycle_bin_enabled`] and [`Meta::recycle_bin_uuid`].
+    #[must_use]
+    pub fn all_entries(&self) -> Vec<&Entry> {
+        let mut out = Vec::with_capacity(self.root.total_entries());
+        out.extend(self.root.iter_entries());
+        out
+    }
+
+    /// Whether the recycle-bin feature is enabled on this vault's meta
+    /// block.
+    ///
+    /// This is the raw flag — it does **not** check that
+    /// [`Meta::recycle_bin_uuid`] actually points at an existing group.
+    /// Both bits of state are written by the encoder verbatim, and
+    /// downstream callers (e.g. an FFI consumer rendering a "Move to
+    /// Recycle Bin" affordance) typically want both: enable-flag for
+    /// the UI toggle, uuid for the destination.
+    #[must_use]
+    pub fn recycle_bin_enabled(&self) -> bool {
+        self.meta.recycle_bin_enabled
+    }
+
     /// Return the [`GroupId`] of the group that directly contains
     /// `child`. Returns `None` when `child` is the root group itself,
     /// or when no group with that id exists in the vault.

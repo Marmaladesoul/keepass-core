@@ -1849,6 +1849,71 @@ impl Kdbx<Unlocked> {
         Ok(())
     }
 
+    /// Move a group from its current parent to `new_parent`, inserting
+    /// it at the given `position` among `new_parent`'s children.
+    ///
+    /// Same bookkeeping and same error semantics as [`Self::move_group`]
+    /// — the only difference is the insertion point. A `position`
+    /// greater than the destination's current child count is clamped to
+    /// the end (i.e. equivalent to a push), matching the "out-of-range
+    /// is append" convention used by typical drag-and-drop reordering
+    /// UIs.
+    ///
+    /// When the source's old parent and `new_parent` are the same
+    /// group, this is a sibling reorder: the source is removed first,
+    /// then re-inserted at `position` *relative to the remaining
+    /// siblings*. Callers that want a stable "insert before sibling X"
+    /// semantic should compute X's index in the post-removal list.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::CannotDeleteRoot`] if `id` is the root group.
+    /// - [`ModelError::GroupNotFound`] if either `id` or `new_parent`
+    ///   is missing.
+    /// - [`ModelError::CircularMove`] if the move would create a cycle.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic under any input. The final `find_group_mut`
+    /// call is `.expect()`ed because the destination's existence was
+    /// already proved earlier in the function.
+    pub fn move_group_to_position(
+        &mut self,
+        id: GroupId,
+        new_parent: GroupId,
+        position: usize,
+    ) -> Result<(), ModelError> {
+        if self.state.vault.root.id == id {
+            return Err(ModelError::CannotDeleteRoot);
+        }
+
+        if find_group(&self.state.vault.root, new_parent).is_none() {
+            return Err(ModelError::GroupNotFound(new_parent));
+        }
+
+        let Some(source_subtree) = find_group(&self.state.vault.root, id) else {
+            return Err(ModelError::GroupNotFound(id));
+        };
+        if subtree_contains(source_subtree, new_parent) {
+            return Err(ModelError::CircularMove {
+                moving: id,
+                new_parent,
+            });
+        }
+
+        let (mut group, old_parent) = remove_group_with_parent_pair(&mut self.state.vault.root, id)
+            .ok_or(ModelError::GroupNotFound(id))?;
+        let now = self.state.clock.now();
+        group.previous_parent_group = Some(old_parent);
+        group.times.location_changed = Some(now);
+
+        let target = find_group_mut(&mut self.state.vault.root, new_parent)
+            .expect("destination existence checked above");
+        let clamped = position.min(target.groups.len());
+        target.groups.insert(clamped, group);
+        Ok(())
+    }
+
     /// Field-level edit on a single group, with one automatic
     /// `last_modification_time` stamp after the closure returns.
     ///
