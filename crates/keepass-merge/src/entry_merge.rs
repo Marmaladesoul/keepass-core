@@ -50,9 +50,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use keepass_core::model::Entry;
+use keepass_core::model::{Binary, Entry};
+use sha2::{Digest, Sha256};
 
-use crate::conflict::{FieldDelta, FieldDeltaKind};
+use crate::conflict::{AttachmentDelta, AttachmentDeltaKind, FieldDelta, FieldDeltaKind};
 use crate::hash::{ct_eq, entry_content_hash};
 
 /// Which side an auto-resolved field should be applied from.
@@ -74,6 +75,17 @@ pub(crate) struct EntryMergeOutput {
     /// step copies the chosen side's value into the merged entry — or
     /// deletes the field if the chosen side has no value for it.
     pub auto_resolutions: Vec<(String, Side)>,
+    /// Attachment names whose 3-way merge could not auto-resolve.
+    /// Populated by the classifier added in slice B2; no consumer yet
+    /// — routing in `merge.rs` and `apply.rs` will start reading this
+    /// in slice B3 (per `_localdocs/MERGE_ATTACHMENT_DESIGN.md`).
+    #[allow(dead_code)]
+    pub attachment_conflicts: Vec<AttachmentDelta>,
+    /// Attachment names whose 3-way merge has a clear answer. Same
+    /// shape as `auto_resolutions` but keyed by attachment name. Also
+    /// awaiting B3 wiring.
+    #[allow(dead_code)]
+    pub attachment_auto_resolutions: Vec<AttachmentAutoResolution>,
     /// `true` iff [`find_common_ancestor`] produced a hit. `false` means
     /// every conflicting field was classified conservatively (no
     /// auto-resolution attempted).
@@ -87,15 +99,45 @@ pub(crate) struct EntryMergeOutput {
     pub had_ancestor: bool,
 }
 
+/// One auto-resolved attachment decision. Companion to the field-level
+/// `(String, Side)` entries in [`EntryMergeOutput::auto_resolutions`].
+///
+/// `side` says which side wins. Apply consumes the winner like field
+/// merge does: ensure the merged entry's attachment list mirrors that
+/// side's presence-or-absence for this name. When the winning side has
+/// the attachment, take its bytes; when the winning side doesn't,
+/// drop it from the merged entry.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // wired up in slice B3
+pub(crate) struct AttachmentAutoResolution {
+    pub name: String,
+    pub side: Side,
+}
+
 /// Names of the standard `<String>` fields on an [`Entry`].
 const STANDARD_FIELDS: &[&str] = &["Title", "UserName", "Password", "URL", "Notes"];
 
-/// Run the 3-way field merge for one entry pair. See module docs.
-pub(crate) fn merge_entry(local: &Entry, remote: &Entry) -> EntryMergeOutput {
+/// Run the 3-way field + attachment merge for one entry pair. See
+/// module docs.
+///
+/// `local_binaries` / `remote_binaries` are the binary pools from each
+/// side's enclosing [`keepass_core::model::Vault`] — used by the
+/// attachment classifier to dereference [`keepass_core::model::Attachment::ref_id`]
+/// values into payload SHA-256 hashes. The LCA is always taken from
+/// the local side (see [`find_common_ancestor`]); its attachment
+/// `ref_id` values therefore index into `local_binaries`.
+pub(crate) fn merge_entry(
+    local: &Entry,
+    remote: &Entry,
+    local_binaries: &[Binary],
+    remote_binaries: &[Binary],
+) -> EntryMergeOutput {
     let ancestor = find_common_ancestor(local, remote);
     let mut out = EntryMergeOutput {
         conflicts: Vec::new(),
         auto_resolutions: Vec::new(),
+        attachment_conflicts: Vec::new(),
+        attachment_auto_resolutions: Vec::new(),
         had_ancestor: ancestor.is_some(),
     };
 
@@ -154,7 +196,131 @@ pub(crate) fn merge_entry(local: &Entry, remote: &Entry) -> EntryMergeOutput {
         }
     }
 
+    classify_attachments(
+        local,
+        remote,
+        ancestor,
+        local_binaries,
+        remote_binaries,
+        &mut out,
+    );
+
     out
+}
+
+/// Bundle of one side's attachment metadata at a single name, used by
+/// the 3-way classifier. `sha256` is `None` when the attachment is
+/// absent on that side; the same `Option`-presence semantics that
+/// drive [`classify_three_way`] for fields apply here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct AttachmentSnap {
+    sha256: Option<[u8; 32]>,
+    size: Option<u64>,
+}
+
+impl AttachmentSnap {
+    fn absent() -> Self {
+        Self {
+            sha256: None,
+            size: None,
+        }
+    }
+}
+
+/// Walk the union of attachment names from local + remote (and the
+/// LCA, if any) and bucket each into either an auto-resolution or a
+/// conflict. Naming and 3-way classification mirror the custom-fields
+/// pass above; the comparator is the payload SHA-256 from the
+/// dereferenced binary pool.
+fn classify_attachments(
+    local: &Entry,
+    remote: &Entry,
+    ancestor: Option<&Entry>,
+    local_binaries: &[Binary],
+    remote_binaries: &[Binary],
+    out: &mut EntryMergeOutput,
+) {
+    let local_map = attachment_map(local, local_binaries);
+    let remote_map = attachment_map(remote, remote_binaries);
+    // The LCA is sourced from local-side history (see
+    // [`find_common_ancestor`]); its `ref_id`s therefore index into
+    // `local_binaries`.
+    let ancestor_map = ancestor.map(|a| attachment_map(a, local_binaries));
+
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    names.extend(local_map.keys().copied());
+    names.extend(remote_map.keys().copied());
+
+    for name in names {
+        let l = local_map
+            .get(name)
+            .copied()
+            .unwrap_or_else(AttachmentSnap::absent);
+        let r = remote_map
+            .get(name)
+            .copied()
+            .unwrap_or_else(AttachmentSnap::absent);
+        if l == r {
+            // Byte-identical (or absent on both, though absent-on-both
+            // can't occur here — the name was collected from the union).
+            continue;
+        }
+        let resolution = ancestor_map.as_ref().map(|a| {
+            let av = a.get(name).copied().unwrap_or_else(AttachmentSnap::absent);
+            classify_three_way(l.sha256.as_ref(), r.sha256.as_ref(), av.sha256.as_ref())
+        });
+        if let Some(Resolution::Auto(side)) = resolution {
+            out.attachment_auto_resolutions
+                .push(AttachmentAutoResolution {
+                    name: name.into(),
+                    side,
+                });
+        } else {
+            let kind = match (l.sha256.is_some(), r.sha256.is_some()) {
+                (true, true) => AttachmentDeltaKind::BothDiffer,
+                (true, false) => AttachmentDeltaKind::LocalOnly,
+                (false, true) => AttachmentDeltaKind::RemoteOnly,
+                (false, false) => {
+                    unreachable!("name collected from union of local + remote")
+                }
+            };
+            out.attachment_conflicts.push(AttachmentDelta {
+                name: name.into(),
+                kind,
+                local_sha256: l.sha256,
+                remote_sha256: r.sha256,
+                local_size: l.size,
+                remote_size: r.size,
+            });
+        }
+    }
+}
+
+/// Build a `name → AttachmentSnap` map for one side. Skips
+/// attachments whose `ref_id` is out of bounds in `binaries` (matches
+/// the conservative posture elsewhere in the crate: corrupt refs
+/// don't block the merge — they're effectively absent from the
+/// comparator). Duplicate names on the same side (illegal per KDBX
+/// but the upstream model doesn't enforce uniqueness) collapse to
+/// first-occurrence wins, same as the custom-field map.
+fn attachment_map<'a>(entry: &'a Entry, binaries: &[Binary]) -> HashMap<&'a str, AttachmentSnap> {
+    let mut out = HashMap::with_capacity(entry.attachments.len());
+    for att in &entry.attachments {
+        let Some(bin) = binaries.get(att.ref_id as usize) else {
+            continue;
+        };
+        out.entry(att.name.as_str()).or_insert(AttachmentSnap {
+            sha256: Some(sha256_of(&bin.data)),
+            size: Some(bin.data.len() as u64),
+        });
+    }
+    out
+}
+
+fn sha256_of(bytes: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().into()
 }
 
 /// Detect whether a local entry appears to have been edited after a
@@ -283,7 +449,7 @@ fn custom_map(entry: &Entry) -> HashMap<&str, (&str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{Side, find_common_ancestor, merge_entry};
-    use crate::conflict::FieldDeltaKind;
+    use crate::conflict::{AttachmentDeltaKind, FieldDeltaKind};
     use chrono::{TimeZone, Utc};
     use keepass_core::model::{CustomField, Entry, EntryId, Timestamps};
     use uuid::Uuid;
@@ -351,7 +517,7 @@ mod tests {
         remote.title = "A".into();
         remote.history = vec![ancestor];
 
-        let out = merge_entry(&local, &remote);
+        let out = merge_entry(&local, &remote, &[], &[]);
         assert!(out.had_ancestor);
         assert!(out.conflicts.is_empty());
         assert_eq!(out.auto_resolutions, vec![("Title".into(), Side::Local)]);
@@ -368,7 +534,7 @@ mod tests {
         remote.title = "C".into();
         remote.history = vec![ancestor];
 
-        let out = merge_entry(&local, &remote);
+        let out = merge_entry(&local, &remote, &[], &[]);
         assert!(out.had_ancestor);
         assert!(out.auto_resolutions.is_empty());
         assert_eq!(out.conflicts.len(), 1);
@@ -384,7 +550,7 @@ mod tests {
         let mut remote = entry();
         remote.title = "B".into();
 
-        let out = merge_entry(&local, &remote);
+        let out = merge_entry(&local, &remote, &[], &[]);
         assert!(!out.had_ancestor);
         assert!(out.auto_resolutions.is_empty());
         assert_eq!(out.conflicts.len(), 1);
@@ -397,7 +563,7 @@ mod tests {
         let mut remote = entry();
         remote.custom_fields = vec![CustomField::new("x", "v", true)];
 
-        let out = merge_entry(&local, &remote);
+        let out = merge_entry(&local, &remote, &[], &[]);
         assert_eq!(out.conflicts.len(), 1);
         assert_eq!(out.conflicts[0].key, "x");
         assert_eq!(out.conflicts[0].kind, FieldDeltaKind::BothDiffer);
@@ -409,7 +575,7 @@ mod tests {
         local.custom_fields = vec![CustomField::new("x", "v", false)];
         let remote = entry();
 
-        let out = merge_entry(&local, &remote);
+        let out = merge_entry(&local, &remote, &[], &[]);
         assert_eq!(out.conflicts.len(), 1);
         assert_eq!(out.conflicts[0].kind, FieldDeltaKind::LocalOnly);
     }
@@ -443,7 +609,7 @@ mod tests {
         let lca = find_common_ancestor(&local, &remote).expect("LCA via local.current");
         assert_eq!(lca.title, "A");
 
-        let out = merge_entry(&local, &remote);
+        let out = merge_entry(&local, &remote, &[], &[]);
         assert!(out.had_ancestor);
         assert!(
             out.conflicts.is_empty(),
@@ -473,7 +639,7 @@ mod tests {
         let lca = find_common_ancestor(&local, &remote).expect("LCA via remote.current");
         assert_eq!(lca.title, "A");
 
-        let out = merge_entry(&local, &remote);
+        let out = merge_entry(&local, &remote, &[], &[]);
         assert!(out.had_ancestor);
         assert!(out.conflicts.is_empty());
         assert_eq!(out.auto_resolutions, vec![("Title".into(), Side::Local)]);
@@ -493,9 +659,243 @@ mod tests {
         let mut remote = entry();
         remote.history = vec![ancestor];
 
-        let out = merge_entry(&local, &remote);
+        let out = merge_entry(&local, &remote, &[], &[]);
         assert!(out.had_ancestor);
         assert!(out.conflicts.is_empty());
         assert_eq!(out.auto_resolutions, vec![("x".into(), Side::Local)]);
+    }
+
+    // -----------------------------------------------------------------
+    // Attachment classifier (slice B2)
+    // -----------------------------------------------------------------
+    //
+    // Coverage of the classification table in MERGE_ATTACHMENT_DESIGN.md.
+    // The classifier output isn't read anywhere yet (consumer lands in
+    // slice B3) so these tests assert directly on `out
+    // .attachment_auto_resolutions` and `out.attachment_conflicts`.
+
+    use keepass_core::model::{Attachment, Binary};
+
+    fn bin(data: &[u8]) -> Binary {
+        Binary::new(data.to_vec(), false)
+    }
+
+    fn att(name: &str, ref_id: u32) -> Attachment {
+        Attachment::new(name, ref_id)
+    }
+
+    #[test]
+    fn attachment_byte_identical_on_both_sides_is_silent() {
+        // Same name, same bytes (independent pools each have idx 0 = b"x").
+        let mut local = entry();
+        local.attachments = vec![att("note.txt", 0)];
+        let mut remote = entry();
+        remote.attachments = vec![att("note.txt", 0)];
+
+        let out = merge_entry(&local, &remote, &[bin(b"x")], &[bin(b"x")]);
+        assert!(out.attachment_auto_resolutions.is_empty());
+        assert!(out.attachment_conflicts.is_empty());
+    }
+
+    #[test]
+    fn attachment_both_differ_no_ancestor_is_a_conflict() {
+        let mut local = entry();
+        local.attachments = vec![att("note.txt", 0)];
+        let mut remote = entry();
+        remote.attachments = vec![att("note.txt", 0)];
+
+        let out = merge_entry(&local, &remote, &[bin(b"L")], &[bin(b"R")]);
+        assert!(out.attachment_auto_resolutions.is_empty());
+        assert_eq!(out.attachment_conflicts.len(), 1);
+        let delta = &out.attachment_conflicts[0];
+        assert_eq!(delta.name, "note.txt");
+        assert_eq!(delta.kind, AttachmentDeltaKind::BothDiffer);
+        assert!(delta.local_sha256.is_some());
+        assert!(delta.remote_sha256.is_some());
+        assert_eq!(delta.local_size, Some(1));
+        assert_eq!(delta.remote_size, Some(1));
+        assert_ne!(delta.local_sha256, delta.remote_sha256);
+    }
+
+    #[test]
+    fn attachment_both_differ_ancestor_matches_local_auto_resolves_remote() {
+        // Ancestor matches local's bytes → remote did the edit → take remote.
+        let mut ancestor = entry();
+        ancestor.attachments = vec![att("note.txt", 0)]; // ref_id 0 in local-pool = b"L"
+        ancestor.times = at(2026, 1);
+
+        let mut local = entry();
+        local.attachments = vec![att("note.txt", 0)];
+        local.history = vec![ancestor.clone()];
+
+        let mut remote = entry();
+        remote.attachments = vec![att("note.txt", 0)];
+        remote.history = vec![ancestor];
+
+        let out = merge_entry(&local, &remote, &[bin(b"L")], &[bin(b"R")]);
+        assert!(out.attachment_conflicts.is_empty());
+        assert_eq!(out.attachment_auto_resolutions.len(), 1);
+        assert_eq!(out.attachment_auto_resolutions[0].name, "note.txt");
+        assert_eq!(out.attachment_auto_resolutions[0].side, Side::Remote);
+    }
+
+    #[test]
+    fn attachment_both_differ_ancestor_matches_remote_auto_resolves_local() {
+        // Symmetric: ancestor matches remote's bytes → local edited.
+        let mut ancestor = entry();
+        ancestor.attachments = vec![att("note.txt", 0)];
+        ancestor.times = at(2026, 1);
+
+        let mut local = entry();
+        local.attachments = vec![att("note.txt", 0)];
+        local.history = vec![ancestor.clone()];
+
+        let mut remote = entry();
+        remote.attachments = vec![att("note.txt", 0)];
+        remote.history = vec![ancestor];
+
+        // local pool: idx 0 = the LCA bytes b"R" (ancestor matches remote);
+        // idx 1 = local-current's edited bytes b"L". Re-point the
+        // attachments so each refers to its appropriate slot.
+        local.attachments = vec![att("note.txt", 1)];
+        local.history[0].attachments = vec![att("note.txt", 0)];
+
+        let out = merge_entry(&local, &remote, &[bin(b"R"), bin(b"L")], &[bin(b"R")]);
+        assert!(out.attachment_conflicts.is_empty());
+        assert_eq!(out.attachment_auto_resolutions.len(), 1);
+        assert_eq!(out.attachment_auto_resolutions[0].side, Side::Local);
+    }
+
+    #[test]
+    fn attachment_local_only_no_ancestor_auto_resolves_local() {
+        // Local added an attachment; ancestor lacked it; remote unchanged.
+        let mut ancestor = entry();
+        ancestor.times = at(2026, 1);
+
+        let mut local = entry();
+        local.attachments = vec![att("added.txt", 0)];
+        local.history = vec![ancestor.clone()];
+
+        let mut remote = entry();
+        remote.history = vec![ancestor];
+
+        let out = merge_entry(&local, &remote, &[bin(b"new")], &[]);
+        assert!(out.attachment_conflicts.is_empty());
+        assert_eq!(out.attachment_auto_resolutions.len(), 1);
+        assert_eq!(out.attachment_auto_resolutions[0].name, "added.txt");
+        assert_eq!(out.attachment_auto_resolutions[0].side, Side::Local);
+    }
+
+    #[test]
+    fn attachment_local_only_ancestor_matched_remote_deleted_honours_deletion() {
+        // Local has the attachment, remote dropped it. Ancestor had it
+        // with the same bytes as local → remote initiated the deletion
+        // and local didn't concurrently edit. Auto-honour by taking
+        // remote (whose state for this name is "absent").
+        let mut ancestor = entry();
+        ancestor.attachments = vec![att("note.txt", 0)];
+        ancestor.times = at(2026, 1);
+
+        let mut local = entry();
+        local.attachments = vec![att("note.txt", 0)];
+        local.history = vec![ancestor.clone()];
+
+        let mut remote = entry();
+        remote.history = vec![ancestor];
+
+        let out = merge_entry(&local, &remote, &[bin(b"shared")], &[]);
+        assert!(out.attachment_conflicts.is_empty());
+        assert_eq!(out.attachment_auto_resolutions.len(), 1);
+        assert_eq!(out.attachment_auto_resolutions[0].side, Side::Remote);
+    }
+
+    #[test]
+    fn attachment_local_only_ancestor_differed_is_delete_edit_conflict() {
+        // Local has bytes X for "note.txt". Remote dropped it. Ancestor
+        // had bytes Y for "note.txt" (i.e. local concurrently edited
+        // the bytes while remote was deleting). Genuine conflict — the
+        // user has to decide between local's edit and remote's delete.
+        let mut ancestor = entry();
+        ancestor.attachments = vec![att("note.txt", 0)]; // local-pool idx 0 = b"Y"
+        ancestor.times = at(2026, 1);
+
+        let mut local = entry();
+        local.attachments = vec![att("note.txt", 1)]; // local-pool idx 1 = b"X"
+        local.history = vec![ancestor.clone()];
+
+        let mut remote = entry();
+        remote.history = vec![ancestor];
+
+        let out = merge_entry(&local, &remote, &[bin(b"Y"), bin(b"X")], &[]);
+        assert!(out.attachment_auto_resolutions.is_empty());
+        assert_eq!(out.attachment_conflicts.len(), 1);
+        assert_eq!(
+            out.attachment_conflicts[0].kind,
+            AttachmentDeltaKind::LocalOnly
+        );
+    }
+
+    #[test]
+    fn attachment_remote_only_no_ancestor_auto_resolves_remote() {
+        // Remote added a new attachment; ancestor lacked it.
+        let mut ancestor = entry();
+        ancestor.times = at(2026, 1);
+
+        let mut local = entry();
+        local.history = vec![ancestor.clone()];
+
+        let mut remote = entry();
+        remote.attachments = vec![att("added.txt", 0)];
+        remote.history = vec![ancestor];
+
+        let out = merge_entry(&local, &remote, &[], &[bin(b"new")]);
+        assert!(out.attachment_conflicts.is_empty());
+        assert_eq!(out.attachment_auto_resolutions.len(), 1);
+        assert_eq!(out.attachment_auto_resolutions[0].side, Side::Remote);
+    }
+
+    #[test]
+    fn attachment_no_ancestor_fallback_conflicts_every_difference() {
+        // No LCA at all — every attachment-level difference is a
+        // conflict, never an auto-resolution. Mirrors the field-side
+        // fallback that the module docs describe.
+        let mut local = entry();
+        local.attachments = vec![att("note.txt", 0)];
+        let mut remote = entry();
+        remote.attachments = vec![att("other.txt", 0)];
+
+        let out = merge_entry(&local, &remote, &[bin(b"L")], &[bin(b"R")]);
+        assert!(out.attachment_auto_resolutions.is_empty());
+        assert_eq!(out.attachment_conflicts.len(), 2);
+        let mut kinds: Vec<AttachmentDeltaKind> =
+            out.attachment_conflicts.iter().map(|d| d.kind).collect();
+        kinds.sort_by_key(|k| format!("{k:?}"));
+        assert_eq!(
+            kinds,
+            vec![
+                AttachmentDeltaKind::LocalOnly,
+                AttachmentDeltaKind::RemoteOnly
+            ]
+        );
+    }
+
+    #[test]
+    fn attachment_out_of_bounds_ref_id_is_treated_as_absent() {
+        // Corrupt ref_id → classifier acts as if the attachment were
+        // absent on that side. Mirrors the conservative posture
+        // elsewhere in the crate (skip-malformed rather than fail-merge).
+        let mut local = entry();
+        local.attachments = vec![att("note.txt", 99)]; // out of bounds
+        let mut remote = entry();
+        remote.attachments = vec![att("note.txt", 0)];
+
+        let out = merge_entry(&local, &remote, &[], &[bin(b"R")]);
+        // Local-side appears absent → kind is RemoteOnly (one-sided),
+        // ancestor missing → conflict.
+        assert_eq!(out.attachment_conflicts.len(), 1);
+        assert_eq!(
+            out.attachment_conflicts[0].kind,
+            AttachmentDeltaKind::RemoteOnly
+        );
     }
 }
