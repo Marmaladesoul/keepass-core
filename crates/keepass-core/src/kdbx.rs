@@ -1541,6 +1541,75 @@ impl Kdbx<Unlocked> {
         Ok(new_id)
     }
 
+    /// Import a previously-exported entry under `parent`, restoring
+    /// it under the explicit `target_uuid` rather than minting a new
+    /// id or preserving the carrier's UUID verbatim.
+    ///
+    /// Intended for **move-undo across vaults**: a forward cross-vault
+    /// move runs `export_entry` (on the source) → `import_entry`
+    /// (mint a new UUID on the target) → `delete_entry` (on the
+    /// source). Undoing that bounce normally produces a *third* UUID
+    /// because the standard `import_entry(mint_new_uuid: true)` mints
+    /// again — external references pinned to the pre-move UUID
+    /// (`AutoFill` record identifiers, bookmarks, links) then break.
+    /// This method lets the caller specify the original UUID so the
+    /// undo restores the pre-move identity.
+    ///
+    /// **Tombstone handling.** Any matching entry in
+    /// `vault.deleted_objects` (the source-side tombstone from the
+    /// forward move's [`Self::delete_entry`]) is removed before
+    /// importing. Semantically, the move-and-delete is being undone,
+    /// so the "this entry was deleted" record shouldn't survive into
+    /// the post-undo state where the entry is alive again. Without
+    /// this step, a downstream merge against another vault could see
+    /// the tombstone and re-delete the freshly-restored entry.
+    ///
+    /// **History snapshots** still receive freshly-minted UUIDs (same
+    /// as the `mint_new_uuid: true` branch of [`Self::import_entry`])
+    /// — history-snapshot UUIDs are local-to-vault; preserving them
+    /// across a round-trip carries no semantic value and risks
+    /// `DuplicateUuid` against unrelated history.
+    ///
+    /// Everything else (binary / icon dedup, time-stamp bookkeeping,
+    /// non-stamping of `Meta::settings_changed`) matches
+    /// [`Self::import_entry`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::GroupNotFound`] if `parent` isn't in the vault.
+    /// - [`ModelError::DuplicateUuid`] if `target_uuid` is already in
+    ///   use as a live entry (or as a live group, or in the history
+    ///   of a live entry). Tombstones don't count and are cleared
+    ///   silently regardless of the outcome.
+    pub fn import_entry_with_uuid(
+        &mut self,
+        parent: GroupId,
+        mut entry: PortableEntry,
+        target_uuid: EntryId,
+    ) -> Result<EntryId, ModelError> {
+        // Override the live entry's UUID to the caller-specified one.
+        // History snapshots get fresh UUIDs — see the doc comment.
+        entry.entry.id = target_uuid;
+        for snap in &mut entry.entry.history {
+            snap.id = EntryId(fresh_uuid(&self.state.vault));
+        }
+
+        // Forgive any matching tombstone before the import collision
+        // check runs (uuid_in_use ignores tombstones, but downstream
+        // sync would consume the tombstone as "delete this entry"
+        // and undo the undo).
+        self.state
+            .vault
+            .deleted_objects
+            .retain(|t| t.uuid != target_uuid.0);
+
+        // Delegate to import_entry with the preserve-UUID branch. Its
+        // uuid_in_use check catches the case where target_uuid is
+        // already live in the destination vault (legitimately a
+        // bookkeeping error from the caller).
+        self.import_entry(parent, entry, false)
+    }
+
     // -----------------------------------------------------------------
     // Recycle bin helpers
     // -----------------------------------------------------------------

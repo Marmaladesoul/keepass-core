@@ -670,6 +670,149 @@ fn imported_entry_survives_save_and_reopen_with_binaries_and_icons() {
 }
 
 // ---------------------------------------------------------------------
+// import_entry_with_uuid — move-undo identity preservation
+// ---------------------------------------------------------------------
+
+#[test]
+fn import_entry_with_uuid_preserves_caller_supplied_id() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let ((mut src, _), (mut dst, _)) = open_basic_pair(t0, t0);
+
+    let src_id = src
+        .add_entry(root_group(&src), NewEntry::new("Round-trip me"))
+        .unwrap();
+    let portable = src.export_entry(src_id).unwrap();
+    let dst_root = root_group(&dst);
+    let returned = dst
+        .import_entry_with_uuid(dst_root, portable, src_id)
+        .unwrap();
+
+    assert_eq!(returned, src_id, "method should return target_uuid");
+    assert!(
+        find_entry(&dst, src_id).is_some(),
+        "destination should hold the entry under target_uuid",
+    );
+}
+
+#[test]
+fn import_entry_with_uuid_clears_matching_tombstone() {
+    // Simulate a forward cross-vault move: source has the entry,
+    // exports it, destination imports (under a different uuid for
+    // this test — the cross-vault path), source deletes leaving a
+    // tombstone. Undo brings the entry back under the original uuid.
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let ((mut src, _), (mut dst, _)) = open_basic_pair(t0, t0);
+
+    let src_id = src
+        .add_entry(root_group(&src), NewEntry::new("Will be moved"))
+        .unwrap();
+    let forward_portable = src.export_entry(src_id).unwrap();
+    let dst_id = dst
+        .import_entry(root_group(&dst), forward_portable, /*mint=*/ true)
+        .unwrap();
+    src.delete_entry(src_id).unwrap();
+    assert!(
+        src.vault()
+            .deleted_objects
+            .iter()
+            .any(|t| t.uuid == src_id.0),
+        "forward move should leave a tombstone on the source",
+    );
+
+    // Undo: export from dst, import-with-uuid on src under src_id.
+    let undo_portable = dst.export_entry(dst_id).unwrap();
+    let restored = src
+        .import_entry_with_uuid(root_group(&src), undo_portable, src_id)
+        .unwrap();
+    assert_eq!(restored, src_id);
+    assert!(
+        find_entry(&src, src_id).is_some(),
+        "source should hold the entry alive under the original uuid",
+    );
+    assert!(
+        !src.vault()
+            .deleted_objects
+            .iter()
+            .any(|t| t.uuid == src_id.0),
+        "matching tombstone should have been cleared on import-with-uuid",
+    );
+}
+
+#[test]
+fn import_entry_with_uuid_returns_duplicate_uuid_when_live_collision() {
+    // If target_uuid is already live in the destination vault, the
+    // method must fail cleanly (and leave the destination untouched).
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let ((mut src, _), (mut dst, _)) = open_basic_pair(t0, t0);
+
+    let src_id = src
+        .add_entry(root_group(&src), NewEntry::new("Exported"))
+        .unwrap();
+
+    // Plant a live entry in the destination using the same UUID via
+    // a preserve-UUID import of one portable, then try a second
+    // import-with-uuid pointing at the same target — that's the
+    // collision the method must reject.
+    let first_portable = src.export_entry(src_id).unwrap();
+    dst.import_entry(root_group(&dst), first_portable, /*mint=*/ false)
+        .unwrap();
+
+    let second_portable = src.export_entry(src_id).unwrap();
+    let err = dst
+        .import_entry_with_uuid(root_group(&dst), second_portable, src_id)
+        .unwrap_err();
+    match err {
+        ModelError::DuplicateUuid(got) => assert_eq!(got, src_id.0),
+        other => panic!("expected DuplicateUuid, got {other:?}"),
+    }
+}
+
+#[test]
+fn import_entry_with_uuid_mints_fresh_history_snapshot_ids() {
+    // History-snapshot ids should be regenerated even when the live
+    // entry's id is caller-supplied.
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let ((mut src, src_clock), (mut dst, _)) = open_basic_pair(t0, t0);
+
+    let src_id = src
+        .add_entry(root_group(&src), NewEntry::new("With history"))
+        .unwrap();
+    // Generate one history snapshot by editing the entry.
+    src_clock.set(t0 + Duration::hours(1));
+    src.edit_entry(src_id, HistoryPolicy::Snapshot, |e| {
+        e.set_title("With history — edited");
+    })
+    .unwrap();
+    let src_snapshot_ids: Vec<_> = find_entry(&src, src_id)
+        .unwrap()
+        .history
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(!src_snapshot_ids.is_empty(), "test setup: history present");
+
+    let portable = src.export_entry(src_id).unwrap();
+    let target_uuid = src_id;
+    let restored = dst
+        .import_entry_with_uuid(root_group(&dst), portable, target_uuid)
+        .unwrap();
+    let dst_entry = find_entry(&dst, restored).unwrap();
+    let dst_snapshot_ids: Vec<_> = dst_entry.history.iter().map(|s| s.id).collect();
+
+    assert_eq!(
+        dst_snapshot_ids.len(),
+        src_snapshot_ids.len(),
+        "history snapshot count preserved",
+    );
+    for (src_snap, dst_snap) in src_snapshot_ids.iter().zip(dst_snapshot_ids.iter()) {
+        assert_ne!(
+            src_snap, dst_snap,
+            "history-snapshot ids should be minted fresh, not carried over",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
 // Debug redaction guard
 // ---------------------------------------------------------------------
 
