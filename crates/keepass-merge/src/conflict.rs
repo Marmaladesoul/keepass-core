@@ -59,6 +59,62 @@ pub struct EntryConflict {
     pub field_deltas: Vec<FieldDelta>,
 }
 
+/// Per-attachment difference between the two sides of an [`EntryConflict`].
+///
+/// Mirrors [`FieldDelta`] for attachments. One [`AttachmentDelta`] is
+/// emitted for every attachment name whose presence-or-content the
+/// merge could not auto-resolve. Names whose payloads are
+/// byte-identical on both sides — or where the 3-way classifier saw a
+/// clear winner against the LCA — do not surface as deltas; they ride
+/// the entry-level merge through `attachment_auto_resolutions`.
+///
+/// The `*_sha256` and `*_size` slots are populated from the relevant
+/// side's [`crate::Vault::binaries`] entry at classification time so
+/// downstream resolver UIs can render content metadata without
+/// re-dereferencing the binary pool.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AttachmentDelta {
+    /// Attachment name (the `<Binary><Key>` value). For the
+    /// [`AttachmentDeltaKind::BothDiffer`] kind, the name is shared
+    /// across both sides; for the one-sided kinds, it's the name on
+    /// the side that holds the attachment.
+    pub name: String,
+    /// Which side(s) hold the attachment under this name.
+    pub kind: AttachmentDeltaKind,
+    /// SHA-256 of the local-side payload, or `None` when local doesn't
+    /// hold this attachment ([`AttachmentDeltaKind::RemoteOnly`]).
+    pub local_sha256: Option<[u8; 32]>,
+    /// SHA-256 of the remote-side payload, or `None` when remote
+    /// doesn't hold it ([`AttachmentDeltaKind::LocalOnly`]).
+    pub remote_sha256: Option<[u8; 32]>,
+    /// Decoded payload size in bytes on the local side, or `None`
+    /// when absent.
+    pub local_size: Option<u64>,
+    /// Decoded payload size in bytes on the remote side, or `None`
+    /// when absent.
+    pub remote_size: Option<u64>,
+}
+
+/// Classification of an [`AttachmentDelta`] by which side(s) hold the
+/// attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AttachmentDeltaKind {
+    /// The name exists only on the local side, and the LCA is either
+    /// absent or carried a different payload — i.e. local edited an
+    /// attachment that remote deleted, so the data alone can't decide.
+    LocalOnly,
+    /// The name exists only on the remote side, and the LCA is either
+    /// absent or carried a different payload — i.e. remote edited an
+    /// attachment that local deleted.
+    RemoteOnly,
+    /// Both sides hold the name but the bytes differ (SHA-256
+    /// mismatch) and neither side's bytes match the LCA — concurrent
+    /// edits to the same attachment slot.
+    BothDiffer,
+}
+
 /// Placeholder for a future group structural conflict (v0.2).
 ///
 /// The v0.1 merge algorithm never produces a [`GroupConflict`]; group
