@@ -43,14 +43,19 @@ pub struct MergeOutcome {
     /// Keyed by [`EntryId`] for every entry that ended up in
     /// `disk_only_changes`, `local_only_changes`, or `entry_conflicts`.
     /// Apply consumes this to drive per-attachment merge inside the
-    /// entry-level merge.
-    ///
-    /// The public caller-resolution surface for attachment *conflicts*
-    /// lands in a later slice (per
-    /// `_localdocs/MERGE_ATTACHMENT_DESIGN.md`); attachment conflicts
-    /// continue to ride along with the entry-level winner until then.
+    /// entry-level merge. Attachment *conflicts* (where the classifier
+    /// can't auto-decide) surface on
+    /// [`EntryConflict::attachment_deltas`] and consume caller choices
+    /// via [`crate::Resolution::entry_attachment_choices`].
     pub(crate) attachment_auto_resolutions_per_entry:
         HashMap<EntryId, Vec<AttachmentAutoResolution>>,
+    /// Crate-private sidecar: per-entry merged tag set produced by
+    /// the tag classifier in [`crate::entry_merge::merge_entry`]. Tags
+    /// merge as a pure set (per `_localdocs/MERGE_TAGS_DESIGN.md`)
+    /// with no conflict cases; apply writes the merged set onto the
+    /// merged entry. Stashed for every entry that landed in any
+    /// non-empty bucket, including `entry_conflicts`.
+    pub(crate) merged_tags_per_entry: HashMap<EntryId, std::collections::BTreeSet<String>>,
 }
 
 #[cfg(test)]

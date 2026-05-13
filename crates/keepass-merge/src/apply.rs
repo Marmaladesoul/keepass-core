@@ -116,13 +116,14 @@ pub fn apply_merge(
             .attachment_auto_resolutions_per_entry
             .get(id)
             .unwrap_or(&empty_attachment_resolutions);
-        let merged = build_merged_entry(
+        let mut merged = build_merged_entry(
             local_entry,
             remote_entry,
             EntryWinner::Remote,
             atts,
             &mut remap,
         );
+        apply_merged_tags(&mut merged, outcome, *id);
         replace_entry(local_root, *id, merged);
     }
 
@@ -140,13 +141,14 @@ pub fn apply_merge(
             .attachment_auto_resolutions_per_entry
             .get(id)
             .unwrap_or(&empty_attachment_resolutions);
-        let merged = build_merged_entry(
+        let mut merged = build_merged_entry(
             local_entry,
             remote_entry,
             EntryWinner::Local,
             atts,
             &mut remap,
         );
+        apply_merged_tags(&mut merged, outcome, *id);
         replace_entry(local_root, *id, merged);
     }
 
@@ -358,14 +360,28 @@ fn apply_entry_conflict_resolutions(
             .attachment_auto_resolutions_per_entry
             .get(&conflict.entry_id)
             .unwrap_or(&empty_attachment_auto);
-        let merged = build_resolved_entry(
+        let mut merged = build_resolved_entry(
             conflict,
             field_choices,
             atts_auto,
             attachment_choices,
             remap,
         );
+        apply_merged_tags(&mut merged, outcome, conflict.entry_id);
         replace_entry(local_root, conflict.entry_id, merged);
+    }
+}
+
+/// Overwrite `merged.tags` with the per-entry merged tag set the
+/// classifier stashed during `merge`. The merged set is the auto-
+/// resolved union/honour-deletion outcome (see
+/// `_localdocs/MERGE_TAGS_DESIGN.md`); when nothing changed for tags,
+/// it's just `local.tags` re-sorted. Apply runs only when the entry
+/// landed in some bucket, so the no-stash branch is the omitted-
+/// entry case and we leave `merged.tags` alone.
+fn apply_merged_tags(merged: &mut Entry, outcome: &MergeOutcome, id: EntryId) {
+    if let Some(set) = outcome.merged_tags_per_entry.get(&id) {
+        merged.tags = set.iter().cloned().collect();
     }
 }
 
