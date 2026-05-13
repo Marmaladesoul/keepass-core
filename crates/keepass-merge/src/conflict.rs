@@ -69,9 +69,9 @@ pub struct EntryConflict {
 /// the entry-level merge through `attachment_auto_resolutions`.
 ///
 /// The `*_sha256` and `*_size` slots are populated from the relevant
-/// side's [`crate::Vault::binaries`] entry at classification time so
-/// downstream resolver UIs can render content metadata without
-/// re-dereferencing the binary pool.
+/// side's [`keepass_core::model::Vault::binaries`] entry at
+/// classification time so downstream resolver UIs can render content
+/// metadata without re-dereferencing the binary pool.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AttachmentDelta {
