@@ -967,9 +967,12 @@ impl Kdbx<Unlocked> {
     /// - No binary-pool GC. Refcounts are unaffected.
     ///
     /// To *clear* `last_access_time` (for example the Keys-app
-    /// "clear last-access" button), route through
-    /// [`Self::edit_entry`] +
-    /// [`crate::model::EntryEditor::set_last_access_time`] with `None`.
+    /// "clear last-access" button), use [`Self::clear_entry_last_access`]
+    /// — the symmetric inverse, with the same explicit non-effects.
+    /// Routing the clear through [`Self::edit_entry`] +
+    /// [`crate::model::EntryEditor::set_last_access_time`] also works
+    /// but additionally stamps `last_modification_time`, which is not
+    /// what a "wipe the access stamp" action typically intends.
     ///
     /// # Errors
     ///
@@ -979,6 +982,32 @@ impl Kdbx<Unlocked> {
         let entry =
             find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
         entry.times.last_access_time = Some(now);
+        Ok(())
+    }
+
+    /// Clear `entry.times.last_access_time` on the entry identified
+    /// by `id`, returning the field to `None`. The symmetric inverse
+    /// of [`Self::touch_entry`].
+    ///
+    /// Explicit non-effects (asserted by integration tests):
+    ///
+    /// - No history snapshot. Wiping the access stamp is not a
+    ///   content edit.
+    /// - No [`crate::model::Meta::settings_changed`] stamp.
+    /// - No [`crate::model::Timestamps::last_modification_time`]
+    ///   update. The entry's content hasn't changed; the "recently
+    ///   modified" sort shouldn't move because the user cleared an
+    ///   access record.
+    /// - No [`crate::model::Timestamps::location_changed`] update.
+    /// - No binary-pool GC. Refcounts are unaffected.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
+    pub fn clear_entry_last_access(&mut self, id: EntryId) -> Result<(), ModelError> {
+        let entry =
+            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        entry.times.last_access_time = None;
         Ok(())
     }
 

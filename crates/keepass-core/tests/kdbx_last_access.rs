@@ -4,6 +4,9 @@
 //!   writes `Some(t)` or clears via `None`.
 //! - [`Kdbx::touch_entry`] — leaf stamp `last_access_time = clock.now()`
 //!   with no other bookkeeping side-effects.
+//! - [`Kdbx::clear_entry_last_access`] — symmetric inverse of
+//!   `touch_entry`; wipes `last_access_time` to `None` with the same
+//!   no-side-effects contract.
 //!
 //! Also proves the **load-bearing invariant** that `edit_entry` does
 //! NOT auto-stamp `last_access_time` under either snapshot policy.
@@ -231,6 +234,107 @@ fn touch_entry_does_not_stamp_last_modification_time() {
         lmt_before,
         "touch is a read-access stamp, not a content edit"
     );
+}
+
+// ---------------------------------------------------------------------
+// Kdbx::clear_entry_last_access — symmetric inverse of touch_entry
+// ---------------------------------------------------------------------
+
+#[test]
+fn clear_entry_last_access_returns_field_to_none() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = add_one_entry(&mut kdbx);
+
+    // Touch first so there's something to clear.
+    clock.set(t0 + Duration::hours(2));
+    kdbx.touch_entry(id).unwrap();
+    assert!(find_entry(&kdbx, id).times.last_access_time.is_some());
+
+    kdbx.clear_entry_last_access(id).unwrap();
+    assert_eq!(find_entry(&kdbx, id).times.last_access_time, None);
+}
+
+#[test]
+fn clear_entry_last_access_with_unknown_id_returns_entry_not_found() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, _clock) = open_basic_with_clock(t0);
+    let bogus = EntryId(uuid::Uuid::from_u128(0xDEAD_BEEF));
+
+    let err = kdbx.clear_entry_last_access(bogus).unwrap_err();
+    match err {
+        ModelError::EntryNotFound(got) => assert_eq!(got, bogus),
+        other => panic!("expected EntryNotFound, got {other:?}"),
+    }
+}
+
+#[test]
+fn clear_entry_last_access_leaves_other_times_unchanged() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = add_one_entry(&mut kdbx);
+    clock.set(t0 + Duration::hours(2));
+    kdbx.touch_entry(id).unwrap();
+    let before = find_entry(&kdbx, id).times.clone();
+
+    clock.set(t0 + Duration::hours(3));
+    kdbx.clear_entry_last_access(id).unwrap();
+
+    let after = &find_entry(&kdbx, id).times;
+    assert_eq!(after.creation_time, before.creation_time);
+    assert_eq!(after.last_modification_time, before.last_modification_time);
+    assert_eq!(after.location_changed, before.location_changed);
+    assert_eq!(after.expiry_time, before.expiry_time);
+    assert_eq!(after.expires, before.expires);
+    assert_eq!(after.usage_count, before.usage_count);
+}
+
+#[test]
+fn clear_entry_last_access_does_not_snapshot_history() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = add_one_entry(&mut kdbx);
+    clock.set(t0 + Duration::hours(1));
+    kdbx.touch_entry(id).unwrap();
+    let history_len_before = find_entry(&kdbx, id).history.len();
+
+    clock.set(t0 + Duration::hours(2));
+    kdbx.clear_entry_last_access(id).unwrap();
+    assert_eq!(find_entry(&kdbx, id).history.len(), history_len_before);
+}
+
+#[test]
+fn clear_entry_last_access_does_not_stamp_meta_settings_changed() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = add_one_entry(&mut kdbx);
+    clock.set(t0 + Duration::hours(1));
+    kdbx.touch_entry(id).unwrap();
+    let settings_before = kdbx.vault().meta.settings_changed;
+
+    clock.set(t0 + Duration::hours(2));
+    kdbx.clear_entry_last_access(id).unwrap();
+    assert_eq!(kdbx.vault().meta.settings_changed, settings_before);
+}
+
+#[test]
+fn clear_entry_last_access_round_trips_through_touch() {
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, clock) = open_basic_with_clock(t0);
+    let id = add_one_entry(&mut kdbx);
+
+    clock.set(t0 + Duration::hours(1));
+    kdbx.touch_entry(id).unwrap();
+    let t_touch = find_entry(&kdbx, id).times.last_access_time;
+    assert!(t_touch.is_some());
+
+    kdbx.clear_entry_last_access(id).unwrap();
+    assert_eq!(find_entry(&kdbx, id).times.last_access_time, None);
+
+    clock.set(t0 + Duration::hours(3));
+    kdbx.touch_entry(id).unwrap();
+    let t_retouch = find_entry(&kdbx, id).times.last_access_time;
+    assert_eq!(t_retouch, Some(t0 + Duration::hours(3)));
 }
 
 // ---------------------------------------------------------------------
