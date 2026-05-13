@@ -132,7 +132,7 @@ pub(crate) fn merge_entry(
     local_binaries: &[Binary],
     remote_binaries: &[Binary],
 ) -> EntryMergeOutput {
-    let ancestor = find_common_ancestor(local, remote);
+    let ancestor = find_common_ancestor(local, remote, local_binaries, remote_binaries);
     let mut out = EntryMergeOutput {
         conflicts: Vec::new(),
         auto_resolutions: Vec::new(),
@@ -369,7 +369,12 @@ pub(crate) fn local_edited_after(
 /// false-positive conflict. Including `local.current` in the candidate
 /// pool lets us recognise (X, T0) as the genuine LCA, after which the
 /// per-field 3-way classifier auto-resolves every difference to remote.
-pub(crate) fn find_common_ancestor<'a>(local: &'a Entry, remote: &'a Entry) -> Option<&'a Entry> {
+pub(crate) fn find_common_ancestor<'a>(
+    local: &'a Entry,
+    remote: &'a Entry,
+    local_binaries: &[Binary],
+    remote_binaries: &[Binary],
+) -> Option<&'a Entry> {
     // Group remote candidates by mtime. Candidates = current + history.
     let mut remote_by_mtime: HashMap<chrono::DateTime<chrono::Utc>, Vec<&Entry>> = HashMap::new();
     for snap in std::iter::once(remote).chain(remote.history.iter()) {
@@ -391,9 +396,12 @@ pub(crate) fn find_common_ancestor<'a>(local: &'a Entry, remote: &'a Entry) -> O
         let Some(remotes) = remote_by_mtime.get(&t) else {
             continue;
         };
-        let lh = entry_content_hash(l);
+        // Each side's entries reference their own pool's binaries.
+        // After slice B5, attachments are part of the hash so the
+        // pool argument matters per call.
+        let lh = entry_content_hash(l, local_binaries);
         for r in remotes {
-            let rh = entry_content_hash(r);
+            let rh = entry_content_hash(r, remote_binaries);
             if ct_eq(&lh, &rh) {
                 return Some(l);
             }
@@ -478,7 +486,7 @@ mod tests {
         let mut remote = entry();
         remote.history = vec![snapshot("v1", at(2026, 1)), snapshot("v3", at(2026, 3))];
 
-        let lca = find_common_ancestor(&local, &remote).expect("LCA");
+        let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA");
         assert_eq!(lca.title, "v1");
     }
 
@@ -492,7 +500,7 @@ mod tests {
         let mut remote = entry();
         remote.history = vec![snapshot("other", mtime.clone()), snapshot("shared", mtime)];
 
-        let lca = find_common_ancestor(&local, &remote).expect("LCA");
+        let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA");
         assert_eq!(lca.title, "shared");
     }
 
@@ -503,7 +511,7 @@ mod tests {
         let mut remote = entry();
         remote.history = vec![snapshot("v2", at(2026, 2))];
 
-        assert!(find_common_ancestor(&local, &remote).is_none());
+        assert!(find_common_ancestor(&local, &remote, &[], &[]).is_none());
     }
 
     #[test]
@@ -606,7 +614,7 @@ mod tests {
         remote.times = at(2026, 2);
         remote.history = vec![pre_edit];
 
-        let lca = find_common_ancestor(&local, &remote).expect("LCA via local.current");
+        let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA via local.current");
         assert_eq!(lca.title, "A");
 
         let out = merge_entry(&local, &remote, &[], &[]);
@@ -636,7 +644,7 @@ mod tests {
         remote.title = "A".into();
         remote.times = at(2026, 1);
 
-        let lca = find_common_ancestor(&local, &remote).expect("LCA via remote.current");
+        let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA via remote.current");
         assert_eq!(lca.title, "A");
 
         let out = merge_entry(&local, &remote, &[], &[]);
@@ -719,9 +727,13 @@ mod tests {
 
     #[test]
     fn attachment_both_differ_ancestor_matches_local_auto_resolves_remote() {
-        // Ancestor matches local's bytes → remote did the edit → take remote.
+        // Ancestor matches local's bytes → remote did the edit → take
+        // remote. Both pools carry the ancestor bytes at idx 0; remote
+        // has its edited copy at idx 1. After B5 the LCA hash covers
+        // attachments, so both sides' ancestor records must dereference
+        // to identical bytes for the LCA walker to match them.
         let mut ancestor = entry();
-        ancestor.attachments = vec![att("note.txt", 0)]; // ref_id 0 in local-pool = b"L"
+        ancestor.attachments = vec![att("note.txt", 0)];
         ancestor.times = at(2026, 1);
 
         let mut local = entry();
@@ -729,10 +741,10 @@ mod tests {
         local.history = vec![ancestor.clone()];
 
         let mut remote = entry();
-        remote.attachments = vec![att("note.txt", 0)];
+        remote.attachments = vec![att("note.txt", 1)]; // remote's edit at idx 1
         remote.history = vec![ancestor];
 
-        let out = merge_entry(&local, &remote, &[bin(b"L")], &[bin(b"R")]);
+        let out = merge_entry(&local, &remote, &[bin(b"L")], &[bin(b"L"), bin(b"R")]);
         assert!(out.attachment_conflicts.is_empty());
         assert_eq!(out.attachment_auto_resolutions.len(), 1);
         assert_eq!(out.attachment_auto_resolutions[0].name, "note.txt");
@@ -791,7 +803,10 @@ mod tests {
         // Local has the attachment, remote dropped it. Ancestor had it
         // with the same bytes as local → remote initiated the deletion
         // and local didn't concurrently edit. Auto-honour by taking
-        // remote (whose state for this name is "absent").
+        // remote (whose state for this name is "absent"). Both pools
+        // must carry the ancestor's bytes at idx 0 for the LCA walker
+        // to match the ancestor record across sides (B5 hash includes
+        // attachments).
         let mut ancestor = entry();
         ancestor.attachments = vec![att("note.txt", 0)];
         ancestor.times = at(2026, 1);
@@ -803,7 +818,7 @@ mod tests {
         let mut remote = entry();
         remote.history = vec![ancestor];
 
-        let out = merge_entry(&local, &remote, &[bin(b"shared")], &[]);
+        let out = merge_entry(&local, &remote, &[bin(b"shared")], &[bin(b"shared")]);
         assert!(out.attachment_conflicts.is_empty());
         assert_eq!(out.attachment_auto_resolutions.len(), 1);
         assert_eq!(out.attachment_auto_resolutions[0].side, Side::Remote);

@@ -47,7 +47,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use keepass_core::model::Entry;
+use keepass_core::model::{Binary, Entry};
 
 use crate::hash::{ct_eq, entry_content_hash};
 
@@ -56,13 +56,23 @@ type Bucket<'a> = Vec<([u8; 32], &'a Entry)>;
 
 /// Merge two `<History>` lists losslessly. See module docs for the
 /// dedup, ordering, and scope contracts.
-pub(crate) fn merge_histories(local: &[Entry], remote: &[Entry]) -> Vec<Entry> {
+///
+/// `binaries` is the (single) binary pool every record in `local` and
+/// `remote` references. Callers must rebind any remote-side history
+/// records to local's pool before calling — `apply.rs` does this via
+/// `BinaryPoolRemap`. Once attachments are part of `entry_content_hash`
+/// (slice B5), the dedup needs the pool to dereference `ref_id`s.
+pub(crate) fn merge_histories(
+    local: &[Entry],
+    remote: &[Entry],
+    binaries: &[Binary],
+) -> Vec<Entry> {
     // Group by mtime; within a group dedup by content hash. Walking
     // local first then remote gives us the "local before remote on
     // collision" invariant.
     let mut by_mtime: HashMap<Mtime, Bucket<'_>> = HashMap::new();
     for snap in local.iter().chain(remote.iter()) {
-        let hash = entry_content_hash(snap);
+        let hash = entry_content_hash(snap, binaries);
         let bucket = by_mtime
             .entry(snap.times.last_modification_time)
             .or_default();
@@ -106,14 +116,14 @@ mod tests {
 
     #[test]
     fn empty_inputs_produce_empty_output() {
-        assert!(merge_histories(&[], &[]).is_empty());
+        assert!(merge_histories(&[], &[], &[]).is_empty());
     }
 
     #[test]
     fn disjoint_mtimes_interleave_by_sort_order() {
         let local = vec![snapshot("a", at(2026, 1)), snapshot("c", at(2026, 3))];
         let remote = vec![snapshot("b", at(2026, 2))];
-        let out = merge_histories(&local, &remote);
+        let out = merge_histories(&local, &remote, &[]);
         let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["a", "b", "c"]);
     }
@@ -121,7 +131,7 @@ mod tests {
     #[test]
     fn identical_record_on_both_sides_is_deduped() {
         let s = snapshot("same", at(2026, 1));
-        let out = merge_histories(std::slice::from_ref(&s), std::slice::from_ref(&s));
+        let out = merge_histories(std::slice::from_ref(&s), std::slice::from_ref(&s), &[]);
         assert_eq!(out.len(), 1);
     }
 
@@ -129,7 +139,7 @@ mod tests {
     fn same_mtime_divergent_content_keeps_both_local_first() {
         let local = vec![snapshot("L", at(2026, 1))];
         let remote = vec![snapshot("R", at(2026, 1))];
-        let out = merge_histories(&local, &remote);
+        let out = merge_histories(&local, &remote, &[]);
         let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["L", "R"]);
     }
@@ -145,7 +155,7 @@ mod tests {
         let mut untimed_remote = Entry::empty(EntryId(Uuid::nil()));
         untimed_remote.title = "UR".into();
         let timed = snapshot("T", at(2026, 1));
-        let out = merge_histories(&[untimed_local, timed.clone()], &[untimed_remote]);
+        let out = merge_histories(&[untimed_local, timed.clone()], &[untimed_remote], &[]);
         let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["UL", "UR", "T"]);
     }
@@ -154,8 +164,8 @@ mod tests {
     fn merging_is_idempotent() {
         let a = vec![snapshot("a", at(2026, 1)), snapshot("b", at(2026, 2))];
         let b = vec![snapshot("b", at(2026, 2)), snapshot("c", at(2026, 3))];
-        let once = merge_histories(&a, &b);
-        let twice = merge_histories(&once, &b);
+        let once = merge_histories(&a, &b, &[]);
+        let twice = merge_histories(&once, &b, &[]);
         let once_titles: Vec<&str> = once.iter().map(|e| e.title.as_str()).collect();
         let twice_titles: Vec<&str> = twice.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(once_titles, twice_titles);
@@ -172,7 +182,7 @@ mod tests {
         a.custom_fields = vec![CustomField::new("k", "v", false)];
         let mut b = snapshot("same", mtime);
         b.custom_fields = vec![CustomField::new("k", "v", true)];
-        let out = merge_histories(&[a], &[b]);
+        let out = merge_histories(&[a], &[b], &[]);
         assert_eq!(
             out.len(),
             2,

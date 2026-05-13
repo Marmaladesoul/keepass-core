@@ -39,7 +39,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use keepass_core::model::{CustomField, DeletedObject, Entry, EntryId, Group, GroupId, Vault};
+use keepass_core::model::{
+    Binary, CustomField, DeletedObject, Entry, EntryId, Group, GroupId, Vault,
+};
 use uuid::Uuid;
 
 use crate::binary_pool::BinaryPoolRemap;
@@ -441,13 +443,21 @@ fn build_resolved_entry(
     // before merging so the combined result carries only local-pool
     // ref_ids.
     let rebound_remote_history = rebind_history(&conflict.remote.history, remap);
-    let mut combined = merge_histories(&conflict.local.history, &rebound_remote_history);
+    // After rebinding we're done mutating the binary pool for this
+    // entry; the rest of build_resolved_entry needs only a read-only
+    // view of it for hashing + history dedup.
+    let local_binaries: &[Binary] = remap.local_binaries();
+    let mut combined = merge_histories(
+        &conflict.local.history,
+        &rebound_remote_history,
+        local_binaries,
+    );
     let mut snapshot = conflict.local.clone();
     snapshot.history.clear();
-    let snapshot_hash = entry_content_hash(&snapshot);
+    let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
     let already_present = combined.iter().any(|h| {
         h.times.last_modification_time == snapshot.times.last_modification_time
-            && entry_content_hash(h) == snapshot_hash
+            && entry_content_hash(h, local_binaries) == snapshot_hash
     });
     if !already_present {
         combined.push(snapshot);
@@ -867,11 +877,12 @@ fn build_merged_entry(
     // carries only local-pool ref_ids regardless of which records win
     // the dedup. Slice 4's merge_histories handles dedup + ordering.
     let rebound_remote_history = rebind_history(&remote.history, remap);
-    let mut combined = merge_histories(&local.history, &rebound_remote_history);
 
     // Snapshot the loser's pre-merge state into history so a later
     // viewer can see what was overwritten. The snapshot has its
-    // history field cleared (KDBX doesn't nest history).
+    // history field cleared (KDBX doesn't nest history). The
+    // remote-side snapshot needs its attachment ref_ids translated
+    // first; do that before we drop the mutable borrow on remap.
     let snapshot = match winner {
         EntryWinner::Remote => {
             let mut s = local.clone();
@@ -885,14 +896,19 @@ fn build_merged_entry(
             s
         }
     };
+
+    // Past this point we only need read-only access to the local
+    // pool for hashing + history dedup.
+    let local_binaries: &[Binary] = remap.local_binaries();
+    let mut combined = merge_histories(&local.history, &rebound_remote_history, local_binaries);
     // Dedup the snapshot if a record at its mtime *and content* is
     // already present (avoids spurious duplication on a no-op merge).
     // Tightened in slice 5b per #R21 to use the slice-2 content hash
     // alongside the mtime, matching the slice-4 dedup discipline.
-    let snapshot_hash = entry_content_hash(&snapshot);
+    let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
     let already_present = combined.iter().any(|h| {
         h.times.last_modification_time == snapshot.times.last_modification_time
-            && entry_content_hash(h) == snapshot_hash
+            && entry_content_hash(h, local_binaries) == snapshot_hash
     });
     if !already_present {
         combined.push(snapshot);
