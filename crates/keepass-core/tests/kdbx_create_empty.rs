@@ -74,6 +74,39 @@ fn create_empty_v4_wrong_password_after_reopen_rejects() {
 }
 
 #[test]
+fn outer_header_accessor_returns_unlock_state_header() {
+    // The `outer_header()` getter on Kdbx<Unlocked> exposes the same
+    // header the unlock path consumed, so downstream UI can surface
+    // cipher / KDF metadata without parsing the raw bytes.
+    use keepass_core::format::KnownCipher;
+    let composite = CompositeKey::from_password(b"pw");
+    let kdbx = Kdbx::<keepass_core::kdbx::Unlocked>::create_empty_v4(&composite, "Header Test")
+        .expect("create");
+
+    let header = kdbx.outer_header();
+    assert_eq!(
+        header.cipher_id.well_known(),
+        Some(KnownCipher::Aes256Cbc),
+        "create_empty_v4 defaults to AES-256-CBC",
+    );
+    assert!(
+        header.kdf_parameters.is_some(),
+        "KDBX4 outer header always has KdfParameters",
+    );
+
+    // Round-trip: a save+reopen should preserve the cipher id.
+    let cipher_before = header.cipher_id;
+    let bytes = kdbx.save_to_bytes().expect("save");
+    let reopened = Kdbx::<Sealed>::open_from_bytes(bytes)
+        .expect("open")
+        .read_header()
+        .expect("header")
+        .unlock(&composite)
+        .expect("unlock");
+    assert_eq!(reopened.outer_header().cipher_id, cipher_before);
+}
+
+#[test]
 fn create_empty_v4_accepts_mutations_post_create() {
     // Sanity: the fresh vault behaves as a standard `Kdbx<Unlocked>`
     // for downstream mutations (add_entry, etc.) — no special-case
