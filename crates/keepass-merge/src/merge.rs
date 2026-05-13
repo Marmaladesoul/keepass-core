@@ -105,6 +105,16 @@ fn route_both_present(
 ) {
     let merge_out = merge_entry(local, remote, local_binaries, remote_binaries);
 
+    // Stash the attachment auto-resolutions for apply to consume.
+    // Attachment *conflicts* continue to ride along with the
+    // entry-level winner until the public conflict surface lands in a
+    // later slice.
+    if !merge_out.attachment_auto_resolutions.is_empty() {
+        outcome
+            .attachment_auto_resolutions_per_entry
+            .insert(id, merge_out.attachment_auto_resolutions.clone());
+    }
+
     if !merge_out.conflicts.is_empty() {
         outcome.entry_conflicts.push(EntryConflict {
             entry_id: id,
@@ -115,23 +125,33 @@ fn route_both_present(
         return;
     }
 
-    // Identical on both sides — `merge_entry` produced no conflicts
-    // and no auto-resolutions. Omit from every bucket per spec; a
-    // caller iterating `local_only_changes` to log "unchanged" would
-    // otherwise see false positives.
-    if merge_out.auto_resolutions.is_empty() {
+    // No field conflicts, no field auto-resolutions, no attachment
+    // auto-resolutions: truly identical entry. Omit from every bucket
+    // so a caller iterating `local_only_changes` to log "unchanged"
+    // doesn't see false positives.
+    //
+    // If the only divergence is an attachment *conflict* (no fields,
+    // no auto-resolutions), we also omit: today's ride-along on local
+    // applied to local-side data is a no-op, so apply has nothing to
+    // do. The public conflict surface (future slice) will revisit
+    // this routing decision.
+    if merge_out.auto_resolutions.is_empty() && merge_out.attachment_auto_resolutions.is_empty() {
         return;
     }
 
-    // No conflicts. Route by whether any auto-resolution would change
-    // the local side's value: if the remote wins on at least one
-    // field, the local side has work to do (apply the remote value)
-    // → `disk_only_changes`. Otherwise the local side is up-to-date
-    // and the remote is stale → `local_only_changes`.
+    // Route by whether any auto-resolution would change the local
+    // side's value: if the remote wins on at least one field or
+    // attachment, the local side has work to do → `disk_only_changes`.
+    // Otherwise the local side is up-to-date and the remote is stale
+    // → `local_only_changes`.
     let any_remote_wins = merge_out
         .auto_resolutions
         .iter()
-        .any(|(_, side)| matches!(side, Side::Remote));
+        .any(|(_, side)| matches!(side, Side::Remote))
+        || merge_out
+            .attachment_auto_resolutions
+            .iter()
+            .any(|r| matches!(r.side, Side::Remote));
     if any_remote_wins {
         outcome.disk_only_changes.push(id);
     } else {

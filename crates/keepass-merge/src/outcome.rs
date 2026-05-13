@@ -6,9 +6,12 @@
 //! defaults to empty so the merge algorithm can build the outcome
 //! incrementally as it walks the two vaults.
 
+use std::collections::HashMap;
+
 use keepass_core::model::{Entry, EntryId};
 
 use crate::conflict::{EntryConflict, GroupConflict};
+use crate::entry_merge::AttachmentAutoResolution;
 
 /// All entry- and group-level decisions produced by a merge run.
 ///
@@ -35,6 +38,19 @@ pub struct MergeOutcome {
     pub delete_edit_conflicts: Vec<EntryId>,
     /// Group structural conflicts. Always empty in v0.1; reserved for v0.2.
     pub group_conflicts: Vec<GroupConflict>,
+    /// Crate-private sidecar: per-entry attachment auto-resolutions
+    /// produced by the classifier in [`crate::entry_merge::merge_entry`].
+    /// Keyed by [`EntryId`] for every entry that ended up in
+    /// `disk_only_changes`, `local_only_changes`, or `entry_conflicts`.
+    /// Apply consumes this to drive per-attachment merge inside the
+    /// entry-level merge.
+    ///
+    /// The public caller-resolution surface for attachment *conflicts*
+    /// lands in a later slice (per
+    /// `_localdocs/MERGE_ATTACHMENT_DESIGN.md`); attachment conflicts
+    /// continue to ride along with the entry-level winner until then.
+    pub(crate) attachment_auto_resolutions_per_entry:
+        HashMap<EntryId, Vec<AttachmentAutoResolution>>,
 }
 
 #[cfg(test)]
