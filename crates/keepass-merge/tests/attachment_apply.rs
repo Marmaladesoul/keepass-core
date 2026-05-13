@@ -73,17 +73,27 @@ fn entry_with_only_attachment_remote_edit_routes_through_disk_only_changes() {
     // routing-extension, this entry would be silently omitted and the
     // local file would never receive remote's edited attachment.
     let mut ancestor = entry(1, "shared", at(2026, 1, 1));
-    ancestor.attachments = vec![Attachment::new("note.txt", 0)]; // ref into local-pool
+    ancestor.attachments = vec![Attachment::new("note.txt", 0)];
 
     let mut local_e = entry(1, "shared", at(2026, 1, 1));
     local_e.attachments = vec![Attachment::new("note.txt", 0)];
     local_e.history = vec![ancestor.clone()];
     let local = vault(vec![local_e], vec![Binary::new(b"L".to_vec(), false)]);
 
+    // Remote's ancestor record references remote-pool idx 0 = "L"
+    // (same bytes as local's view of the ancestor, so the LCA walker
+    // matches the records across sides post-B5); remote's current
+    // points at idx 1 = "R".
     let mut remote_e = entry(1, "shared", at(2026, 1, 1));
-    remote_e.attachments = vec![Attachment::new("note.txt", 0)];
+    remote_e.attachments = vec![Attachment::new("note.txt", 1)];
     remote_e.history = vec![ancestor];
-    let remote = vault(vec![remote_e], vec![Binary::new(b"R".to_vec(), false)]);
+    let remote = vault(
+        vec![remote_e],
+        vec![
+            Binary::new(b"L".to_vec(), false),
+            Binary::new(b"R".to_vec(), false),
+        ],
+    );
 
     let outcome = merge(&local, &remote).unwrap();
     assert_eq!(
@@ -216,7 +226,11 @@ fn honour_deletion_auto_resolution_strips_attachment_from_merged() {
 
     let mut remote_e = entry(1, "remote-edit", at(2026, 2, 1));
     remote_e.history = vec![ancestor];
-    let remote = vault(vec![remote_e], vec![]);
+    // Remote's pool needs the ancestor's bytes so the LCA walker
+    // matches the ancestor record across sides (B5 hash includes
+    // attachments). Remote itself doesn't carry the attachment any
+    // longer — that's what makes this the "remote deleted it" case.
+    let remote = vault(vec![remote_e], vec![Binary::new(b"shared".to_vec(), false)]);
 
     let outcome = merge(&local, &remote).unwrap();
     // Title also differs, so disk_only_changes; the attachment

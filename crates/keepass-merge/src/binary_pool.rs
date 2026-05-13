@@ -60,6 +60,14 @@ impl<'a> BinaryPoolRemap<'a> {
         }
     }
 
+    /// Read-only view of the local binary pool as it stands right
+    /// now. Useful for callers that need to dereference attachment
+    /// `ref_id`s for hashing without juggling another mutable borrow
+    /// against `&mut local.binaries`.
+    pub(crate) fn local_binaries(&self) -> &[Binary] {
+        self.local_binaries
+    }
+
     /// Rewrite every `ref_id` in `attachments` from a remote-pool index
     /// to the corresponding local-pool index, importing as needed.
     ///
