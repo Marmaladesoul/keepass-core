@@ -47,6 +47,34 @@ pub enum MergeError {
         /// The conflicted entry the resolution is missing.
         entry: keepass_core::model::EntryId,
     },
+
+    /// The caller's [`crate::Resolution`] supplied a per-attachment
+    /// choice for a name that isn't in the corresponding conflict's
+    /// `attachment_deltas`. Usually a sign of a stale outcome or a
+    /// typo'd attachment name.
+    #[error(
+        "resolution for entry {entry:?} refers to attachment {attachment:?} which is not in the conflict's attachment_deltas"
+    )]
+    UnknownAttachmentInResolution {
+        /// The conflicted entry the bad attachment belongs to.
+        entry: keepass_core::model::EntryId,
+        /// The attachment name the caller supplied.
+        attachment: String,
+    },
+
+    /// The caller chose [`crate::AttachmentChoice::KeepBoth`] for an
+    /// attachment whose delta kind isn't
+    /// [`crate::AttachmentDeltaKind::BothDiffer`]. The absent side has
+    /// no bytes to keep — "keep both" is meaningless.
+    #[error(
+        "KeepBoth is not valid for attachment {attachment:?} on entry {entry:?}: only one side has the attachment"
+    )]
+    KeepBothNotPermittedForKind {
+        /// The conflicted entry.
+        entry: keepass_core::model::EntryId,
+        /// The attachment name.
+        attachment: String,
+    },
 }
 
 #[cfg(test)]

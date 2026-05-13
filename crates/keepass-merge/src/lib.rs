@@ -28,8 +28,10 @@ mod history_merge;
 mod merge;
 
 pub use crate::apply::{apply_merge, reconcile_timestamps};
-pub use crate::conflict::{EntryConflict, FieldDelta, FieldDeltaKind, GroupConflict};
+pub use crate::conflict::{
+    AttachmentDelta, AttachmentDeltaKind, EntryConflict, FieldDelta, FieldDeltaKind, GroupConflict,
+};
 pub use crate::error::MergeError;
 pub use crate::merge::merge;
 pub use crate::outcome::MergeOutcome;
-pub use crate::resolution::{ConflictSide, DeleteEditChoice, Resolution};
+pub use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice, Resolution};

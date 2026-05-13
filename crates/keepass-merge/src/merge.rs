@@ -106,35 +106,30 @@ fn route_both_present(
     let merge_out = merge_entry(local, remote, local_binaries, remote_binaries);
 
     // Stash the attachment auto-resolutions for apply to consume.
-    // Attachment *conflicts* continue to ride along with the
-    // entry-level winner until the public conflict surface lands in a
-    // later slice.
     if !merge_out.attachment_auto_resolutions.is_empty() {
         outcome
             .attachment_auto_resolutions_per_entry
             .insert(id, merge_out.attachment_auto_resolutions.clone());
     }
 
-    if !merge_out.conflicts.is_empty() {
+    // An entry routes to `entry_conflicts` when *either* field or
+    // attachment conflicts need caller input. Both delta lists ride
+    // through on the same `EntryConflict` record (the resolver UI
+    // walks both).
+    if !merge_out.conflicts.is_empty() || !merge_out.attachment_conflicts.is_empty() {
         outcome.entry_conflicts.push(EntryConflict {
             entry_id: id,
             local: local.clone(),
             remote: remote.clone(),
             field_deltas: merge_out.conflicts,
+            attachment_deltas: merge_out.attachment_conflicts,
         });
         return;
     }
 
-    // No field conflicts, no field auto-resolutions, no attachment
-    // auto-resolutions: truly identical entry. Omit from every bucket
-    // so a caller iterating `local_only_changes` to log "unchanged"
-    // doesn't see false positives.
-    //
-    // If the only divergence is an attachment *conflict* (no fields,
-    // no auto-resolutions), we also omit: today's ride-along on local
-    // applied to local-side data is a no-op, so apply has nothing to
-    // do. The public conflict surface (future slice) will revisit
-    // this routing decision.
+    // Truly identical entry — nothing to do; omit so callers
+    // iterating `local_only_changes` to log "unchanged" don't see
+    // false positives.
     if merge_out.auto_resolutions.is_empty() && merge_out.attachment_auto_resolutions.is_empty() {
         return;
     }

@@ -57,6 +57,13 @@ pub struct EntryConflict {
     pub remote: Entry,
     /// Pre-computed list of fields that differ between `local` and `remote`.
     pub field_deltas: Vec<FieldDelta>,
+    /// Pre-computed list of attachments that differ between `local`
+    /// and `remote` and need caller resolution. Auto-resolvable
+    /// attachment differences (byte-identical, or 3-way classifier
+    /// has a clear winner against the LCA) ride through the merge's
+    /// internal auto-resolution pipeline and apply silently; they do
+    /// not appear here.
+    pub attachment_deltas: Vec<AttachmentDelta>,
 }
 
 /// Per-attachment difference between the two sides of an [`EntryConflict`].

@@ -35,6 +35,10 @@ pub struct Resolution {
     /// [`crate::MergeOutcome::entry_conflicts`]. The inner map is
     /// keyed by the [`crate::FieldDelta::key`] reported by the merge.
     pub entry_field_choices: HashMap<EntryId, HashMap<String, ConflictSide>>,
+    /// Per-attachment decision for every conflicting attachment of
+    /// every entry in [`crate::MergeOutcome::entry_conflicts`]. The
+    /// inner map is keyed by [`crate::AttachmentDelta::name`].
+    pub entry_attachment_choices: HashMap<EntryId, HashMap<String, AttachmentChoice>>,
     /// Per-entry decision for every entry in
     /// [`crate::MergeOutcome::delete_edit_conflicts`].
     pub delete_edit_choices: HashMap<EntryId, DeleteEditChoice>,
@@ -54,6 +58,44 @@ pub enum ConflictSide {
     Local,
     /// Take the remote side's value for this field.
     Remote,
+}
+
+/// Caller's choice for a single conflicting attachment.
+///
+/// For [`crate::AttachmentDeltaKind::LocalOnly`] /
+/// [`crate::AttachmentDeltaKind::RemoteOnly`] deltas:
+/// [`Self::KeepLocal`] / [`Self::KeepRemote`] are the only meaningful
+/// variants. [`Self::KeepBoth`] is validation-rejected for these
+/// kinds — the absent side has no bytes to keep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AttachmentChoice {
+    /// Take local's bytes. For a `RemoteOnly` delta, this honours
+    /// local's absent state — the attachment is dropped from the
+    /// merged entry.
+    KeepLocal,
+    /// Take remote's bytes. For a `LocalOnly` delta, this honours
+    /// remote's absent state — the attachment is dropped.
+    KeepRemote,
+    /// Both sides hold the attachment with different bytes; keep
+    /// both. The merge layer installs local's attachment under its
+    /// original name and remote's under a renamed slot to avoid the
+    /// per-entry name collision KDBX disallows.
+    ///
+    /// `rename_override` lets the caller specify the renamed name.
+    /// When `None`, the default pattern `"<stem> (remote).<ext>"` is
+    /// used, with a counter suffix (`"<stem> (remote 2).<ext>"`, …)
+    /// if that name is also already taken by another kept
+    /// attachment on the merged entry.
+    ///
+    /// Validation rejects this variant for any delta whose kind isn't
+    /// [`crate::AttachmentDeltaKind::BothDiffer`] — one side has no
+    /// bytes to keep.
+    KeepBoth {
+        /// Override the default rename pattern; `None` uses the
+        /// default with counter-suffix fallback.
+        rename_override: Option<String>,
+    },
 }
 
 /// Caller's choice for a delete-vs-edit conflict.

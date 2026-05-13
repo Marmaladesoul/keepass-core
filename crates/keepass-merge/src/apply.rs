@@ -43,11 +43,11 @@ use keepass_core::model::{CustomField, DeletedObject, Entry, EntryId, Group, Gro
 use uuid::Uuid;
 
 use crate::binary_pool::BinaryPoolRemap;
-use crate::conflict::{EntryConflict, FieldDeltaKind};
+use crate::conflict::{AttachmentDelta, AttachmentDeltaKind, EntryConflict, FieldDeltaKind};
 use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
-use crate::resolution::{ConflictSide, DeleteEditChoice};
+use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice};
 use crate::{MergeError, MergeOutcome, Resolution};
 
 /// Mutate `local` in place by applying `outcome` and `resolution`'s
@@ -216,7 +216,42 @@ fn validate_resolution(outcome: &MergeOutcome, resolution: &Resolution) -> Resul
         }
     }
 
-    // 2. Every entry referenced in delete_edit_choices must be in
+    // 2. Every entry referenced in entry_attachment_choices must be
+    //    in entry_conflicts; every attachment name inside must be in
+    //    that conflict's attachment_deltas; KeepBoth choices must
+    //    correspond to BothDiffer deltas.
+    for (entry_id, attachment_choices) in &resolution.entry_attachment_choices {
+        let Some(conflict) = outcome
+            .entry_conflicts
+            .iter()
+            .find(|c| c.entry_id == *entry_id)
+        else {
+            return Err(MergeError::UnknownEntryInResolution { entry: *entry_id });
+        };
+        let known_atts: HashMap<&str, AttachmentDeltaKind> = conflict
+            .attachment_deltas
+            .iter()
+            .map(|d| (d.name.as_str(), d.kind))
+            .collect();
+        for (name, choice) in attachment_choices {
+            let Some(kind) = known_atts.get(name.as_str()).copied() else {
+                return Err(MergeError::UnknownAttachmentInResolution {
+                    entry: *entry_id,
+                    attachment: name.clone(),
+                });
+            };
+            if matches!(choice, AttachmentChoice::KeepBoth { .. })
+                && kind != AttachmentDeltaKind::BothDiffer
+            {
+                return Err(MergeError::KeepBothNotPermittedForKind {
+                    entry: *entry_id,
+                    attachment: name.clone(),
+                });
+            }
+        }
+    }
+
+    // 3. Every entry referenced in delete_edit_choices must be in
     //    delete_edit_conflicts.
     for entry_id in resolution.delete_edit_choices.keys() {
         if !delete_edit_ids.contains(entry_id) {
@@ -224,14 +259,29 @@ fn validate_resolution(outcome: &MergeOutcome, resolution: &Resolution) -> Resul
         }
     }
 
-    // 3. Every conflict in either bucket must have a corresponding
-    //    resolution entry. `entry_field_choices` may carry an empty
-    //    inner map for an entry where the user chose `Local` for every
-    //    field; we still require the outer key to be present so the
-    //    caller's intent is explicit.
-    for id in &conflict_ids {
-        if !resolution.entry_field_choices.contains_key(id) {
-            return Err(MergeError::MissingResolutionForConflict { entry: *id });
+    // 4. Every conflict in either bucket must have a corresponding
+    //    resolution entry. A conflict with field_deltas requires its
+    //    entry in entry_field_choices (even an empty inner map — the
+    //    caller's intent must be explicit). Same for attachment_deltas
+    //    and entry_attachment_choices.
+    for conflict in &outcome.entry_conflicts {
+        if !conflict.field_deltas.is_empty()
+            && !resolution
+                .entry_field_choices
+                .contains_key(&conflict.entry_id)
+        {
+            return Err(MergeError::MissingResolutionForConflict {
+                entry: conflict.entry_id,
+            });
+        }
+        if !conflict.attachment_deltas.is_empty()
+            && !resolution
+                .entry_attachment_choices
+                .contains_key(&conflict.entry_id)
+        {
+            return Err(MergeError::MissingResolutionForConflict {
+                entry: conflict.entry_id,
+            });
         }
     }
     for id in &delete_edit_ids {
@@ -239,6 +289,10 @@ fn validate_resolution(outcome: &MergeOutcome, resolution: &Resolution) -> Resul
             return Err(MergeError::MissingResolutionForConflict { entry: *id });
         }
     }
+
+    // Discourage unused-variable warning when there are no field
+    // conflicts but only attachment conflicts.
+    let _ = conflict_ids;
 
     Ok(())
 }
@@ -283,15 +337,32 @@ fn apply_entry_conflict_resolutions(
     resolution: &Resolution,
     remap: &mut BinaryPoolRemap<'_>,
 ) {
-    let empty_attachment_resolutions: Vec<AttachmentAutoResolution> = Vec::new();
+    let empty_attachment_auto: Vec<AttachmentAutoResolution> = Vec::new();
+    let empty_field_choices: HashMap<String, ConflictSide> = HashMap::new();
+    let empty_attachment_choices: HashMap<String, AttachmentChoice> = HashMap::new();
     for conflict in &outcome.entry_conflicts {
-        // Validation guarantees the entry key exists in the resolution.
-        let field_choices = &resolution.entry_field_choices[&conflict.entry_id];
-        let atts = outcome
+        // Validation requires entries with non-empty deltas to have a
+        // resolution entry; for empty deltas it allows the key to be
+        // absent. Default to the empty map either way.
+        let field_choices = resolution
+            .entry_field_choices
+            .get(&conflict.entry_id)
+            .unwrap_or(&empty_field_choices);
+        let attachment_choices = resolution
+            .entry_attachment_choices
+            .get(&conflict.entry_id)
+            .unwrap_or(&empty_attachment_choices);
+        let atts_auto = outcome
             .attachment_auto_resolutions_per_entry
             .get(&conflict.entry_id)
-            .unwrap_or(&empty_attachment_resolutions);
-        let merged = build_resolved_entry(conflict, field_choices, atts, remap);
+            .unwrap_or(&empty_attachment_auto);
+        let merged = build_resolved_entry(
+            conflict,
+            field_choices,
+            atts_auto,
+            attachment_choices,
+            remap,
+        );
         replace_entry(local_root, conflict.entry_id, merged);
     }
 }
@@ -310,6 +381,7 @@ fn build_resolved_entry(
     conflict: &EntryConflict,
     field_choices: &HashMap<String, ConflictSide>,
     attachment_resolutions: &[AttachmentAutoResolution],
+    attachment_choices: &HashMap<String, AttachmentChoice>,
     remap: &mut BinaryPoolRemap<'_>,
 ) -> Entry {
     let mut merged = conflict.local.clone();
@@ -348,6 +420,19 @@ fn build_resolved_entry(
         &conflict.local,
         &conflict.remote,
         attachment_resolutions,
+        remap,
+    );
+
+    // Apply caller resolutions for each AttachmentDelta on this
+    // conflict. KeepBoth installs both sides with the remote-side
+    // renamed; KeepLocal / KeepRemote behaves like the auto-resolution
+    // path with the chosen side.
+    apply_caller_attachment_choices(
+        &mut merged,
+        &conflict.local,
+        &conflict.remote,
+        &conflict.attachment_deltas,
+        attachment_choices,
         remap,
     );
 
@@ -427,6 +512,131 @@ fn apply_attachment_resolutions(
             }
         }
     }
+}
+
+/// Apply caller resolutions for an [`EntryConflict`]'s attachment_deltas.
+///
+/// Each delta has an [`AttachmentChoice`] in `choices` (validated to
+/// be present and kind-consistent by `validate_resolution`). For
+/// `KeepLocal` / `KeepRemote`, the winning side's bytes go onto
+/// `merged` (with binary-pool rebinding for remote-side wins). For
+/// `KeepBoth`, both sides are kept — local under its original name,
+/// remote renamed (defaulting to `"<stem> (remote).<ext>"`, with a
+/// counter suffix on collision).
+fn apply_caller_attachment_choices(
+    merged: &mut Entry,
+    local_entry: &Entry,
+    remote_entry: &Entry,
+    deltas: &[AttachmentDelta],
+    choices: &HashMap<String, AttachmentChoice>,
+    remap: &mut BinaryPoolRemap<'_>,
+) {
+    for delta in deltas {
+        // Validation ensures the delta has a choice and that
+        // `KeepBoth` only appears for `BothDiffer` deltas. A missing
+        // choice here would be a validation gap, not a user mistake;
+        // default conservatively to `KeepLocal`.
+        let choice = choices
+            .get(&delta.name)
+            .cloned()
+            .unwrap_or(AttachmentChoice::KeepLocal);
+        match choice {
+            AttachmentChoice::KeepLocal => {
+                install_side(merged, local_entry, &delta.name, Side::Local, remap);
+            }
+            AttachmentChoice::KeepRemote => {
+                install_side(merged, remote_entry, &delta.name, Side::Remote, remap);
+            }
+            AttachmentChoice::KeepBoth { rename_override } => {
+                // Local under its original name; remote under a
+                // renamed slot that doesn't collide with any already-
+                // present attachment.
+                install_side(merged, local_entry, &delta.name, Side::Local, remap);
+                let renamed =
+                    pick_rename(rename_override.as_deref(), &delta.name, &merged.attachments);
+                let Some(remote_att) = remote_entry
+                    .attachments
+                    .iter()
+                    .find(|a| a.name == delta.name)
+                else {
+                    // Validation should have flagged this — KeepBoth
+                    // only valid for BothDiffer where both sides hold
+                    // the name. Defensive skip.
+                    continue;
+                };
+                let mut new_att = remote_att.clone();
+                new_att.name = renamed;
+                remap.rebind(std::slice::from_mut(&mut new_att));
+                merged.attachments.push(new_att);
+            }
+        }
+    }
+}
+
+/// Install one side's view of an attachment named `name` onto
+/// `merged`. Mirrors the `apply_attachment_resolutions` per-name
+/// reconciliation but is keyed by an explicit side rather than a
+/// classifier output.
+fn install_side(
+    merged: &mut Entry,
+    side_entry: &Entry,
+    name: &str,
+    side: Side,
+    remap: &mut BinaryPoolRemap<'_>,
+) {
+    let want = side_entry.attachments.iter().find(|a| a.name == name);
+    match want {
+        Some(chosen) => {
+            let mut new_att = chosen.clone();
+            if matches!(side, Side::Remote) {
+                remap.rebind(std::slice::from_mut(&mut new_att));
+            }
+            if let Some(pos) = merged.attachments.iter().position(|a| a.name == name) {
+                merged.attachments[pos] = new_att;
+            } else {
+                merged.attachments.push(new_att);
+            }
+        }
+        None => {
+            // Chosen side doesn't have this name — drop from merged.
+            merged.attachments.retain(|a| a.name != name);
+        }
+    }
+}
+
+/// Pick a rename for the remote-side attachment in a `KeepBoth`
+/// resolution. When the caller supplied an override, use it verbatim
+/// (no collision-counter applied — the caller is responsible for
+/// picking a clean name). When no override, generate the default
+/// pattern `"<stem> (remote).<ext>"` (or `"<name> (remote)"` for
+/// extension-less names), then append a counter suffix until the
+/// resulting name isn't already in `existing`.
+fn pick_rename(
+    override_name: Option<&str>,
+    original: &str,
+    existing: &[keepass_core::model::Attachment],
+) -> String {
+    if let Some(n) = override_name {
+        return n.to_owned();
+    }
+    let (stem, ext) = match original.rfind('.') {
+        Some(dot) if dot > 0 => (&original[..dot], &original[dot..]),
+        _ => (original, ""),
+    };
+    let mut candidate = format!("{stem} (remote){ext}");
+    let mut counter: u32 = 2;
+    while existing.iter().any(|a| a.name == candidate) {
+        candidate = format!("{stem} (remote {counter}){ext}");
+        counter = counter.saturating_add(1);
+        // Practical bound: KDBX entries rarely carry thousands of
+        // same-stem attachments; if they did, the counter would
+        // saturate and the apply step would loop forever on its own
+        // output. Break defensively at u32::MAX.
+        if counter == u32::MAX {
+            break;
+        }
+    }
+    candidate
 }
 
 /// Clone every history record and rebind its top-level attachments
@@ -1083,6 +1293,7 @@ mod tests {
                 key: "Title".into(),
                 kind: FieldDeltaKind::BothDiffer,
             }],
+            attachment_deltas: Vec::new(),
         }
     }
 
@@ -1170,6 +1381,7 @@ mod tests {
                     kind: FieldDeltaKind::BothDiffer,
                 },
             ],
+            attachment_deltas: Vec::new(),
         };
         let mut outcome = MergeOutcome::default();
         outcome.entry_conflicts.push(conflict);
