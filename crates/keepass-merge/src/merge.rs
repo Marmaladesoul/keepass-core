@@ -78,7 +78,9 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
 
     for id in all_ids {
         match (local_entries.get(&id), remote_entries.get(&id)) {
-            (Some(l), Some(r)) => route_both_present(id, l, r, &mut outcome),
+            (Some(l), Some(r)) => {
+                route_both_present(id, l, r, &local.binaries, &remote.binaries, &mut outcome);
+            }
             (Some(l), None) => route_local_only(id, l, &remote_tombstones, &mut outcome),
             (None, Some(r)) => route_remote_only(id, r, &local_tombstones, &mut outcome),
             (None, None) => unreachable!("id collected from union of local + remote"),
@@ -90,8 +92,18 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
 
 /// Per-entry classification when both sides have the entry. Runs the
 /// 3-way merge and routes by the auto-resolution profile.
-fn route_both_present(id: EntryId, local: &Entry, remote: &Entry, outcome: &mut MergeOutcome) {
-    let merge_out = merge_entry(local, remote);
+///
+/// `local_binaries` / `remote_binaries` thread through to the
+/// attachment classifier in [`merge_entry`] for payload-SHA dereference.
+fn route_both_present(
+    id: EntryId,
+    local: &Entry,
+    remote: &Entry,
+    local_binaries: &[keepass_core::model::Binary],
+    remote_binaries: &[keepass_core::model::Binary],
+    outcome: &mut MergeOutcome,
+) {
+    let merge_out = merge_entry(local, remote, local_binaries, remote_binaries);
 
     if !merge_out.conflicts.is_empty() {
         outcome.entry_conflicts.push(EntryConflict {
