@@ -86,6 +86,16 @@ pub(crate) struct EntryMergeOutput {
     /// awaiting B3 wiring.
     #[allow(dead_code)]
     pub attachment_auto_resolutions: Vec<AttachmentAutoResolution>,
+    /// The merged tag set after applying 3-way set semantics against
+    /// the LCA (per `_localdocs/MERGE_TAGS_DESIGN.md`). Apply writes
+    /// this onto the merged entry when the entry routes through any
+    /// bucket. Always populated; identical to `local.tags` as a set
+    /// when the merge had nothing to do for tags.
+    pub merged_tags: std::collections::BTreeSet<String>,
+    /// `true` when [`Self::merged_tags`] differs from `local.tags` as
+    /// a set — i.e. local has tag-work to do after the merge.
+    /// Contributes to the routing decision in `merge.rs`.
+    pub tags_changed_from_local: bool,
     /// `true` iff [`find_common_ancestor`] produced a hit. `false` means
     /// every conflicting field was classified conservatively (no
     /// auto-resolution attempted).
@@ -133,11 +143,19 @@ pub(crate) fn merge_entry(
     remote_binaries: &[Binary],
 ) -> EntryMergeOutput {
     let ancestor = find_common_ancestor(local, remote, local_binaries, remote_binaries);
+    let merged_tags = classify_tags(local, remote, ancestor);
+    let local_tag_set: std::collections::BTreeSet<&str> =
+        local.tags.iter().map(String::as_str).collect();
+    let merged_tag_set_view: std::collections::BTreeSet<&str> =
+        merged_tags.iter().map(String::as_str).collect();
+    let tags_changed_from_local = merged_tag_set_view != local_tag_set;
     let mut out = EntryMergeOutput {
         conflicts: Vec::new(),
         auto_resolutions: Vec::new(),
         attachment_conflicts: Vec::new(),
         attachment_auto_resolutions: Vec::new(),
+        merged_tags,
+        tags_changed_from_local,
         had_ancestor: ancestor.is_some(),
     };
 
@@ -294,6 +312,62 @@ fn classify_attachments(
             });
         }
     }
+}
+
+/// Tag set merge against the (optional) LCA. See
+/// `_localdocs/MERGE_TAGS_DESIGN.md`.
+///
+/// Tags carry presence/absence only — there's no slot/content
+/// distinction that could produce a conflict between two writers.
+/// Every cell of the 3-way truth table auto-resolves, so this
+/// function returns a definitive merged tag set rather than buckets.
+///
+/// When `ancestor` is `Some`, deletions are honoured: a tag present
+/// in the ancestor but absent on one side is dropped from the merged
+/// set (the side without it actively removed it). When `ancestor` is
+/// `None`, falls back to union (keep every tag from either side) —
+/// conservative: never drops a tag without evidence the writer
+/// intended to delete it.
+fn classify_tags(
+    local: &Entry,
+    remote: &Entry,
+    ancestor: Option<&Entry>,
+) -> std::collections::BTreeSet<String> {
+    use std::collections::BTreeSet;
+    let local_tags: BTreeSet<&str> = local.tags.iter().map(String::as_str).collect();
+    let remote_tags: BTreeSet<&str> = remote.tags.iter().map(String::as_str).collect();
+    let ancestor_tags: Option<BTreeSet<&str>> =
+        ancestor.map(|a| a.tags.iter().map(String::as_str).collect());
+
+    let all_seen: BTreeSet<&str> = local_tags
+        .iter()
+        .chain(remote_tags.iter())
+        .copied()
+        .collect();
+
+    let mut merged: BTreeSet<String> = BTreeSet::new();
+    for tag in all_seen {
+        let in_local = local_tags.contains(tag);
+        let in_remote = remote_tags.contains(tag);
+        let keep = if in_local && in_remote {
+            // Present on both sides — no decision to make.
+            true
+        } else {
+            // Exactly one side has it (since `all_seen` is the union
+            // of local + remote, the both-absent case can't appear).
+            // No LCA → conservative union, keep it. LCA present and
+            // the ancestor had it → honour the deletion. LCA present
+            // and the ancestor didn't → keep the addition.
+            match &ancestor_tags {
+                None => true,
+                Some(anc) => !anc.contains(tag),
+            }
+        };
+        if keep {
+            merged.insert(tag.to_string());
+        }
+    }
+    merged
 }
 
 /// Build a `name → AttachmentSnap` map for one side. Skips
