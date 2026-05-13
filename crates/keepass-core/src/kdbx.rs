@@ -605,6 +605,23 @@ impl Kdbx<Unlocked> {
         &self.state.vault
     }
 
+    /// The outer-header record preserved from disk through unlock.
+    ///
+    /// Read-only view over fields like [`OuterHeader::cipher_id`] and
+    /// [`OuterHeader::kdf_parameters`] — useful for downstream UI that
+    /// wants to surface format-level metadata (cipher choice, KDF
+    /// shape, KDBX version-specific knobs) without reaching for the
+    /// raw byte slice.
+    ///
+    /// The header is captured at unlock time and not refreshed by
+    /// mutations; KDBX4 saves regenerate the relevant fields
+    /// (`master_seed`, `encryption_iv`, `kdf_parameters` salt) under
+    /// the hood on the way out.
+    #[must_use]
+    pub fn outer_header(&self) -> &OuterHeader {
+        &self.state.outer_header
+    }
+
     /// The configured [`FieldProtector`], if any.
     ///
     /// `None` when the vault was unlocked via [`Self::unlock`] or
