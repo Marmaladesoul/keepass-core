@@ -44,6 +44,7 @@ use uuid::Uuid;
 
 use crate::binary_pool::BinaryPoolRemap;
 use crate::conflict::{EntryConflict, FieldDeltaKind};
+use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
 use crate::resolution::{ConflictSide, DeleteEditChoice};
@@ -101,6 +102,7 @@ pub fn apply_merge(
         remove_entry(local_root, *id);
     }
 
+    let empty_attachment_resolutions: Vec<AttachmentAutoResolution> = Vec::new();
     for id in &outcome.disk_only_changes {
         let Some(remote_entry) = find_entry(&remote.root, *id) else {
             continue;
@@ -108,7 +110,17 @@ pub fn apply_merge(
         let Some(local_entry) = find_entry(local_root, *id) else {
             continue;
         };
-        let merged = build_merged_entry(local_entry, remote_entry, EntryWinner::Remote, &mut remap);
+        let atts = outcome
+            .attachment_auto_resolutions_per_entry
+            .get(id)
+            .unwrap_or(&empty_attachment_resolutions);
+        let merged = build_merged_entry(
+            local_entry,
+            remote_entry,
+            EntryWinner::Remote,
+            atts,
+            &mut remap,
+        );
         replace_entry(local_root, *id, merged);
     }
 
@@ -122,7 +134,17 @@ pub fn apply_merge(
         let Some(local_entry) = find_entry(local_root, *id) else {
             continue;
         };
-        let merged = build_merged_entry(local_entry, remote_entry, EntryWinner::Local, &mut remap);
+        let atts = outcome
+            .attachment_auto_resolutions_per_entry
+            .get(id)
+            .unwrap_or(&empty_attachment_resolutions);
+        let merged = build_merged_entry(
+            local_entry,
+            remote_entry,
+            EntryWinner::Local,
+            atts,
+            &mut remap,
+        );
         replace_entry(local_root, *id, merged);
     }
 
@@ -261,10 +283,15 @@ fn apply_entry_conflict_resolutions(
     resolution: &Resolution,
     remap: &mut BinaryPoolRemap<'_>,
 ) {
+    let empty_attachment_resolutions: Vec<AttachmentAutoResolution> = Vec::new();
     for conflict in &outcome.entry_conflicts {
         // Validation guarantees the entry key exists in the resolution.
         let field_choices = &resolution.entry_field_choices[&conflict.entry_id];
-        let merged = build_resolved_entry(conflict, field_choices, remap);
+        let atts = outcome
+            .attachment_auto_resolutions_per_entry
+            .get(&conflict.entry_id)
+            .unwrap_or(&empty_attachment_resolutions);
+        let merged = build_resolved_entry(conflict, field_choices, atts, remap);
         replace_entry(local_root, conflict.entry_id, merged);
     }
 }
@@ -282,6 +309,7 @@ fn apply_entry_conflict_resolutions(
 fn build_resolved_entry(
     conflict: &EntryConflict,
     field_choices: &HashMap<String, ConflictSide>,
+    attachment_resolutions: &[AttachmentAutoResolution],
     remap: &mut BinaryPoolRemap<'_>,
 ) -> Entry {
     let mut merged = conflict.local.clone();
@@ -311,6 +339,18 @@ fn build_resolved_entry(
         }
     }
 
+    // Apply attachment auto-resolutions per-name. The entry-level
+    // "ride along on local" carried local's whole attachment list
+    // onto `merged` via the `.clone()` above; reconcile per-name now
+    // for any name the classifier had a clear answer on.
+    apply_attachment_resolutions(
+        &mut merged,
+        &conflict.local,
+        &conflict.remote,
+        attachment_resolutions,
+        remap,
+    );
+
     // History stitching mirrors slice 5a's `build_merged_entry` for
     // the auto-resolution paths. Rebind the remote-side history records
     // before merging so the combined result carries only local-pool
@@ -329,6 +369,64 @@ fn build_resolved_entry(
     }
     merged.history = combined;
     merged
+}
+
+/// Reconcile `merged.attachments` against the per-name auto-resolutions
+/// from the classifier. `merged` came in as a clone of the entry-level
+/// winning side (local or remote); the resolutions describe what the
+/// *attachment* classifier decided per name, which may diverge from
+/// the entry-level winner for some names.
+///
+/// For each [`AttachmentAutoResolution`]:
+///
+/// - "winning side" for *this attachment* is `res.side`.
+/// - the merged set should hold the name iff the winning side has it
+///   for that name (presence semantics inherited from
+///   `classify_three_way` / `Side`);
+/// - when the winning side is `Remote`, its `ref_id` indexes into the
+///   remote binary pool — translate via `remap`.
+///
+/// Attachment *conflicts* (not in `resolutions`) are left as-is: they
+/// inherit the entry-level winner's bytes by virtue of the upstream
+/// clone. The public conflict surface in a later slice will let the
+/// caller override that per name.
+fn apply_attachment_resolutions(
+    merged: &mut Entry,
+    local_entry: &Entry,
+    remote_entry: &Entry,
+    resolutions: &[AttachmentAutoResolution],
+    remap: &mut BinaryPoolRemap<'_>,
+) {
+    for res in resolutions {
+        let winning_side_entry = match res.side {
+            Side::Local => local_entry,
+            Side::Remote => remote_entry,
+        };
+        let want = winning_side_entry
+            .attachments
+            .iter()
+            .find(|a| a.name == res.name);
+
+        match want {
+            Some(chosen) => {
+                let mut new_att = chosen.clone();
+                // Remote-side refs index into the remote pool; rebind.
+                if matches!(res.side, Side::Remote) {
+                    remap.rebind(std::slice::from_mut(&mut new_att));
+                }
+                if let Some(pos) = merged.attachments.iter().position(|a| a.name == res.name) {
+                    merged.attachments[pos] = new_att;
+                } else {
+                    merged.attachments.push(new_att);
+                }
+            }
+            None => {
+                // Winning side doesn't hold this name (e.g.
+                // `HonourDeletion`). Strip from merged.
+                merged.attachments.retain(|a| a.name != res.name);
+            }
+        }
+    }
 }
 
 /// Clone every history record and rebind its top-level attachments
@@ -552,6 +650,7 @@ fn build_merged_entry(
     local: &Entry,
     remote: &Entry,
     winner: EntryWinner,
+    attachment_resolutions: &[AttachmentAutoResolution],
     remap: &mut BinaryPoolRemap<'_>,
 ) -> Entry {
     // Rebind remote's history before merging so the combined output
@@ -597,6 +696,10 @@ fn build_merged_entry(
         }
         EntryWinner::Local => local.clone(),
     };
+    // Apply per-attachment auto-resolutions on top of the entry-level
+    // winner's clone, overriding the ride-along behaviour for the names
+    // the classifier had a clear answer on.
+    apply_attachment_resolutions(&mut merged, local, remote, attachment_resolutions, remap);
     merged.history = combined;
     merged
 }
