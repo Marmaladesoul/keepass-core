@@ -21,6 +21,7 @@ pub mod outcome;
 pub mod resolution;
 
 mod apply;
+mod binary_pool;
 mod entry_merge;
 mod hash;
 mod history_merge;

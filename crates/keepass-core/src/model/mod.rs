@@ -445,6 +445,22 @@ pub struct Attachment {
     pub ref_id: u32,
 }
 
+impl Attachment {
+    /// Construct an [`Attachment`] from its two required components.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates) — the
+    /// natural companion to the type's `#[non_exhaustive]` marker,
+    /// matching the constructor pattern on [`CustomField`] etc.
+    #[must_use]
+    pub fn new(name: impl Into<String>, ref_id: u32) -> Self {
+        Self {
+            name: name.into(),
+            ref_id,
+        }
+    }
+}
+
 /// One custom string field on an [`Entry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -694,6 +710,19 @@ pub struct Binary {
     /// the KDBX4 inner-header binary record. Preserved for
     /// round-trip write-back.
     pub protected: bool,
+}
+
+impl Binary {
+    /// Construct a [`Binary`] from its two required components.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates) — the
+    /// natural companion to the type's `#[non_exhaustive]` marker,
+    /// matching the constructor pattern on [`CustomField`] etc.
+    #[must_use]
+    pub fn new(data: Vec<u8>, protected: bool) -> Self {
+        Self { data, protected }
+    }
 }
 
 /// Contents of the KeePass `<Meta>` element.

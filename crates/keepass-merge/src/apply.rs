@@ -42,6 +42,7 @@ use std::collections::{HashMap, HashSet};
 use keepass_core::model::{CustomField, DeletedObject, Entry, EntryId, Group, GroupId, Vault};
 use uuid::Uuid;
 
+use crate::binary_pool::BinaryPoolRemap;
 use crate::conflict::{EntryConflict, FieldDeltaKind};
 use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
@@ -77,29 +78,38 @@ pub fn apply_merge(
     // place before `added_on_disk` looks for parent-group paths.
     apply_group_tree(local, remote);
 
+    // Split-borrow Vault fields so `BinaryPoolRemap` can hold
+    // `&mut local.binaries` while the entry-mutation steps work on
+    // `&mut local.root`. The two fields are disjoint; the compiler
+    // accepts the split when we name each field explicitly.
+    let local_root = &mut local.root;
+    let local_tombstones = &mut local.deleted_objects;
+    let mut remap = BinaryPoolRemap::new(&mut local.binaries, &remote.binaries);
+
     // Conflict-driven mutations come *before* the auto-merge buckets:
     // conflict resolution is the most opinionated mutation, so we land
     // it first and then auto-merge against the resolved tree. Defends
     // against any future bucket-overlap refactor at zero cost.
-    let kept_local = apply_delete_edit_resolutions(local, outcome, resolution);
-    apply_entry_conflict_resolutions(local, remote, outcome, resolution);
+    let kept_local =
+        apply_delete_edit_resolutions(local_root, local_tombstones, outcome, resolution);
+    apply_entry_conflict_resolutions(local_root, outcome, resolution, &mut remap);
 
     // Entry-level mutations. Order is "remove → modify → add" so a
     // remote-add with the same id as a local-tombstoned entry can't
     // confuse intermediate state.
     for id in &outcome.deleted_on_disk {
-        remove_entry(&mut local.root, *id);
+        remove_entry(local_root, *id);
     }
 
     for id in &outcome.disk_only_changes {
         let Some(remote_entry) = find_entry(&remote.root, *id) else {
             continue;
         };
-        let Some(local_entry) = find_entry(&local.root, *id) else {
+        let Some(local_entry) = find_entry(local_root, *id) else {
             continue;
         };
-        let merged = build_merged_entry(local_entry, remote_entry, EntryWinner::Remote);
-        replace_entry(&mut local.root, *id, merged);
+        let merged = build_merged_entry(local_entry, remote_entry, EntryWinner::Remote, &mut remap);
+        replace_entry(local_root, *id, merged);
     }
 
     for id in &outcome.local_only_changes {
@@ -109,22 +119,30 @@ pub fn apply_merge(
         let Some(remote_entry) = find_entry(&remote.root, *id) else {
             continue;
         };
-        let Some(local_entry) = find_entry(&local.root, *id) else {
+        let Some(local_entry) = find_entry(local_root, *id) else {
             continue;
         };
-        let merged = build_merged_entry(local_entry, remote_entry, EntryWinner::Local);
-        replace_entry(&mut local.root, *id, merged);
+        let merged = build_merged_entry(local_entry, remote_entry, EntryWinner::Local, &mut remap);
+        replace_entry(local_root, *id, merged);
     }
 
     for new_entry in &outcome.added_on_disk {
         let target_parent = find_remote_parent(&remote.root, new_entry.id);
+        let mut to_insert = new_entry.clone();
+        // `new_entry` originates from `remote`; its current-state and
+        // every history snapshot's `Attachment::ref_id` references
+        // `remote.binaries`. Translate before install.
+        remap.rebind(&mut to_insert.attachments);
+        for hist in &mut to_insert.history {
+            remap.rebind(&mut hist.attachments);
+        }
         let inserted = target_parent
-            .and_then(|gid| find_group_mut(&mut local.root, gid))
+            .and_then(|gid| find_group_mut(local_root, gid))
             .map(|g| {
-                g.entries.push(new_entry.clone());
+                g.entries.push(to_insert.clone());
             });
         if inserted.is_none() {
-            local.root.entries.push(new_entry.clone());
+            local_root.entries.push(to_insert);
         }
     }
 
@@ -138,11 +156,7 @@ pub fn apply_merge(
     // exact-tuple deduplicated by `(uuid, deleted_at)`. Skip uuids
     // covered by a `KeepLocal` delete-edit choice — those are the
     // "user said keep mine, drop the remote tombstone" path.
-    union_tombstones(
-        &mut local.deleted_objects,
-        &remote.deleted_objects,
-        &kept_local,
-    );
+    union_tombstones(local_tombstones, &remote.deleted_objects, &kept_local);
 
     Ok(())
 }
@@ -211,7 +225,8 @@ fn validate_resolution(outcome: &MergeOutcome, resolution: &Resolution) -> Resul
 /// uuids whose remote tombstone the caller chose to drop (consumed
 /// by the tombstone-union step).
 fn apply_delete_edit_resolutions(
-    local: &mut Vault,
+    local_root: &mut Group,
+    local_tombstones: &mut Vec<DeletedObject>,
     outcome: &MergeOutcome,
     resolution: &Resolution,
 ) -> HashSet<Uuid> {
@@ -225,10 +240,10 @@ fn apply_delete_edit_resolutions(
                 // Drop any local tombstone for this uuid too — the
                 // local entry stays, so a tombstone for it would be
                 // contradictory state.
-                local.deleted_objects.retain(|t| t.uuid != id.0);
+                local_tombstones.retain(|t| t.uuid != id.0);
             }
             DeleteEditChoice::AcceptRemoteDelete => {
-                remove_entry(&mut local.root, *id);
+                remove_entry(local_root, *id);
                 // The tombstone-union step will pull in the remote's
                 // tombstone for this uuid via the standard path.
             }
@@ -241,25 +256,33 @@ fn apply_delete_edit_resolutions(
 /// clone local as the base, then overwrite the fields the caller
 /// chose `Remote` for. History merge + pre-merge snapshot per slice 5a.
 fn apply_entry_conflict_resolutions(
-    local: &mut Vault,
-    _remote: &Vault,
+    local_root: &mut Group,
     outcome: &MergeOutcome,
     resolution: &Resolution,
+    remap: &mut BinaryPoolRemap<'_>,
 ) {
     for conflict in &outcome.entry_conflicts {
         // Validation guarantees the entry key exists in the resolution.
         let field_choices = &resolution.entry_field_choices[&conflict.entry_id];
-        let merged = build_resolved_entry(conflict, field_choices);
-        replace_entry(&mut local.root, conflict.entry_id, merged);
+        let merged = build_resolved_entry(conflict, field_choices, remap);
+        replace_entry(local_root, conflict.entry_id, merged);
     }
 }
 
 /// Build the post-resolution entry: clone the local side, apply each
 /// `Remote`-chosen field from the conflict's `remote`, then stitch in
 /// the combined history plus a pre-merge snapshot of local.
+///
+/// `remap` translates any history record sourced from `conflict.remote`
+/// — its `Attachment::ref_id` values index into the remote vault's
+/// binary pool and would be silently stale once installed into local
+/// without translation. Current-side attachments are inherited from
+/// `conflict.local` (per `<History>` is per-field, not per-attachment
+/// in v0.1) and need no translation.
 fn build_resolved_entry(
     conflict: &EntryConflict,
     field_choices: &HashMap<String, ConflictSide>,
+    remap: &mut BinaryPoolRemap<'_>,
 ) -> Entry {
     let mut merged = conflict.local.clone();
 
@@ -289,8 +312,11 @@ fn build_resolved_entry(
     }
 
     // History stitching mirrors slice 5a's `build_merged_entry` for
-    // the auto-resolution paths.
-    let mut combined = merge_histories(&conflict.local.history, &conflict.remote.history);
+    // the auto-resolution paths. Rebind the remote-side history records
+    // before merging so the combined result carries only local-pool
+    // ref_ids.
+    let rebound_remote_history = rebind_history(&conflict.remote.history, remap);
+    let mut combined = merge_histories(&conflict.local.history, &rebound_remote_history);
     let mut snapshot = conflict.local.clone();
     snapshot.history.clear();
     let snapshot_hash = entry_content_hash(&snapshot);
@@ -303,6 +329,19 @@ fn build_resolved_entry(
     }
     merged.history = combined;
     merged
+}
+
+/// Clone every history record and rebind its top-level attachments
+/// (history records themselves have no nested history per KDBX).
+fn rebind_history(history: &[Entry], remap: &mut BinaryPoolRemap<'_>) -> Vec<Entry> {
+    history
+        .iter()
+        .map(|h| {
+            let mut clone = h.clone();
+            remap.rebind(&mut clone.attachments);
+            clone
+        })
+        .collect()
 }
 
 fn remove_field(entry: &mut Entry, key: &str) {
@@ -503,9 +542,23 @@ enum EntryWinner {
 /// Build a merged entry by cloning the winning side and stitching
 /// in the combined history plus a pre-merge snapshot of whichever
 /// side is being overwritten.
-fn build_merged_entry(local: &Entry, remote: &Entry, winner: EntryWinner) -> Entry {
-    // Slice 4's merge_histories handles dedup + ordering.
-    let mut combined = merge_histories(&local.history, &remote.history);
+///
+/// `remap` translates remote-pool `Attachment::ref_id` values into
+/// local-pool indices for every cloned piece sourced from `remote`:
+/// the winner=Remote current-state clone, the winner=Local snapshot
+/// of remote (when remote is the loser), and every remote-sourced
+/// history record.
+fn build_merged_entry(
+    local: &Entry,
+    remote: &Entry,
+    winner: EntryWinner,
+    remap: &mut BinaryPoolRemap<'_>,
+) -> Entry {
+    // Rebind remote's history before merging so the combined output
+    // carries only local-pool ref_ids regardless of which records win
+    // the dedup. Slice 4's merge_histories handles dedup + ordering.
+    let rebound_remote_history = rebind_history(&remote.history, remap);
+    let mut combined = merge_histories(&local.history, &rebound_remote_history);
 
     // Snapshot the loser's pre-merge state into history so a later
     // viewer can see what was overwritten. The snapshot has its
@@ -519,6 +572,7 @@ fn build_merged_entry(local: &Entry, remote: &Entry, winner: EntryWinner) -> Ent
         EntryWinner::Local => {
             let mut s = remote.clone();
             s.history.clear();
+            remap.rebind(&mut s.attachments);
             s
         }
     };
@@ -536,7 +590,11 @@ fn build_merged_entry(local: &Entry, remote: &Entry, winner: EntryWinner) -> Ent
     }
 
     let mut merged = match winner {
-        EntryWinner::Remote => remote.clone(),
+        EntryWinner::Remote => {
+            let mut e = remote.clone();
+            remap.rebind(&mut e.attachments);
+            e
+        }
         EntryWinner::Local => local.clone(),
     };
     merged.history = combined;
