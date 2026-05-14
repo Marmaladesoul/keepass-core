@@ -204,6 +204,7 @@ pub fn apply_merge(
 
 /// Read-only walk of the resolution against the outcome. Returns the
 /// first violation found (single-pass, first-violation-wins).
+#[allow(clippy::too_many_lines)]
 fn validate_resolution(outcome: &MergeOutcome, resolution: &Resolution) -> Result<(), MergeError> {
     let conflict_ids: HashSet<EntryId> =
         outcome.entry_conflicts.iter().map(|c| c.entry_id).collect();
@@ -278,11 +279,27 @@ fn validate_resolution(outcome: &MergeOutcome, resolution: &Resolution) -> Resul
         }
     }
 
+    // 3b. Every entry referenced in entry_icon_choices must be in
+    //     entry_conflicts and carry an icon_delta.
+    for entry_id in resolution.entry_icon_choices.keys() {
+        let Some(conflict) = outcome
+            .entry_conflicts
+            .iter()
+            .find(|c| c.entry_id == *entry_id)
+        else {
+            return Err(MergeError::UnknownEntryInResolution { entry: *entry_id });
+        };
+        if conflict.icon_delta.is_none() {
+            return Err(MergeError::UnknownEntryInResolution { entry: *entry_id });
+        }
+    }
+
     // 4. Every conflict in either bucket must have a corresponding
     //    resolution entry. A conflict with field_deltas requires its
     //    entry in entry_field_choices (even an empty inner map — the
     //    caller's intent must be explicit). Same for attachment_deltas
-    //    and entry_attachment_choices.
+    //    and entry_attachment_choices, and for icon_delta on
+    //    entry_icon_choices.
     for conflict in &outcome.entry_conflicts {
         if !conflict.field_deltas.is_empty()
             && !resolution
@@ -296,6 +313,15 @@ fn validate_resolution(outcome: &MergeOutcome, resolution: &Resolution) -> Resul
         if !conflict.attachment_deltas.is_empty()
             && !resolution
                 .entry_attachment_choices
+                .contains_key(&conflict.entry_id)
+        {
+            return Err(MergeError::MissingResolutionForConflict {
+                entry: conflict.entry_id,
+            });
+        }
+        if conflict.icon_delta.is_some()
+            && !resolution
+                .entry_icon_choices
                 .contains_key(&conflict.entry_id)
         {
             return Err(MergeError::MissingResolutionForConflict {
@@ -375,11 +401,16 @@ fn apply_entry_conflict_resolutions(
             .attachment_auto_resolutions_per_entry
             .get(&conflict.entry_id)
             .unwrap_or(&empty_attachment_auto);
+        let icon_choice = resolution
+            .entry_icon_choices
+            .get(&conflict.entry_id)
+            .copied();
         let mut merged = build_resolved_entry(
             conflict,
             field_choices,
             atts_auto,
             attachment_choices,
+            icon_choice,
             remap,
         );
         apply_merged_tags(&mut merged, outcome, conflict.entry_id);
@@ -415,6 +446,7 @@ fn build_resolved_entry(
     field_choices: &HashMap<String, ConflictSide>,
     attachment_resolutions: &[AttachmentAutoResolution],
     attachment_choices: &HashMap<String, AttachmentChoice>,
+    icon_choice: Option<ConflictSide>,
     remap: &mut BinaryPoolRemap<'_>,
 ) -> Entry {
     let mut merged = conflict.local.clone();
@@ -441,6 +473,17 @@ fn build_resolved_entry(
                 // custom fields).
                 set_field_from(&mut merged, &conflict.remote, &delta.key);
             }
+        }
+    }
+
+    // Apply icon choice when the conflict carries an icon_delta.
+    // `merged` started as a clone of local, so an absent icon_choice
+    // (validation allows it to be Local-equivalent) defaults to the
+    // local UUID already in place. Only flip when the caller picked
+    // remote.
+    if conflict.icon_delta.is_some() {
+        if let Some(ConflictSide::Remote) = icon_choice {
+            merged.custom_icon_uuid = conflict.remote.custom_icon_uuid;
         }
     }
 
@@ -1379,6 +1422,7 @@ mod tests {
                 kind: FieldDeltaKind::BothDiffer,
             }],
             attachment_deltas: Vec::new(),
+            icon_delta: None,
         }
     }
 
@@ -1467,6 +1511,7 @@ mod tests {
                 },
             ],
             attachment_deltas: Vec::new(),
+            icon_delta: None,
         };
         let mut outcome = MergeOutcome::default();
         outcome.entry_conflicts.push(conflict);

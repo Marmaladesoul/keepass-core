@@ -169,30 +169,7 @@ fn mixed_side_field_remote_and_icon_local_preserves_both() {
     );
 }
 
-#[test]
-fn icon_only_conflict_still_omitted_until_pr_i3() {
-    // Both sides diverge from LCA on icon — classifier produces
-    // icon_conflict, no auto_resolution. PR I3 will route this to
-    // entry_conflicts; for now (I2) it stays omitted, matching the
-    // pre-existing posture. This test pins that contract so I3's
-    // change is loud and intentional.
-    let icon1 = Uuid::from_u128(0x01);
-    let icon2 = Uuid::from_u128(0x02);
-    let icon3 = Uuid::from_u128(0x03);
-
-    let mut ancestor = entry(4, at(2026, 1, 1));
-    ancestor.custom_icon_uuid = Some(icon1);
-
-    let mut local = entry(4, at(2026, 1, 2));
-    local.custom_icon_uuid = Some(icon2);
-    local.history = vec![ancestor.clone()];
-
-    let mut remote = entry(4, at(2026, 1, 3));
-    remote.custom_icon_uuid = Some(icon3);
-    remote.history = vec![ancestor];
-
-    let outcome = merge(&vault(vec![local]), &vault(vec![remote])).expect("merge");
-    assert!(outcome.disk_only_changes.is_empty());
-    assert!(outcome.local_only_changes.is_empty());
-    assert!(outcome.entry_conflicts.is_empty());
-}
+// The PR-I2-era pin "icon_only_conflict_still_omitted_until_pr_i3"
+// flipped intentionally in PR I3: icon-only conflicts now route to
+// `entry_conflicts` with `icon_delta` populated. See
+// `tests/icon_conflict_resolution.rs` for the full coverage.

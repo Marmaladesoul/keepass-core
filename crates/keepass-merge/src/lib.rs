@@ -30,6 +30,7 @@ mod merge;
 pub use crate::apply::{apply_merge, reconcile_timestamps};
 pub use crate::conflict::{
     AttachmentDelta, AttachmentDeltaKind, EntryConflict, FieldDelta, FieldDeltaKind, GroupConflict,
+    IconDelta,
 };
 pub use crate::error::MergeError;
 pub use crate::merge::merge;
