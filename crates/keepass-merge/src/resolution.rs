@@ -42,6 +42,12 @@ pub struct Resolution {
     /// Per-entry decision for every entry in
     /// [`crate::MergeOutcome::delete_edit_conflicts`].
     pub delete_edit_choices: HashMap<EntryId, DeleteEditChoice>,
+    /// Per-entry icon decision. Populated for every entry in
+    /// [`crate::MergeOutcome::entry_conflicts`] whose
+    /// [`crate::EntryConflict::icon_delta`] is `Some`. The chosen
+    /// side's `custom_icon_uuid` is overlaid on the merged entry by
+    /// `build_resolved_entry`.
+    pub entry_icon_choices: HashMap<EntryId, ConflictSide>,
 }
 
 /// Which side a caller has chosen for a single conflicting field.
