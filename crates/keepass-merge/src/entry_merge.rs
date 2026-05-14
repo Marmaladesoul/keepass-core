@@ -99,16 +99,13 @@ pub(crate) struct EntryMergeOutput {
     /// Icon-divergence delta when the classifier sees a visible
     /// conflict (different `custom_icon_uuid`, or one side has one and
     /// the other doesn't, with no LCA-driven auto-winner). `None` when
-    /// icons match or the classifier auto-resolved. Populated by the
-    /// classifier added in PR I1; no consumer yet — routing in
-    /// `merge.rs` and apply in `apply.rs` start reading this in PR I2
-    /// (per `_localdocs/MERGE_ICON_CLASSIFIER.md`).
-    #[allow(dead_code)]
+    /// icons match or the classifier auto-resolved. Routed onto
+    /// [`EntryConflict::icon_delta`] by `route_both_present`.
     pub icon_conflict: Option<crate::conflict::IconDelta>,
     /// Icon auto-resolution when the classifier had a clear answer
     /// (LCA matches one side; take the other). Mutually exclusive with
-    /// `icon_conflict`. Also awaiting PR I2 wiring.
-    #[allow(dead_code)]
+    /// `icon_conflict`. Consumed by `route_both_present` (routing) and
+    /// `build_merged_entry` (apply overlay).
     pub icon_auto_resolution: Option<Side>,
     /// `true` iff [`find_common_ancestor`] produced a hit. `false` means
     /// every conflicting field was classified conservatively (no

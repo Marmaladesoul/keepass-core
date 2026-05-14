@@ -65,6 +65,12 @@ pub struct EntryConflict {
     /// internal auto-resolution pipeline and apply silently; they do
     /// not appear here.
     pub attachment_deltas: Vec<AttachmentDelta>,
+    /// Pre-computed icon divergence when local and remote disagree on
+    /// `custom_icon_uuid` and the 3-way classifier couldn't pick a
+    /// winner against the LCA. `None` when icons match, both sides
+    /// have no custom icon, or the classifier auto-resolved (in which
+    /// case the entry routes through the auto-merge buckets instead).
+    pub icon_delta: Option<IconDelta>,
 }
 
 /// Per-attachment difference between the two sides of an [`EntryConflict`].
@@ -130,15 +136,14 @@ pub enum AttachmentDeltaKind {
 /// winner against the LCA. Base-icon-ID divergence is silently auto-
 /// merged and does not surface here — see
 /// `_localdocs/MERGE_ICON_CLASSIFIER.md`.
-///
-/// Currently `pub(crate)` — the classifier populates it on
-/// [`crate::entry_merge::EntryMergeOutput`] but no routing or apply
-/// consumes it yet. Promoted to `pub` and wired into
-/// [`EntryConflict::icon_delta`] in PR I3.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields read by routing/apply in PR I2; resolution carrier in PR I3.
-pub(crate) struct IconDelta {
+#[non_exhaustive]
+pub struct IconDelta {
+    /// `custom_icon_uuid` on the local side at conflict time, or
+    /// `None` if local has no custom icon set.
     pub local_custom_icon_uuid: Option<Uuid>,
+    /// `custom_icon_uuid` on the remote side at conflict time, or
+    /// `None` if remote has no custom icon set.
     pub remote_custom_icon_uuid: Option<Uuid>,
 }
 

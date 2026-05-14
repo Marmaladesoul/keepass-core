@@ -135,13 +135,17 @@ fn route_both_present(
         .merged_tags_per_entry
         .insert(id, merge_out.merged_tags);
 
-    if !merge_out.conflicts.is_empty() || !merge_out.attachment_conflicts.is_empty() {
+    if !merge_out.conflicts.is_empty()
+        || !merge_out.attachment_conflicts.is_empty()
+        || merge_out.icon_conflict.is_some()
+    {
         outcome.entry_conflicts.push(EntryConflict {
             entry_id: id,
             local: local.clone(),
             remote: remote.clone(),
             field_deltas: merge_out.conflicts,
             attachment_deltas: merge_out.attachment_conflicts,
+            icon_delta: merge_out.icon_conflict,
         });
         return;
     }
