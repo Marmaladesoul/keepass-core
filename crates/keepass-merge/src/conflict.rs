@@ -13,6 +13,7 @@
 //! reserved by `#[non_exhaustive]`.
 
 use keepass_core::model::{Entry, EntryId, GroupId};
+use uuid::Uuid;
 
 /// Per-field difference between the two sides of an [`EntryConflict`].
 ///
@@ -120,6 +121,25 @@ pub enum AttachmentDeltaKind {
     /// mismatch) and neither side's bytes match the LCA — concurrent
     /// edits to the same attachment slot.
     BothDiffer,
+}
+
+/// Per-entry icon difference between the two sides of an
+/// [`EntryConflict`]. Surfaces only when the local and remote sides
+/// hold different `custom_icon_uuid` values (or one side has one and
+/// the other doesn't) **and** the 3-way classifier couldn't pick a
+/// winner against the LCA. Base-icon-ID divergence is silently auto-
+/// merged and does not surface here — see
+/// `_localdocs/MERGE_ICON_CLASSIFIER.md`.
+///
+/// Currently `pub(crate)` — the classifier populates it on
+/// [`crate::entry_merge::EntryMergeOutput`] but no routing or apply
+/// consumes it yet. Promoted to `pub` and wired into
+/// [`EntryConflict::icon_delta`] in PR I3.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields read by routing/apply in PR I2; resolution carrier in PR I3.
+pub(crate) struct IconDelta {
+    pub local_custom_icon_uuid: Option<Uuid>,
+    pub remote_custom_icon_uuid: Option<Uuid>,
 }
 
 /// Placeholder for a future group structural conflict (v0.2).

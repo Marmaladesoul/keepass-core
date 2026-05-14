@@ -96,6 +96,20 @@ pub(crate) struct EntryMergeOutput {
     /// a set — i.e. local has tag-work to do after the merge.
     /// Contributes to the routing decision in `merge.rs`.
     pub tags_changed_from_local: bool,
+    /// Icon-divergence delta when the classifier sees a visible
+    /// conflict (different `custom_icon_uuid`, or one side has one and
+    /// the other doesn't, with no LCA-driven auto-winner). `None` when
+    /// icons match or the classifier auto-resolved. Populated by the
+    /// classifier added in PR I1; no consumer yet — routing in
+    /// `merge.rs` and apply in `apply.rs` start reading this in PR I2
+    /// (per `_localdocs/MERGE_ICON_CLASSIFIER.md`).
+    #[allow(dead_code)]
+    pub icon_conflict: Option<crate::conflict::IconDelta>,
+    /// Icon auto-resolution when the classifier had a clear answer
+    /// (LCA matches one side; take the other). Mutually exclusive with
+    /// `icon_conflict`. Also awaiting PR I2 wiring.
+    #[allow(dead_code)]
+    pub icon_auto_resolution: Option<Side>,
     /// `true` iff [`find_common_ancestor`] produced a hit. `false` means
     /// every conflicting field was classified conservatively (no
     /// auto-resolution attempted).
@@ -156,6 +170,8 @@ pub(crate) fn merge_entry(
         attachment_auto_resolutions: Vec::new(),
         merged_tags,
         tags_changed_from_local,
+        icon_conflict: None,
+        icon_auto_resolution: None,
         had_ancestor: ancestor.is_some(),
     };
 
@@ -223,7 +239,41 @@ pub(crate) fn merge_entry(
         &mut out,
     );
 
+    classify_icon(local, remote, ancestor, &mut out);
+
     out
+}
+
+/// Classify `custom_icon_uuid` divergence between local and remote
+/// against the (optional) LCA. Mirrors the field/attachment 3-way
+/// pattern: identical → no row; LCA matches one side → auto to the
+/// other; both differ from LCA or no LCA → conflict. Base icon ID is
+/// not modelled here — per spec rule 4 it rides along silently with
+/// the chosen icon side. See `_localdocs/MERGE_ICON_CLASSIFIER.md`.
+fn classify_icon(
+    local: &Entry,
+    remote: &Entry,
+    ancestor: Option<&Entry>,
+    out: &mut EntryMergeOutput,
+) {
+    let l = local.custom_icon_uuid;
+    let r = remote.custom_icon_uuid;
+    if l == r {
+        return;
+    }
+    let resolution = ancestor.map(|a| {
+        let av = a.custom_icon_uuid;
+        classify_three_way(l.as_ref(), r.as_ref(), av.as_ref())
+    });
+    match resolution {
+        Some(Resolution::Auto(side)) => out.icon_auto_resolution = Some(side),
+        _ => {
+            out.icon_conflict = Some(crate::conflict::IconDelta {
+                local_custom_icon_uuid: l,
+                remote_custom_icon_uuid: r,
+            });
+        }
+    }
 }
 
 /// Bundle of one side's attachment metadata at a single name, used by
@@ -966,6 +1016,132 @@ mod tests {
                 AttachmentDeltaKind::RemoteOnly
             ]
         );
+    }
+
+    // ----- Icon classifier (PR I1) -----
+
+    fn icon(id: u128) -> Uuid {
+        Uuid::from_u128(id)
+    }
+
+    #[test]
+    fn icon_classifier_no_row_when_both_sides_match() {
+        // Same custom_icon_uuid on both sides → no row, no auto-res.
+        let same = Some(icon(1));
+        let mut local = entry();
+        local.custom_icon_uuid = same;
+        let mut remote = entry();
+        remote.custom_icon_uuid = same;
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.icon_conflict.is_none());
+        assert!(out.icon_auto_resolution.is_none());
+    }
+
+    #[test]
+    fn icon_classifier_no_row_when_both_sides_have_no_custom_icon() {
+        let local = entry();
+        let remote = entry();
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.icon_conflict.is_none());
+        assert!(out.icon_auto_resolution.is_none());
+    }
+
+    #[test]
+    fn icon_classifier_conflict_when_differing_uuids_with_no_lca() {
+        let mut local = entry();
+        local.custom_icon_uuid = Some(icon(1));
+        let mut remote = entry();
+        remote.custom_icon_uuid = Some(icon(2));
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        let delta = out.icon_conflict.expect("conflict expected");
+        assert_eq!(delta.local_custom_icon_uuid, Some(icon(1)));
+        assert_eq!(delta.remote_custom_icon_uuid, Some(icon(2)));
+        assert!(out.icon_auto_resolution.is_none());
+    }
+
+    #[test]
+    fn icon_classifier_conflict_when_one_side_has_custom_other_doesnt_no_lca() {
+        let mut local = entry();
+        local.custom_icon_uuid = Some(icon(1));
+        let remote = entry(); // None
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        let delta = out.icon_conflict.expect("conflict expected");
+        assert_eq!(delta.local_custom_icon_uuid, Some(icon(1)));
+        assert_eq!(delta.remote_custom_icon_uuid, None);
+    }
+
+    #[test]
+    fn icon_classifier_auto_remote_when_lca_matches_local() {
+        // Ancestor + local both icon=1; remote moved to icon=2.
+        // → remote edited → auto-resolve to Remote.
+        let mut ancestor = snapshot("v1", at(2026, 1));
+        ancestor.custom_icon_uuid = Some(icon(1));
+        let mut local = entry();
+        local.custom_icon_uuid = Some(icon(1));
+        local.history = vec![ancestor.clone()];
+        let mut remote = entry();
+        remote.custom_icon_uuid = Some(icon(2));
+        remote.history = vec![ancestor];
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.icon_conflict.is_none());
+        assert_eq!(out.icon_auto_resolution, Some(Side::Remote));
+    }
+
+    #[test]
+    fn icon_classifier_auto_local_when_lca_matches_remote() {
+        let mut ancestor = snapshot("v1", at(2026, 1));
+        ancestor.custom_icon_uuid = Some(icon(1));
+        let mut local = entry();
+        local.custom_icon_uuid = Some(icon(2));
+        local.history = vec![ancestor.clone()];
+        let mut remote = entry();
+        remote.custom_icon_uuid = Some(icon(1));
+        remote.history = vec![ancestor];
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.icon_conflict.is_none());
+        assert_eq!(out.icon_auto_resolution, Some(Side::Local));
+    }
+
+    #[test]
+    fn icon_classifier_conflict_when_both_sides_diverge_from_lca() {
+        let mut ancestor = snapshot("v1", at(2026, 1));
+        ancestor.custom_icon_uuid = Some(icon(1));
+        let mut local = entry();
+        local.custom_icon_uuid = Some(icon(2));
+        local.history = vec![ancestor.clone()];
+        let mut remote = entry();
+        remote.custom_icon_uuid = Some(icon(3));
+        remote.history = vec![ancestor];
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        let delta = out.icon_conflict.expect("conflict expected");
+        assert_eq!(delta.local_custom_icon_uuid, Some(icon(2)));
+        assert_eq!(delta.remote_custom_icon_uuid, Some(icon(3)));
+        assert!(out.icon_auto_resolution.is_none());
+    }
+
+    #[test]
+    fn icon_classifier_auto_local_when_lca_had_none_and_only_local_added() {
+        // LCA had no custom icon; local added one; remote stayed nil.
+        // 3-way classify: l != ancestor (None), r == ancestor → Auto(Local).
+        let ancestor = snapshot("v1", at(2026, 1));
+        let mut local = entry();
+        local.custom_icon_uuid = Some(icon(1));
+        local.history = vec![ancestor.clone()];
+        let remote = {
+            let mut e = entry();
+            e.history = vec![ancestor];
+            e
+        };
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.icon_conflict.is_none());
+        assert_eq!(out.icon_auto_resolution, Some(Side::Local));
     }
 
     #[test]
