@@ -313,6 +313,100 @@ fn protector_wrap_failure_propagates() {
 }
 
 #[test]
+fn vault_with_unwrapped_protected_returns_plaintext_clone() {
+    // Regression for the merge-time empty-vs-plaintext bug: when a
+    // protector is installed, downstream byte-level consumers (the
+    // 3-way merger in particular) need a clone with plaintext spliced
+    // back in. Mirrors what `do_save` already does internally.
+    let composite = CompositeKey::from_password(b"test");
+    let (bytes, password, totp, recovery) = fixture_bytes_with_one_entry(&composite);
+
+    let protector: Arc<dyn FieldProtector> = Arc::new(XorProtector { key: 0xa5 });
+    let unlocked = Kdbx::<Sealed>::open_from_bytes(bytes)
+        .expect("open")
+        .read_header()
+        .expect("read_header")
+        .unlock_with_protector(&composite, Some(protector))
+        .expect("unlock_with_protector");
+
+    // Canonical state is wrapped / blanked.
+    let canonical_entry = unlocked.vault().root.entries.first().expect("one entry");
+    assert!(
+        canonical_entry.password.is_empty(),
+        "canonical password blanked"
+    );
+    let canonical_totp = canonical_entry
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert!(
+        canonical_totp.value.is_empty(),
+        "canonical protected custom field blanked",
+    );
+
+    // Unwrapped clone carries plaintext on every protected slot.
+    let unwrapped = unlocked
+        .vault_with_unwrapped_protected()
+        .expect("vault_with_unwrapped_protected");
+    let entry = unwrapped.root.entries.first().expect("one entry");
+    assert_eq!(entry.password, password);
+    let totp_cf = entry
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert_eq!(totp_cf.value, totp);
+    let recovery_cf = entry
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "Recovery Code")
+        .unwrap();
+    assert_eq!(
+        recovery_cf.value, recovery,
+        "non-protected field rides through"
+    );
+
+    // Canonical state still wrapped after the unwrap call — the
+    // clone is independent.
+    let canonical_after = unlocked.vault().root.entries.first().unwrap();
+    assert!(canonical_after.password.is_empty());
+    let canonical_totp_after = canonical_after
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert!(canonical_totp_after.value.is_empty());
+}
+
+#[test]
+fn vault_with_unwrapped_protected_no_protector_is_identity_clone() {
+    // No protector → state.vault already carries plaintext; the
+    // helper just returns a clone.
+    let composite = CompositeKey::from_password(b"test");
+    let (bytes, password, totp, _) = fixture_bytes_with_one_entry(&composite);
+
+    let unlocked = Kdbx::<Sealed>::open_from_bytes(bytes)
+        .expect("open")
+        .read_header()
+        .expect("read_header")
+        .unlock(&composite)
+        .expect("unlock");
+
+    let unwrapped = unlocked
+        .vault_with_unwrapped_protected()
+        .expect("vault_with_unwrapped_protected");
+    let entry = unwrapped.root.entries.first().unwrap();
+    assert_eq!(entry.password, password);
+    let totp_cf = entry
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert_eq!(totp_cf.value, totp);
+}
+
+#[test]
 fn create_empty_v4_with_protector_stores_protector() {
     let composite = CompositeKey::from_password(b"test");
     let protector: Arc<dyn FieldProtector> = Arc::new(XorProtector { key: 0x33 });
