@@ -63,10 +63,7 @@ fn icon_only_conflict_routes_to_entry_conflicts_with_icon_delta() {
         "icon-only conflict routes to entry_conflicts",
     );
     let conflict = &outcome.entry_conflicts[0];
-    let delta = conflict
-        .icon_delta
-        .as_ref()
-        .expect("icon_delta populated");
+    let delta = conflict.icon_delta.as_ref().expect("icon_delta populated");
     assert_eq!(delta.local_custom_icon_uuid, Some(icon2));
     assert_eq!(delta.remote_custom_icon_uuid, Some(icon3));
     assert!(conflict.field_deltas.is_empty());
