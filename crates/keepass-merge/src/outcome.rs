@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use keepass_core::model::{Entry, EntryId};
 
 use crate::conflict::{EntryConflict, GroupConflict};
-use crate::entry_merge::AttachmentAutoResolution;
+use crate::entry_merge::{AttachmentAutoResolution, Side};
 
 /// All entry- and group-level decisions produced by a merge run.
 ///
@@ -49,6 +49,17 @@ pub struct MergeOutcome {
     /// via [`crate::Resolution::entry_attachment_choices`].
     pub(crate) attachment_auto_resolutions_per_entry:
         HashMap<EntryId, Vec<AttachmentAutoResolution>>,
+    /// Crate-private sidecar: per-entry field auto-resolutions produced
+    /// by the classifier in [`crate::entry_merge::merge_entry`]. Keyed
+    /// by [`EntryId`] for every entry that ended up in
+    /// `disk_only_changes` or `local_only_changes`. Apply consumes this
+    /// to overlay per-field winners on the bucket-level clone, so a
+    /// mixed-side auto-resolution (e.g. local wins Title, remote wins
+    /// UserName) doesn't silently lose one side's edit. Field
+    /// *conflicts* (where the classifier can't auto-decide) surface on
+    /// [`EntryConflict::field_deltas`] and consume caller choices via
+    /// [`crate::Resolution::entry_field_choices`].
+    pub(crate) field_auto_resolutions_per_entry: HashMap<EntryId, Vec<(String, Side)>>,
     /// Crate-private sidecar: per-entry merged tag set produced by
     /// the tag classifier in [`crate::entry_merge::merge_entry`]. Tags
     /// merge as a pure set (per `_localdocs/MERGE_TAGS_DESIGN.md`)

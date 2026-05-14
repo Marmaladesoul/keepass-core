@@ -173,6 +173,17 @@ fn route_both_present(
             .iter()
             .any(|r| matches!(r.side, Side::Remote))
         || tag_work_for_local;
+    // Stash the per-field auto-resolutions so apply can overlay the
+    // chosen side per-key on top of the bucket-level winner clone.
+    // Without this, apply would silently lose any field whose
+    // auto-resolution side differs from the bucket winner — the
+    // "mixed-side field wins" data-loss bug. Empty Vec is harmless;
+    // apply's selective-overlay loop becomes a no-op.
+    if !merge_out.auto_resolutions.is_empty() {
+        outcome
+            .field_auto_resolutions_per_entry
+            .insert(id, merge_out.auto_resolutions);
+    }
     if any_remote_wins {
         outcome.disk_only_changes.push(id);
     } else {

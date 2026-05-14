@@ -105,6 +105,7 @@ pub fn apply_merge(
     }
 
     let empty_attachment_resolutions: Vec<AttachmentAutoResolution> = Vec::new();
+    let empty_field_resolutions: Vec<(String, Side)> = Vec::new();
     for id in &outcome.disk_only_changes {
         let Some(remote_entry) = find_entry(&remote.root, *id) else {
             continue;
@@ -116,11 +117,16 @@ pub fn apply_merge(
             .attachment_auto_resolutions_per_entry
             .get(id)
             .unwrap_or(&empty_attachment_resolutions);
+        let fields = outcome
+            .field_auto_resolutions_per_entry
+            .get(id)
+            .unwrap_or(&empty_field_resolutions);
         let mut merged = build_merged_entry(
             local_entry,
             remote_entry,
             EntryWinner::Remote,
             atts,
+            fields,
             &mut remap,
         );
         apply_merged_tags(&mut merged, outcome, *id);
@@ -141,11 +147,16 @@ pub fn apply_merge(
             .attachment_auto_resolutions_per_entry
             .get(id)
             .unwrap_or(&empty_attachment_resolutions);
+        let fields = outcome
+            .field_auto_resolutions_per_entry
+            .get(id)
+            .unwrap_or(&empty_field_resolutions);
         let mut merged = build_merged_entry(
             local_entry,
             remote_entry,
             EntryWinner::Local,
             atts,
+            fields,
             &mut remap,
         );
         apply_merged_tags(&mut merged, outcome, *id);
@@ -887,6 +898,7 @@ fn build_merged_entry(
     remote: &Entry,
     winner: EntryWinner,
     attachment_resolutions: &[AttachmentAutoResolution],
+    field_resolutions: &[(String, Side)],
     remap: &mut BinaryPoolRemap<'_>,
 ) -> Entry {
     // Rebind remote's history before merging so the combined output
@@ -938,6 +950,27 @@ fn build_merged_entry(
         }
         EntryWinner::Local => local.clone(),
     };
+    // Overlay per-field auto-resolutions whose side differs from the
+    // bucket winner. Without this the wholesale clone above would
+    // silently lose any field where the per-field classifier picked
+    // the other side — the "mixed-side field wins" data-loss class.
+    // `set_field_from` handles both "take value" (source has the
+    // field) and "clear field" (source lacks it, for custom keys) the
+    // same way `build_resolved_entry` does for the conflict path.
+    let winner_side = match winner {
+        EntryWinner::Local => Side::Local,
+        EntryWinner::Remote => Side::Remote,
+    };
+    for (key, side) in field_resolutions {
+        if *side == winner_side {
+            continue;
+        }
+        let source = match side {
+            Side::Local => local,
+            Side::Remote => remote,
+        };
+        set_field_from(&mut merged, source, key);
+    }
     // Apply per-attachment auto-resolutions on top of the entry-level
     // winner's clone, overriding the ride-along behaviour for the names
     // the classifier had a clear answer on.
