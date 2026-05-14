@@ -60,6 +60,14 @@ pub struct MergeOutcome {
     /// [`EntryConflict::field_deltas`] and consume caller choices via
     /// [`crate::Resolution::entry_field_choices`].
     pub(crate) field_auto_resolutions_per_entry: HashMap<EntryId, Vec<(String, Side)>>,
+    /// Crate-private sidecar: per-entry icon auto-resolution produced
+    /// by the classifier in [`crate::entry_merge::merge_entry`]. Keyed
+    /// by [`EntryId`]; only present when the classifier had a clear
+    /// answer against the LCA. Apply consumes this to overlay the
+    /// chosen side's `custom_icon_uuid` on the bucket-winner clone.
+    /// Icon *conflicts* (where the classifier can't auto-decide) will
+    /// surface on [`EntryConflict::icon_delta`] in PR I3.
+    pub(crate) icon_auto_resolutions_per_entry: HashMap<EntryId, Side>,
     /// Crate-private sidecar: per-entry merged tag set produced by
     /// the tag classifier in [`crate::entry_merge::merge_entry`]. Tags
     /// merge as a pure set (per `_localdocs/MERGE_TAGS_DESIGN.md`)
