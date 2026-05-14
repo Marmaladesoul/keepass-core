@@ -634,6 +634,46 @@ impl Kdbx<Unlocked> {
         self.state.protector.as_ref()
     }
 
+    /// Return a clone of the vault with every protected field's
+    /// plaintext spliced back into `Entry::password` and
+    /// [`crate::model::CustomField::value`].
+    ///
+    /// Mirrors the unwrap step inside [`Self::save_to_bytes`]:
+    /// mutates a local clone so the canonical
+    /// `state.vault` stays in its wrapped / empty-plaintext shape and
+    /// callers can't accidentally leak plaintext back into the
+    /// long-lived model.
+    ///
+    /// Intended for downstream consumers that need a fully-realised
+    /// [`Vault`] for byte-level work outside the encoder — chiefly the
+    /// 3-way merger, whose protected-field comparator otherwise sees
+    /// empty strings on the wrapped side and full plaintext on the
+    /// non-wrapped (file-loaded) side, falsely flagging every
+    /// protected custom field as a conflict.
+    ///
+    /// When no [`FieldProtector`] is configured the clone is returned
+    /// verbatim — `state.vault` already carries plaintext on that path.
+    ///
+    /// The returned [`Vault`] is owned by the caller; drop it as soon
+    /// as the work is done to limit how long plaintext lingers in
+    /// process memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protector`] if the configured protector's
+    /// `unwrap` rejects any wrapped blob or produces non-UTF-8 output.
+    pub fn vault_with_unwrapped_protected(&self) -> Result<Vault, Error> {
+        let mut vault = self.state.vault.clone();
+        if let Some(protector) = self.state.protector.as_ref() {
+            unwrap_vault_protected_fields(
+                &mut vault,
+                &self.state.protected_fields,
+                protector.as_ref(),
+            )?;
+        }
+        Ok(vault)
+    }
+
     /// Reveal an entry's password as plaintext.
     ///
     /// When no protector is configured, returns the stored
