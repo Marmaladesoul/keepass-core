@@ -148,12 +148,16 @@ fn route_both_present(
 
     // Truly identical entry — nothing to do; omit so callers
     // iterating `local_only_changes` to log "unchanged" don't see
-    // false positives. Tag-only edits (in either direction) count
-    // as "something to do".
+    // false positives. Tag-only and icon-only edits (in either
+    // direction) count as "something to do". Icon-only conflicts
+    // (no auto-resolution) still omit here; PR I3 will route them
+    // through `entry_conflicts` once the public surface lands.
     let tag_work_anywhere = tag_work_for_local || tag_work_for_remote;
+    let icon_auto_work = merge_out.icon_auto_resolution.is_some();
     if merge_out.auto_resolutions.is_empty()
         && merge_out.attachment_auto_resolutions.is_empty()
         && !tag_work_anywhere
+        && !icon_auto_work
     {
         return;
     }
@@ -172,7 +176,8 @@ fn route_both_present(
             .attachment_auto_resolutions
             .iter()
             .any(|r| matches!(r.side, Side::Remote))
-        || tag_work_for_local;
+        || tag_work_for_local
+        || matches!(merge_out.icon_auto_resolution, Some(Side::Remote));
     // Stash the per-field auto-resolutions so apply can overlay the
     // chosen side per-key on top of the bucket-level winner clone.
     // Without this, apply would silently lose any field whose
@@ -183,6 +188,11 @@ fn route_both_present(
         outcome
             .field_auto_resolutions_per_entry
             .insert(id, merge_out.auto_resolutions);
+    }
+    // Stash the icon auto-resolution similarly so apply can overlay
+    // the chosen side's `custom_icon_uuid` on the bucket-winner clone.
+    if let Some(side) = merge_out.icon_auto_resolution {
+        outcome.icon_auto_resolutions_per_entry.insert(id, side);
     }
     if any_remote_wins {
         outcome.disk_only_changes.push(id);

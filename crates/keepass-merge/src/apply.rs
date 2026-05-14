@@ -121,12 +121,14 @@ pub fn apply_merge(
             .field_auto_resolutions_per_entry
             .get(id)
             .unwrap_or(&empty_field_resolutions);
+        let icon = outcome.icon_auto_resolutions_per_entry.get(id).copied();
         let mut merged = build_merged_entry(
             local_entry,
             remote_entry,
             EntryWinner::Remote,
             atts,
             fields,
+            icon,
             &mut remap,
         );
         apply_merged_tags(&mut merged, outcome, *id);
@@ -151,12 +153,14 @@ pub fn apply_merge(
             .field_auto_resolutions_per_entry
             .get(id)
             .unwrap_or(&empty_field_resolutions);
+        let icon = outcome.icon_auto_resolutions_per_entry.get(id).copied();
         let mut merged = build_merged_entry(
             local_entry,
             remote_entry,
             EntryWinner::Local,
             atts,
             fields,
+            icon,
             &mut remap,
         );
         apply_merged_tags(&mut merged, outcome, *id);
@@ -899,6 +903,7 @@ fn build_merged_entry(
     winner: EntryWinner,
     attachment_resolutions: &[AttachmentAutoResolution],
     field_resolutions: &[(String, Side)],
+    icon_resolution: Option<Side>,
     remap: &mut BinaryPoolRemap<'_>,
 ) -> Entry {
     // Rebind remote's history before merging so the combined output
@@ -970,6 +975,21 @@ fn build_merged_entry(
             Side::Remote => remote,
         };
         set_field_from(&mut merged, source, key);
+    }
+    // Overlay the icon auto-resolution if the classifier picked a
+    // side different from the bucket winner. Mirrors the per-field
+    // overlay above; base icon ID is intentionally untouched (rides
+    // along with whichever side won the entry-level merge per spec
+    // rule 4). `custom_icons` pool reconciliation is the FFI / write-
+    // back layer's responsibility — out of scope for v0.1 merge.
+    if let Some(side) = icon_resolution {
+        if side != winner_side {
+            let source = match side {
+                Side::Local => local,
+                Side::Remote => remote,
+            };
+            merged.custom_icon_uuid = source.custom_icon_uuid;
+        }
     }
     // Apply per-attachment auto-resolutions on top of the entry-level
     // winner's clone, overriding the ride-along behaviour for the names
