@@ -407,6 +407,148 @@ fn vault_with_unwrapped_protected_no_protector_is_identity_clone() {
 }
 
 #[test]
+fn edit_entry_under_protector_persists_new_password_through_save() {
+    // Regression: `edit_entry` mutates `entry.password` directly, but
+    // the save pipeline's `unwrap_vault_protected_fields` used to
+    // unconditionally overwrite that slot with the side-table's OLD
+    // wrapped bytes — losing every protected-field edit on save.
+    let composite = CompositeKey::from_password(b"test");
+    let (bytes, _, _, _) = fixture_bytes_with_one_entry(&composite);
+
+    let protector: Arc<dyn FieldProtector> = Arc::new(XorProtector { key: 0xa5 });
+    let mut unlocked = Kdbx::<Sealed>::open_from_bytes(bytes)
+        .expect("open")
+        .read_header()
+        .expect("read_header")
+        .unlock_with_protector(&composite, Some(protector.clone()))
+        .expect("unlock_with_protector");
+    let id = unlocked.vault().root.entries.first().unwrap().id;
+
+    unlocked
+        .edit_entry(id, keepass_core::model::HistoryPolicy::NoSnapshot, |e| {
+            e.set_password(SecretString::from("rotated"));
+            e.set_custom_field(
+                "TOTP Seed",
+                keepass_core::model::CustomFieldValue::Protected(SecretString::from("ZZZZ")),
+            );
+        })
+        .expect("edit_entry");
+
+    // Reveal sees the new plaintext immediately — the side-table is
+    // the source of truth.
+    assert_eq!(unlocked.reveal_password(id).unwrap(), "rotated");
+    assert_eq!(
+        unlocked.reveal_custom_field(id, "TOTP Seed").unwrap(),
+        Some("ZZZZ".to_owned()),
+    );
+
+    // Canonical model still wrapped (the rewrap pass cleared the
+    // plaintext the editor wrote).
+    let entry_after = unlocked.vault().root.entries.first().unwrap();
+    assert!(entry_after.password.is_empty(), "live password rewrapped");
+    let totp_after = entry_after
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert!(totp_after.value.is_empty(), "live cf rewrapped");
+
+    // The unwrapped clone (what the merger consumes) carries new
+    // plaintext too.
+    let unwrapped = unlocked.vault_with_unwrapped_protected().unwrap();
+    let entry = unwrapped.root.entries.first().unwrap();
+    assert_eq!(entry.password, "rotated");
+    let totp = entry
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert_eq!(totp.value, "ZZZZ");
+
+    // Save and reopen with no protector — the edit survives the
+    // round-trip.
+    let saved = unlocked.save_to_bytes().expect("save_to_bytes");
+    let reopened = Kdbx::<Sealed>::open_from_bytes(saved)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock(&composite)
+        .unwrap();
+    let entry = reopened.vault().root.entries.first().unwrap();
+    assert_eq!(entry.password, "rotated");
+    let totp = entry
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert_eq!(totp.value, "ZZZZ");
+}
+
+#[test]
+fn edit_entry_under_protector_snapshot_carries_old_plaintext() {
+    // Pre-edit snapshots taken inside `edit_entry` capture the entry
+    // as it was *before* the closure ran — including the OLD
+    // plaintext for protected fields. With a protector configured the
+    // side-table has to grow a new entry alongside `entry.history`
+    // carrying the OLD wrapped bytes, otherwise save would emit the
+    // snapshot with an empty password.
+    let composite = CompositeKey::from_password(b"test");
+    let (bytes, original_password, original_totp, _) = fixture_bytes_with_one_entry(&composite);
+
+    let protector: Arc<dyn FieldProtector> = Arc::new(XorProtector { key: 0xa5 });
+    let mut unlocked = Kdbx::<Sealed>::open_from_bytes(bytes)
+        .expect("open")
+        .read_header()
+        .expect("read_header")
+        .unlock_with_protector(&composite, Some(protector.clone()))
+        .expect("unlock_with_protector");
+    let id = unlocked.vault().root.entries.first().unwrap().id;
+
+    unlocked
+        .edit_entry(id, keepass_core::model::HistoryPolicy::Snapshot, |e| {
+            e.set_password(SecretString::from("rotated"));
+            e.set_custom_field(
+                "TOTP Seed",
+                keepass_core::model::CustomFieldValue::Protected(SecretString::from("NEWSEED")),
+            );
+        })
+        .expect("edit_entry");
+
+    let saved = unlocked.save_to_bytes().expect("save_to_bytes");
+    let reopened = Kdbx::<Sealed>::open_from_bytes(saved)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock(&composite)
+        .unwrap();
+    let entry = reopened.vault().root.entries.first().unwrap();
+    assert_eq!(entry.password, "rotated");
+    let totp = entry
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert_eq!(totp.value, "NEWSEED");
+
+    // Exactly one history snapshot, carrying the pre-edit plaintext.
+    assert_eq!(entry.history.len(), 1, "one snapshot from the edit");
+    let snap = &entry.history[0];
+    assert_eq!(
+        snap.password, original_password,
+        "snapshot preserves the OLD password"
+    );
+    let snap_totp = snap
+        .custom_fields
+        .iter()
+        .find(|c| c.key == "TOTP Seed")
+        .unwrap();
+    assert_eq!(
+        snap_totp.value, original_totp,
+        "snapshot preserves the OLD protected cf"
+    );
+}
+
+#[test]
 fn create_empty_v4_with_protector_stores_protector() {
     let composite = CompositeKey::from_password(b"test");
     let protector: Arc<dyn FieldProtector> = Arc::new(XorProtector { key: 0x33 });

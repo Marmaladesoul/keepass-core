@@ -951,6 +951,13 @@ impl Kdbx<Unlocked> {
     /// # Errors
     ///
     /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
+    /// - [`ModelError::Protector`] when a [`FieldProtector`] is
+    ///   configured and `wrap` fails while rewrapping the live
+    ///   protected slots after the closure runs. In practice
+    ///   production protectors do not fail on wrap, but the error is
+    ///   surfaced so callers can route the failure rather than
+    ///   silently leaving plaintext on the model.
+    ///
     pub fn edit_entry<R>(
         &mut self,
         id: EntryId,
@@ -964,9 +971,28 @@ impl Kdbx<Unlocked> {
         let now = self.state.clock.now();
         let history_max_items = self.state.vault.meta.history_max_items;
         let history_max_size = self.state.vault.meta.history_max_size;
+        // Capture the protector + the pre-edit wrapped record so the
+        // editor closure can operate on plaintext, then we re-wrap
+        // everything (live fields + every history snapshot) once it
+        // returns. When no protector is configured the unwrap/rewrap
+        // bookkeeping is skipped entirely.
+        let protector = self.state.protector.clone();
+        let old_record = protector
+            .as_ref()
+            .and_then(|_| self.state.protected_fields.get(&id).cloned());
 
         let entry =
             find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+
+        // Restore plaintext on the entry from the side-table so the
+        // editor closure reads "current" values from `entry.password`
+        // / protected custom fields, and any snapshot we clone next
+        // captures the up-to-date plaintext for save-time use. This
+        // mirror's the save pipeline's `unwrap_vault_protected_fields`
+        // step on a single entry.
+        if let (Some(p), Some(rec)) = (protector.as_ref(), old_record.as_ref()) {
+            unwrap_entry(entry, rec, p.as_ref())?;
+        }
 
         let should_snapshot = should_snapshot_now(policy, &entry.history, now);
 
@@ -991,12 +1017,28 @@ impl Kdbx<Unlocked> {
         };
 
         entry.times.last_modification_time = Some(now);
+
+        // Re-wrap the entry's protected fields (live + every history
+        // snapshot) into a fresh side-table record so the canonical
+        // "model holds empty plaintext, side-table holds wrapped
+        // bytes" invariant is restored. Without this the save-time
+        // unwrap step blindly restores the OLD wrapped bytes over
+        // whatever the editor wrote and the edit is lost.
+        let new_record = match protector.as_ref() {
+            Some(p) => Some(wrap_entry(entry, p.as_ref())?),
+            None => None,
+        };
+
         // The &mut Entry borrow ends here; from this point on we
         // have &mut Vault available for pool-level work.
         let _ = entry;
 
         apply_pending_attaches(&mut self.state.vault, id, pending);
         gc_binaries_pool(&mut self.state.vault);
+
+        if let Some(new_record) = new_record {
+            self.state.protected_fields.insert(id, new_record);
+        }
 
         Ok(result)
     }
