@@ -157,6 +157,18 @@ pub enum ModelError {
         /// The entry's history length at the time the call was rejected.
         len: usize,
     },
+
+    /// The configured [`crate::protector::FieldProtector`] failed during
+    /// a mutation that re-wraps a protected field — currently only
+    /// [`crate::kdbx::Kdbx::edit_entry`], which re-wraps any plaintext
+    /// the editor wrote into protected slots so the wrapped side-table
+    /// stays the source of truth.
+    ///
+    /// In practice production protectors don't fail on wrap; the
+    /// variant exists so a contractually-fallible `wrap` call doesn't
+    /// silently leave plaintext on the model.
+    #[error("field protector failure during mutation: {0}")]
+    Protector(#[from] crate::protector::ProtectorError),
 }
 
 // ---------------------------------------------------------------------------
