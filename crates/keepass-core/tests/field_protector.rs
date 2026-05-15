@@ -19,83 +19,67 @@ use keepass_core::CompositeKey;
 use keepass_core::Error;
 use keepass_core::kdbx::{Kdbx, Sealed, Unlocked};
 use keepass_core::model::{CustomField, NewEntry};
-use keepass_core::protector::{FieldProtector, ProtectorError};
+use keepass_core::protector::{FieldProtector, ProtectorError, SessionKey};
 use secrecy::SecretString;
 
-/// Test-only protector: XOR each byte with a fixed key and prepend a
-/// magic marker so wrapped and plaintext are visually distinct.
+/// Test-only protector: returns a 32-byte session key derived from a
+/// single seed byte. keepass-core does its own AES-GCM seal/open
+/// against the returned key. Two `XorProtector`s with the same seed
+/// produce wrapped blobs that round-trip against each other.
 ///
-/// Wraps deterministically — handy for byte-level assertions that
-/// the in-memory side table actually holds the wrapped form.
+/// (Name is historical — predates the switch to AES-GCM. Kept for
+/// test continuity.)
 #[derive(Debug)]
 struct XorProtector {
     key: u8,
 }
 
-const WRAP_MARKER: &[u8] = b"WRP|";
-
 impl FieldProtector for XorProtector {
-    fn wrap(&self, plaintext: &[u8]) -> Result<Vec<u8>, ProtectorError> {
-        let mut out = Vec::with_capacity(plaintext.len() + WRAP_MARKER.len());
-        out.extend_from_slice(WRAP_MARKER);
-        out.extend(plaintext.iter().map(|b| b ^ self.key));
-        Ok(out)
-    }
-    fn unwrap(&self, wrapped: &[u8]) -> Result<Vec<u8>, ProtectorError> {
-        if !wrapped.starts_with(WRAP_MARKER) {
-            return Err(ProtectorError::Unwrap("missing magic marker".into()));
-        }
-        let body = &wrapped[WRAP_MARKER.len()..];
-        Ok(body.iter().map(|b| b ^ self.key).collect())
+    fn acquire_session_key(&self) -> Result<SessionKey, ProtectorError> {
+        Ok(SessionKey::from_bytes([self.key; 32]))
     }
 }
 
-/// Protector that fails every wrap call. Used to assert that wrap
-/// errors propagate through the unlock entry point.
+/// Protector that fails every `acquire_session_key` call. Used to
+/// assert the failure propagates through the unlock entry point.
 #[derive(Debug)]
 struct FailingWrapProtector;
 
 impl FieldProtector for FailingWrapProtector {
-    fn wrap(&self, _: &[u8]) -> Result<Vec<u8>, ProtectorError> {
-        Err(ProtectorError::Wrap("synthetic wrap failure".into()))
-    }
-    fn unwrap(&self, _: &[u8]) -> Result<Vec<u8>, ProtectorError> {
-        Err(ProtectorError::Unwrap(
-            "not reachable in these tests".into(),
+    fn acquire_session_key(&self) -> Result<SessionKey, ProtectorError> {
+        Err(ProtectorError::KeyUnavailable(
+            "synthetic key-unavailable failure".into(),
         ))
     }
 }
 
-/// Counts every wrap / unwrap call so tests can assert the
-/// protector was actually invoked.
+/// Counts every `acquire_session_key` call so tests can assert how
+/// often the protector was invoked. Post-rewrite the expectation is
+/// "one acquire per bulk pass + one per single-field reveal", not
+/// "one per protected field" — the cross-language hop is the cost we
+/// were optimising away.
 #[derive(Debug)]
 struct CountingProtector {
     inner: XorProtector,
-    wraps: Mutex<usize>,
-    unwraps: Mutex<usize>,
+    acquires: Mutex<usize>,
 }
 
 impl CountingProtector {
     fn new(key: u8) -> Self {
         Self {
             inner: XorProtector { key },
-            wraps: Mutex::new(0),
-            unwraps: Mutex::new(0),
+            acquires: Mutex::new(0),
         }
     }
-    fn wraps(&self) -> usize {
-        *self.wraps.lock().unwrap()
+    fn acquires(&self) -> usize {
+        *self.acquires.lock().unwrap()
     }
 }
 
 impl FieldProtector for CountingProtector {
-    fn wrap(&self, plaintext: &[u8]) -> Result<Vec<u8>, ProtectorError> {
-        *self.wraps.lock().unwrap() += 1;
-        self.inner.wrap(plaintext)
-    }
-    fn unwrap(&self, wrapped: &[u8]) -> Result<Vec<u8>, ProtectorError> {
-        *self.unwraps.lock().unwrap() += 1;
-        self.inner.unwrap(wrapped)
+    fn acquire_session_key(&self) -> Result<SessionKey, ProtectorError> {
+        *self.acquires.lock().unwrap() += 1;
+        self.inner.acquire_session_key()
     }
 }
 
@@ -165,10 +149,15 @@ fn field_protector_wraps_on_unlock_unwraps_on_reveal() {
         .unlock_with_protector(&composite, Some(protector.clone()))
         .expect("unlock_with_protector");
 
-    // Protector saw exactly two wrap calls: one password, one
-    // protected custom field. The non-protected custom field is not
-    // wrapped.
-    assert_eq!(protector.wraps(), 2);
+    // Post-rewrite: one `acquire_session_key` call for the whole
+    // bulk wrap pass (covering password + every protected custom
+    // field + every history snapshot). Reveal-side accessors add
+    // one acquire per call below.
+    assert_eq!(
+        protector.acquires(),
+        1,
+        "bulk wrap pass should fetch the key exactly once"
+    );
 
     // In-model strings are blanked for wrapped fields.
     let entry = unlocked.vault().root.entries.first().expect("one entry");
@@ -305,10 +294,10 @@ fn protector_wrap_failure_propagates() {
         .expect_err("wrap failure should propagate");
 
     match err {
-        Error::Protector(ProtectorError::Wrap(msg)) => {
+        Error::Protector(ProtectorError::KeyUnavailable(msg)) => {
             assert!(msg.contains("synthetic"), "got message {msg:?}");
         }
-        other => panic!("expected Error::Protector(Wrap(_)), got {other:?}"),
+        other => panic!("expected Error::Protector(KeyUnavailable(_)), got {other:?}"),
     }
 }
 

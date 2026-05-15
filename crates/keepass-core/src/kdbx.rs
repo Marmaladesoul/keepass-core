@@ -56,7 +56,7 @@ use crate::model::{
     Group, GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, PortableEntry,
     SystemClock, Timestamps, Vault,
 };
-use crate::protector::{FieldProtector, ProtectorError};
+use crate::protector::{FieldProtector, ProtectorError, SessionKey, open_with_key, seal_with_key};
 use crate::secret::{CompositeKey, TransformedKey};
 use crate::xml::{
     decode_vault_with_cipher, encode_vault_kdbx3_with_cipher_and_header_hash,
@@ -686,9 +686,10 @@ impl Kdbx<Unlocked> {
     /// # Errors
     ///
     /// Returns [`ModelError::EntryNotFound`] if no entry matches
-    /// `id`. Returns [`ProtectorError::Unwrap`] (wrapped in
-    /// [`Error::Protector`]) if the protector rejects the wrapped
-    /// bytes or unwrap produces non-UTF-8 output.
+    /// `id`. Returns [`ProtectorError::KeyUnavailable`] or
+    /// [`ProtectorError::Open`] (wrapped in [`Error::Protector`]) if
+    /// the protector fails or the wrapped bytes can't be opened /
+    /// produce non-UTF-8 output.
     pub fn reveal_password(&self, id: EntryId) -> Result<String, Error> {
         let entry = find_entry(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
         match (
@@ -696,7 +697,10 @@ impl Kdbx<Unlocked> {
             self.state.protected_fields.get(&id),
         ) {
             (Some(protector), Some(record)) => match &record.password {
-                Some(bytes) => Ok(decode_wrapped(bytes, protector.as_ref())?),
+                Some(bytes) => {
+                    let key = protector.acquire_session_key()?;
+                    Ok(decode_wrapped_with_key(bytes, &key)?)
+                }
                 None => Ok(String::new()),
             },
             _ => Ok(entry.password.clone()),
@@ -714,9 +718,9 @@ impl Kdbx<Unlocked> {
     /// # Errors
     ///
     /// Returns [`ModelError::EntryNotFound`] if no entry matches
-    /// `id`. Returns [`ProtectorError::Unwrap`] (wrapped in
-    /// [`Error::Protector`]) on protector failure or non-UTF-8
-    /// output.
+    /// `id`. Returns [`ProtectorError::KeyUnavailable`] or
+    /// [`ProtectorError::Open`] (wrapped in [`Error::Protector`]) on
+    /// protector failure or non-UTF-8 output.
     pub fn reveal_custom_field(&self, id: EntryId, key: &str) -> Result<Option<String>, Error> {
         let entry = find_entry(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
         let Some(cf) = entry.custom_fields.iter().find(|c| c.key == key) else {
@@ -730,7 +734,10 @@ impl Kdbx<Unlocked> {
             self.state.protected_fields.get(&id),
         ) {
             (Some(protector), Some(record)) => match record.custom_fields.get(key) {
-                Some(bytes) => Ok(Some(decode_wrapped(bytes, protector.as_ref())?)),
+                Some(bytes) => {
+                    let session_key = protector.acquire_session_key()?;
+                    Ok(Some(decode_wrapped_with_key(bytes, &session_key)?))
+                }
                 None => Ok(Some(String::new())),
             },
             _ => Ok(Some(cf.value.clone())),
@@ -990,8 +997,16 @@ impl Kdbx<Unlocked> {
         // captures the up-to-date plaintext for save-time use. This
         // mirror's the save pipeline's `unwrap_vault_protected_fields`
         // step on a single entry.
-        if let (Some(p), Some(rec)) = (protector.as_ref(), old_record.as_ref()) {
-            unwrap_entry(entry, rec, p.as_ref())?;
+        // Per-edit key: acquired once if a protector is configured AND
+        // this entry has wrapped fields. Used for both the pre-edit
+        // unwrap and the post-edit re-wrap below so the editor pays
+        // a single `acquire_session_key` call per edit cycle.
+        let edit_key = match (protector.as_ref(), old_record.as_ref()) {
+            (Some(p), Some(_)) => Some(p.acquire_session_key()?),
+            _ => None,
+        };
+        if let (Some(rec), Some(k)) = (old_record.as_ref(), edit_key.as_ref()) {
+            unwrap_entry_with_key(entry, rec, k)?;
         }
 
         let should_snapshot = should_snapshot_now(policy, &entry.history, now);
@@ -1024,9 +1039,16 @@ impl Kdbx<Unlocked> {
         // bytes" invariant is restored. Without this the save-time
         // unwrap step blindly restores the OLD wrapped bytes over
         // whatever the editor wrote and the edit is lost.
-        let new_record = match protector.as_ref() {
-            Some(p) => Some(wrap_entry(entry, p.as_ref())?),
-            None => None,
+        let new_record = match (protector.as_ref(), edit_key.as_ref()) {
+            (Some(_), Some(k)) => Some(wrap_entry_with_key(entry, k)?),
+            (Some(p), None) => {
+                // Edit on an entry that didn't have a wrapped record
+                // before this edit (e.g. all protected fields were
+                // empty). Acquire a key now to wrap the new state.
+                let k = p.acquire_session_key()?;
+                Some(wrap_entry_with_key(entry, &k)?)
+            }
+            _ => None,
         };
 
         // The &mut Entry borrow ends here; from this point on we
@@ -3248,39 +3270,42 @@ fn wrap_vault_protected_fields(
     vault: &mut Vault,
     protector: &dyn FieldProtector,
 ) -> Result<ProtectedFieldMap, ProtectorError> {
+    // One key fetch per bulk pass. Key is zeroed when this function returns.
+    let key = protector.acquire_session_key()?;
     let mut map = ProtectedFieldMap::new();
-    walk_groups_for_wrap(&mut vault.root, protector, &mut map)?;
+    walk_groups_for_wrap(&mut vault.root, &key, &mut map)?;
     Ok(map)
 }
 
 fn walk_groups_for_wrap(
     group: &mut Group,
-    protector: &dyn FieldProtector,
+    key: &SessionKey,
     map: &mut ProtectedFieldMap,
 ) -> Result<(), ProtectorError> {
     for entry in &mut group.entries {
-        let wrapped = wrap_entry(entry, protector)?;
+        let wrapped = wrap_entry_with_key(entry, key)?;
         map.insert(entry.id, wrapped);
     }
     for child in &mut group.groups {
-        walk_groups_for_wrap(child, protector, map)?;
+        walk_groups_for_wrap(child, key, map)?;
     }
     Ok(())
 }
 
-/// Wrap an entry's protected fields (and those of every history
-/// snapshot) in place, returning the resulting wrapped-bytes record.
-fn wrap_entry(
+/// Wrap an entry's protected fields against a pre-acquired session key.
+/// Used by both the bulk pass and the entry editor's per-edit re-wrap
+/// (which acquires its own key once per edit).
+fn wrap_entry_with_key(
     entry: &mut Entry,
-    protector: &dyn FieldProtector,
+    key: &SessionKey,
 ) -> Result<ProtectedFields, ProtectorError> {
     let mut out = ProtectedFields {
-        password: wrap_string_in_place(&mut entry.password, protector)?,
+        password: wrap_string_in_place_with_key(&mut entry.password, key)?,
         ..ProtectedFields::default()
     };
     for cf in &mut entry.custom_fields {
         if cf.protected {
-            if let Some(b) = wrap_string_in_place(&mut cf.value, protector)? {
+            if let Some(b) = wrap_string_in_place_with_key(&mut cf.value, key)? {
                 out.custom_fields.insert(cf.key.clone(), b);
             }
         }
@@ -3289,31 +3314,31 @@ fn wrap_entry(
         // History snapshots are full Entry values with their own
         // protected-field state; recurse, but they themselves never
         // nest further history (per `Entry::history` doc).
-        let snap_wrapped = wrap_entry(snap, protector)?;
+        let snap_wrapped = wrap_entry_with_key(snap, key)?;
         out.history.push(snap_wrapped);
     }
     Ok(out)
 }
 
-/// Wrap `value`'s bytes via `protector` and replace the contents with
-/// an empty string. Returns `None` if the input is already empty (no
+/// Seal `value`'s bytes under `key` and replace the contents with an
+/// empty string. Returns `None` if the input is already empty (no
 /// wrap performed — saves a protector round-trip on entries with no
 /// password).
-fn wrap_string_in_place(
+fn wrap_string_in_place_with_key(
     value: &mut String,
-    protector: &dyn FieldProtector,
+    key: &SessionKey,
 ) -> Result<Option<Vec<u8>>, ProtectorError> {
     if value.is_empty() {
         return Ok(None);
     }
-    let bytes = protector.wrap(value.as_bytes())?;
+    let bytes = seal_with_key(key, value.as_bytes())?;
     value.clear();
     Ok(Some(bytes))
 }
 
 /// Walk `vault` and restore plaintext on every protected field by
-/// looking up the wrapped bytes in `map` and unwrapping via
-/// `protector`.
+/// looking up the wrapped bytes in `map` and opening them under a
+/// session key acquired once for the pass.
 ///
 /// Mirror of [`wrap_vault_protected_fields`], used by the save
 /// pipeline on a local clone of the vault so the canonical
@@ -3323,37 +3348,38 @@ fn unwrap_vault_protected_fields(
     map: &ProtectedFieldMap,
     protector: &dyn FieldProtector,
 ) -> Result<(), ProtectorError> {
-    walk_groups_for_unwrap(&mut vault.root, map, protector)
+    let key = protector.acquire_session_key()?;
+    walk_groups_for_unwrap(&mut vault.root, map, &key)
 }
 
 fn walk_groups_for_unwrap(
     group: &mut Group,
     map: &ProtectedFieldMap,
-    protector: &dyn FieldProtector,
+    key: &SessionKey,
 ) -> Result<(), ProtectorError> {
     for entry in &mut group.entries {
         if let Some(record) = map.get(&entry.id) {
-            unwrap_entry(entry, record, protector)?;
+            unwrap_entry_with_key(entry, record, key)?;
         }
     }
     for child in &mut group.groups {
-        walk_groups_for_unwrap(child, map, protector)?;
+        walk_groups_for_unwrap(child, map, key)?;
     }
     Ok(())
 }
 
-fn unwrap_entry(
+fn unwrap_entry_with_key(
     entry: &mut Entry,
     record: &ProtectedFields,
-    protector: &dyn FieldProtector,
+    key: &SessionKey,
 ) -> Result<(), ProtectorError> {
     if let Some(b) = &record.password {
-        entry.password = decode_wrapped(b, protector)?;
+        entry.password = decode_wrapped_with_key(b, key)?;
     }
     for cf in &mut entry.custom_fields {
         if cf.protected {
             if let Some(b) = record.custom_fields.get(&cf.key) {
-                cf.value = decode_wrapped(b, protector)?;
+                cf.value = decode_wrapped_with_key(b, key)?;
             }
         }
     }
@@ -3364,18 +3390,15 @@ fn unwrap_entry(
     // currently holds, which is the same shape as the no-protector
     // path.
     for (snap, snap_record) in entry.history.iter_mut().zip(record.history.iter()) {
-        unwrap_entry(snap, snap_record, protector)?;
+        unwrap_entry_with_key(snap, snap_record, key)?;
     }
     Ok(())
 }
 
-fn decode_wrapped(
-    wrapped: &[u8],
-    protector: &dyn FieldProtector,
-) -> Result<String, ProtectorError> {
-    let bytes = protector.unwrap(wrapped)?;
+fn decode_wrapped_with_key(wrapped: &[u8], key: &SessionKey) -> Result<String, ProtectorError> {
+    let bytes = open_with_key(key, wrapped)?;
     String::from_utf8(bytes)
-        .map_err(|e| ProtectorError::Unwrap(format!("unwrapped bytes are not valid UTF-8: {e}")))
+        .map_err(|e| ProtectorError::Open(format!("opened bytes are not valid UTF-8: {e}")))
 }
 
 // ---------------------------------------------------------------------------
