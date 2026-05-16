@@ -118,13 +118,21 @@ pub enum ProtectorError {
     Open(String),
 }
 
-/// Seal `plaintext` under `key` using AES-256-GCM. Returns
-/// `nonce(12) || ciphertext || tag(16)`.
+/// Seal `plaintext` under `key` using AES-256-GCM.
 ///
-/// Used by this crate's wrap-pass and single-field wrap helpers. Not
-/// part of the public trait surface — frontends never call this
-/// directly.
-pub(crate) fn seal_with_key(key: &SessionKey, plaintext: &[u8]) -> Result<Vec<u8>, ProtectorError> {
+/// Wire format of the returned blob:
+/// `nonce(12 bytes, random) || ciphertext || tag(16 bytes)`.
+///
+/// The nonce is freshly sampled from the OS CSPRNG on every call, so
+/// sealing the same plaintext under the same key produces a different
+/// blob each time. Paired with [`open_with_key`].
+///
+/// # Errors
+///
+/// Returns [`ProtectorError::Seal`] if AES-GCM initialisation or
+/// encryption fails (in practice only on impossible inputs, since the
+/// key length is enforced by [`SessionKey`]).
+pub fn seal_with_key(key: &SessionKey, plaintext: &[u8]) -> Result<Vec<u8>, ProtectorError> {
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
         .map_err(|e| ProtectorError::Seal(e.to_string()))?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -138,7 +146,18 @@ pub(crate) fn seal_with_key(key: &SessionKey, plaintext: &[u8]) -> Result<Vec<u8
 }
 
 /// Open a blob previously produced by [`seal_with_key`].
-pub(crate) fn open_with_key(key: &SessionKey, wrapped: &[u8]) -> Result<Vec<u8>, ProtectorError> {
+///
+/// Expects the wire format `nonce(12) || ciphertext || tag(16)` and
+/// returns the original plaintext on success.
+///
+/// # Errors
+///
+/// Returns [`ProtectorError::Open`] if the blob is shorter than the
+/// minimum (`12 + 16 = 28` bytes), if the AES-GCM auth tag does not
+/// verify under `key`, or if AES-GCM initialisation fails. In keeping
+/// with this crate's error-collapse discipline, "wrong key" and
+/// "corrupt ciphertext" surface as the same variant.
+pub fn open_with_key(key: &SessionKey, wrapped: &[u8]) -> Result<Vec<u8>, ProtectorError> {
     if wrapped.len() < 12 + 16 {
         return Err(ProtectorError::Open("wrapped blob too short".into()));
     }
