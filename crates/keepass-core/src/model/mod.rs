@@ -848,6 +848,63 @@ pub struct CustomIcon {
     pub last_modified: Option<DateTime<Utc>>,
 }
 
+impl CustomIcon {
+    /// Construct a [`CustomIcon`] from its required fields.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates). Newly-added
+    /// fields default to whatever [`Default`] would produce; this
+    /// constructor's behaviour is therefore stable across additions —
+    /// the natural companion to the type's `#[non_exhaustive]` marker.
+    #[must_use]
+    pub fn new(
+        uuid: Uuid,
+        data: Vec<u8>,
+        name: String,
+        last_modified: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            uuid,
+            data,
+            name,
+            last_modified,
+        }
+    }
+}
+
+impl CustomDataItem {
+    /// Construct a [`CustomDataItem`] from its required fields.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates). Newly-added
+    /// fields default to whatever [`Default`] would produce; this
+    /// constructor's behaviour is therefore stable across additions —
+    /// the natural companion to the type's `#[non_exhaustive]` marker.
+    #[must_use]
+    pub fn new(key: String, value: String, last_modified: Option<DateTime<Utc>>) -> Self {
+        Self {
+            key,
+            value,
+            last_modified,
+        }
+    }
+}
+
+impl UnknownElement {
+    /// Construct an [`UnknownElement`] from its tag name and raw XML
+    /// fragment.
+    ///
+    /// Intended for in-memory model construction (test fixtures,
+    /// format converters, downstream merge / diff crates). Newly-added
+    /// fields default to whatever [`Default`] would produce; this
+    /// constructor's behaviour is therefore stable across additions —
+    /// the natural companion to the type's `#[non_exhaustive]` marker.
+    #[must_use]
+    pub fn new(tag: String, raw_xml: Vec<u8>) -> Self {
+        Self { tag, raw_xml }
+    }
+}
+
 impl Default for Meta {
     fn default() -> Self {
         // Values mirror KeePass 2.x's stock defaults where relevant,
