@@ -268,7 +268,14 @@ fn decode_argon2(
     }
     let salt = salt_bytes.to_vec();
 
-    // I = iterations (u64), > 0
+    // I = iterations (u64), in [1, u32::MAX].
+    //
+    // Upper bound matches the effective ceiling of every Argon2
+    // implementation we've seen: the RustCrypto `argon2` crate (which we
+    // call into) and KeePassXC's Botan backend both take a `u32` rounds
+    // value. Catching it here means a hostile file with `I = u64::MAX`
+    // fails fast at parse time rather than after the user has typed a
+    // password — and prevents a "spend an hour computing Argon2" DoS.
     let iterations = dict.get_u64("I").ok_or(KdfParamsError::Missing("I"))?;
     if iterations == 0 {
         return Err(KdfParamsError::OutOfRange {
@@ -276,8 +283,21 @@ fn decode_argon2(
             detail: "iterations must be > 0",
         });
     }
+    if iterations > u64::from(u32::MAX) {
+        return Err(KdfParamsError::OutOfRange {
+            key: "I",
+            detail: "iterations must fit in a u32",
+        });
+    }
 
-    // M = memory in bytes (u64), ≥ 8 KiB
+    // M = memory in bytes (u64), in [8 KiB, 4 TiB).
+    //
+    // Upper bound matches KeePassXC's `kibibytes < (1ULL << 32)` check
+    // in `Argon2Kdf::setMemory` — i.e. the memory must fit in a u32
+    // when expressed in KiB, which is also the type the `argon2` crate
+    // accepts. Without this cap, a hostile file requesting e.g. 100 GiB
+    // would cause the unlock attempt to OOM-kill the host before any
+    // password check could run.
     let memory_bytes = dict.get_u64("M").ok_or(KdfParamsError::Missing("M"))?;
     if memory_bytes < 8 * 1024 {
         return Err(KdfParamsError::OutOfRange {
@@ -285,13 +305,31 @@ fn decode_argon2(
             detail: "memory must be ≥ 8 KiB (8192 bytes)",
         });
     }
+    if memory_bytes >= 1u64 << 42 {
+        return Err(KdfParamsError::OutOfRange {
+            key: "M",
+            detail: "memory in KiB must fit in a u32 (< 4 TiB)",
+        });
+    }
 
-    // P = parallelism (u32), > 0
+    // P = parallelism (u32), in [1, 2^24).
+    //
+    // Upper bound matches KeePassXC's `threads < (1 << 24)` check in
+    // `Argon2Kdf::setParallelism`. Two-to-the-twenty-four threads is
+    // already an absurdity; a hostile file specifying u32::MAX would
+    // trip the `argon2` crate's own validator, but rejecting it here
+    // keeps the failure mode uniform with the other parameter caps.
     let parallelism = dict.get_u32("P").ok_or(KdfParamsError::Missing("P"))?;
     if parallelism == 0 {
         return Err(KdfParamsError::OutOfRange {
             key: "P",
             detail: "parallelism must be > 0",
+        });
+    }
+    if parallelism >= 1 << 24 {
+        return Err(KdfParamsError::OutOfRange {
+            key: "P",
+            detail: "parallelism must be < 2^24",
         });
     }
 
@@ -610,6 +648,54 @@ mod tests {
             ("I", VarValue::U64(2)),
             ("M", VarValue::U64(65_536)),
             ("P", VarValue::U32(0)),
+            ("V", VarValue::U32(0x13)),
+        ]);
+        assert!(matches!(
+            KdfParams::from_var_dictionary(&dict).unwrap_err(),
+            KdfParamsError::OutOfRange { key: "P", .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_argon2_iterations_above_u32_max() {
+        let dict = dict_from([
+            ("$UUID", VarValue::Bytes(argon2id_uuid())),
+            ("S", VarValue::Bytes(vec![0xAB; 16])),
+            ("I", VarValue::U64(u64::from(u32::MAX) + 1)),
+            ("M", VarValue::U64(65_536)),
+            ("P", VarValue::U32(1)),
+            ("V", VarValue::U32(0x13)),
+        ]);
+        assert!(matches!(
+            KdfParams::from_var_dictionary(&dict).unwrap_err(),
+            KdfParamsError::OutOfRange { key: "I", .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_argon2_memory_above_4_tib() {
+        let dict = dict_from([
+            ("$UUID", VarValue::Bytes(argon2id_uuid())),
+            ("S", VarValue::Bytes(vec![0xAB; 16])),
+            ("I", VarValue::U64(2)),
+            ("M", VarValue::U64(1u64 << 42)), // = 4 TiB, first rejected value
+            ("P", VarValue::U32(1)),
+            ("V", VarValue::U32(0x13)),
+        ]);
+        assert!(matches!(
+            KdfParams::from_var_dictionary(&dict).unwrap_err(),
+            KdfParamsError::OutOfRange { key: "M", .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_argon2_parallelism_above_2_24() {
+        let dict = dict_from([
+            ("$UUID", VarValue::Bytes(argon2id_uuid())),
+            ("S", VarValue::Bytes(vec![0xAB; 16])),
+            ("I", VarValue::U64(2)),
+            ("M", VarValue::U64(65_536)),
+            ("P", VarValue::U32(1 << 24)), // first rejected value
             ("V", VarValue::U32(0x13)),
         ]);
         assert!(matches!(
