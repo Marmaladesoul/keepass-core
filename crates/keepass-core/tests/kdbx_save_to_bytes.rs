@@ -249,3 +249,53 @@ fn kdbx3_save_emits_a_correct_header_hash() {
     }
     assert!(checked > 0, "no KDBX3 writable fixtures exercised");
 }
+
+/// Two successive `save_to_bytes` calls under the same unlocked
+/// state must produce different ciphertexts — the outer cipher's IV
+/// (and the master seed) are regenerated per-save so that the
+/// ChaCha20 keystream can never be reused across two saves of the
+/// same vault under the same composite key.
+///
+/// Without this guarantee, the diff of `vault_v1.kdbx` and
+/// `vault_v2.kdbx` written under the same key directly leaks
+/// `plaintext_v1 XOR plaintext_v2` for the ChaCha20 outer cipher.
+#[test]
+fn successive_saves_use_fresh_iv() {
+    let root = fixtures_root();
+    let mut kdbxs: Vec<_> = find_kdbxs(&root.join("pykeepass"));
+    kdbxs.extend(find_kdbxs(&root.join("kdbxweb")));
+    kdbxs.extend(find_kdbxs(&root.join("keepassxc")));
+
+    let mut checked = 0;
+    for path in &kdbxs {
+        if !is_writable_cipher(path) {
+            continue;
+        }
+        let sidecar = load_sidecar(path).unwrap_or_else(|| panic!("{path:?}: no sidecar"));
+        let composite =
+            composite_for(&sidecar, path).unwrap_or_else(|e| panic!("{path:?}: composite: {e}"));
+        let unlocked = Kdbx::<Sealed>::open(path)
+            .unwrap_or_else(|e| panic!("{path:?}: open: {e}"))
+            .read_header()
+            .unwrap_or_else(|e| panic!("{path:?}: read_header: {e}"))
+            .unlock(&composite)
+            .unwrap_or_else(|e| panic!("{path:?}: unlock: {e}"));
+
+        let a = unlocked
+            .save_to_bytes()
+            .unwrap_or_else(|e| panic!("{path:?}: save_to_bytes (a): {e}"));
+        let b = unlocked
+            .save_to_bytes()
+            .unwrap_or_else(|e| panic!("{path:?}: save_to_bytes (b): {e}"));
+
+        // Same vault, same key, but the two byte streams must differ —
+        // the fresh IV / master_seed alone guarantee this even before
+        // the encrypted payload diverges.
+        assert_ne!(
+            a, b,
+            "{path:?}: successive save_to_bytes produced identical bytes — IV/master_seed not regenerated"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no writable fixtures exercised");
+}
