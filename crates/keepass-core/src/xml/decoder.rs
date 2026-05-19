@@ -2053,9 +2053,8 @@ mod tests {
         // Without the depth guard this would recurse on the stack until
         // it either overflowed or merely chewed unbounded RAM.
         let depth = (MAX_GROUP_DEPTH as usize) + 16;
-        let mut xml = String::from(
-            r#"<?xml version="1.0" encoding="UTF-8"?><KeePassFile><Meta/><Root>"#,
-        );
+        let mut xml =
+            String::from(r#"<?xml version="1.0" encoding="UTF-8"?><KeePassFile><Meta/><Root>"#);
         for _ in 0..depth {
             xml.push_str("<Group><UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>x</Name>");
         }
