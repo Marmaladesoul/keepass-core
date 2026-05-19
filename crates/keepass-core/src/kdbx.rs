@@ -362,6 +362,23 @@ impl Kdbx<HeaderRead> {
     /// distinguish "wrong key" from "corrupt ciphertext" — both surface
     /// as a generic decryption failure, so an attacker cannot learn
     /// anything about the key from the error variant alone.
+    ///
+    /// # Threat-model note: KDBX3 outer headers are unauthenticated
+    ///
+    /// KDBX3 has no header HMAC. Every field used to derive the cipher
+    /// key — `MasterSeed`, `TransformSeed`, `TransformRounds`,
+    /// `EncryptionIv`, the inner-stream key — sits in the outer header
+    /// in the clear and unauthenticated. An attacker who can substitute
+    /// a file in place can mount a chosen-IV / chosen-seed attack
+    /// against the AES-256-CBC ciphertext, and only the encrypted
+    /// stream-start-bytes sentinel detects tampering after a successful
+    /// decrypt. The KDF-parameter caps applied here (AES-KDF rounds,
+    /// Argon2 memory / iterations / parallelism) blunt the DoS shape of
+    /// a hostile header, but the format itself cannot be made
+    /// confidentiality-secure against an adversary with file-substitute
+    /// power. Prefer **KDBX4** for any threat model that includes
+    /// adversarially-crafted files; KDBX4's `HeaderHmac` is verified
+    /// before any payload decryption begins.
     pub fn unlock(self, composite: &CompositeKey) -> Result<Kdbx<Unlocked>, Error> {
         self.unlock_with_clock(composite, Box::new(SystemClock))
     }
@@ -3453,8 +3470,47 @@ fn reject_kdbx4_inner_xml_binaries_pool(vault: &Vault) -> Result<(), Error> {
     Ok(())
 }
 
+/// Build a per-save copy of the outer header with a freshly generated
+/// `encryption_iv` (and `master_seed`).
+///
+/// `save_to_bytes` is `&self`, so we don't mutate the unlocked state —
+/// each save just generates a fresh nonce locally. The point is to
+/// prevent (key, IV) reuse across successive saves under the same
+/// unlocked composite key:
+///
+/// - **ChaCha20** (KDBX4) is the catastrophic case: reusing the same
+///   (key, nonce) pair across two distinct plaintexts directly leaks
+///   `plaintext_a XOR plaintext_b`. Without a fresh nonce per save,
+///   any caller that does `unlock → edit → save → edit → save` hands
+///   an attacker who captures both files the XOR difference of the
+///   two payloads.
+/// - **AES-256-CBC** (KDBX3 + KDBX4) is the lesser case: it stays
+///   semantically secure under reused IVs in the sense that no
+///   plaintext byte leaks, but identical leading plaintext blocks
+///   produce identical leading ciphertext blocks, which exposes a
+///   change-detection oracle.
+///
+/// We also rotate `master_seed` for defence in depth — it costs ~32
+/// bytes of CSPRNG output and means a captured prior file can't be
+/// decrypted even given the new cipher_key (their `cipher_key =
+/// SHA-256(master_seed || transformed_key)` differs). The cached
+/// `transformed_key` itself is unaffected (it depends on the KDF
+/// salt, not on master_seed), so this stays free of any second KDF
+/// pass.
+fn fresh_save_header(header: &OuterHeader) -> Result<OuterHeader, Error> {
+    let mut new_iv = vec![0u8; header.encryption_iv.0.len()];
+    getrandom::fill(&mut new_iv).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
+    let mut new_master_seed = [0u8; 32];
+    getrandom::fill(&mut new_master_seed).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
+    let mut out = header.clone();
+    out.encryption_iv = EncryptionIv(new_iv);
+    out.master_seed = MasterSeed(new_master_seed);
+    Ok(out)
+}
+
 fn do_save_v4(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Result<Vec<u8>, Error> {
-    let header = &state.outer_header;
+    let header_owned = fresh_save_header(&state.outer_header)?;
+    let header = &header_owned;
     let inner_params = state
         .inner_stream
         .as_ref()
@@ -3567,7 +3623,8 @@ fn do_save_v4(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
 }
 
 fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Result<Vec<u8>, Error> {
-    let header = &state.outer_header;
+    let header_owned = fresh_save_header(&state.outer_header)?;
+    let header = &header_owned;
     let inner_params = state
         .inner_stream
         .as_ref()
