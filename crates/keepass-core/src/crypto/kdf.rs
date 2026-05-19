@@ -34,8 +34,9 @@ use crate::secret::{CompositeKey, TransformedKey};
 /// Returns [`KdfError::Argon2`] if the argon2 crate refuses the
 /// parameters (e.g. memory below the 8 KiB minimum — already validated
 /// in [`KdfParams`], but still) or fails internally. Returns
-/// [`KdfError::ParamsOutOfRange`] for AES-KDF round counts beyond a
-/// sanity limit (`u64::MAX` is accepted but `0` is rejected).
+/// [`KdfError::ParamsOutOfRange`] for AES-KDF round counts of zero or
+/// above [`MAX_AES_KDF_ROUNDS`] — a hostile KDBX specifying
+/// `R = u64::MAX` would otherwise hang the unlock attempt forever.
 pub fn derive_transformed_key(
     composite: &CompositeKey,
     params: &KdfParams,
@@ -73,6 +74,16 @@ pub fn derive_transformed_key(
 // the *plaintext* that gets repeatedly encrypted. That's the opposite of
 // how one might first read the KeePass spec prose — this is deliberate.
 
+/// Upper bound on AES-KDF round counts.
+///
+/// The KDBX outer header (KDBX3) and the VarDictionary entry (KDBX4) both
+/// store `rounds` as a `u64`, so a hostile file can request `u64::MAX`
+/// rounds and pin a CPU forever during unlock. KeePassXC tops out around
+/// 600 million rounds for a ~1 s derivation; capping at `u32::MAX` (≈4.3
+/// billion) leaves headroom over every realistic user-chosen value while
+/// rejecting the obvious DoS shape at parse-into-KDF time.
+pub const MAX_AES_KDF_ROUNDS: u64 = u32::MAX as u64;
+
 fn aes_kdf(
     composite: &CompositeKey,
     seed: &[u8; 32],
@@ -80,6 +91,11 @@ fn aes_kdf(
 ) -> Result<TransformedKey, KdfError> {
     if rounds == 0 {
         return Err(KdfError::ParamsOutOfRange("AES-KDF rounds must be > 0"));
+    }
+    if rounds > MAX_AES_KDF_ROUNDS {
+        return Err(KdfError::ParamsOutOfRange(
+            "AES-KDF rounds must fit in a u32",
+        ));
     }
 
     // Copy the composite key into a mutable working buffer. CompositeKey
@@ -243,6 +259,32 @@ mod tests {
         )
         .unwrap();
         assert_ne!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn aes_kdf_rejects_rounds_above_cap() {
+        // A hostile KDBX header specifying R = u64::MAX would otherwise
+        // pin a CPU forever during unlock. The cap rejects it fast.
+        let composite = CompositeKey::from_password(b"hello");
+        let params = KdfParams::AesKdf {
+            seed: [0x42; 32],
+            rounds: u64::MAX,
+        };
+        assert!(matches!(
+            derive_transformed_key(&composite, &params).unwrap_err(),
+            KdfError::ParamsOutOfRange(_)
+        ));
+
+        // Right at the cap is fine (modulo the rounds taking real time —
+        // we don't actually run them here; we just verify the bound).
+        let just_above = KdfParams::AesKdf {
+            seed: [0x42; 32],
+            rounds: MAX_AES_KDF_ROUNDS + 1,
+        };
+        assert!(matches!(
+            derive_transformed_key(&composite, &just_above).unwrap_err(),
+            KdfError::ParamsOutOfRange(_)
+        ));
     }
 
     #[test]
