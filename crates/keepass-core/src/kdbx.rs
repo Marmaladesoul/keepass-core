@@ -63,6 +63,7 @@ use crate::xml::{
     encode_vault_with_cipher,
 };
 use std::sync::Arc;
+use zeroize::ZeroizeOnDrop;
 
 // ---------------------------------------------------------------------------
 // State markers
@@ -178,10 +179,27 @@ struct ProtectedFields {
 
 /// Inner-stream cipher parameters retained across [`Kdbx::<Unlocked>`]
 /// for symmetric re-encryption on [`save_to_bytes`](Kdbx::save_to_bytes).
-#[derive(Debug, Clone)]
+///
+/// `key` is the inner-stream cipher key (Salsa20 or ChaCha20) used to
+/// XOR-encode protected `<Value>` payloads in the XML. It lives for
+/// the entire unlocked session, so it gets the same `ZeroizeOnDrop`
+/// treatment as the other key-bearing types ([`CompositeKey`],
+/// [`TransformedKey`], etc.) — wiped from the heap when the
+/// [`Kdbx<Unlocked>`] is dropped.
+#[derive(Clone, ZeroizeOnDrop)]
 struct InnerStreamParams {
+    #[zeroize(skip)]
     algorithm: InnerStreamAlgorithm,
     key: Vec<u8>,
+}
+
+impl std::fmt::Debug for InnerStreamParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InnerStreamParams")
+            .field("algorithm", &self.algorithm)
+            .field("key", &format_args!("[redacted; {} bytes]", self.key.len()))
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

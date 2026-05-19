@@ -157,9 +157,12 @@ fn argon2_kdf(
     let argon2 = Argon2::new(alg, lib_version, params);
 
     let mut out = [0u8; 32];
-    argon2
-        .hash_password_into(composite.as_bytes(), salt, &mut out)
-        .map_err(|e| KdfError::Argon2(format!("{e}")))?;
+    if let Err(e) = argon2.hash_password_into(composite.as_bytes(), salt, &mut out) {
+        // Wipe any partial output before returning — `out` is on the stack
+        // and would otherwise drop without being zeroed.
+        out.zeroize();
+        return Err(KdfError::Argon2(format!("{e}")));
+    }
 
     Ok(TransformedKey::from_raw_bytes(out))
 }
