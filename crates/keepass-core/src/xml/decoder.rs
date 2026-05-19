@@ -128,7 +128,7 @@ pub fn decode_vault_with_cipher(
                     meta = read_meta(&mut reader, &mut buf, &mut binaries)?;
                     stack.pop();
                 } else if stack == ["KeePassFile", "Root", "Group"] && root.is_none() {
-                    root = Some(read_group(&mut reader, &mut buf, cipher)?);
+                    root = Some(read_group(&mut reader, &mut buf, cipher, MAX_GROUP_DEPTH)?);
                     stack.pop();
                 } else if stack == ["KeePassFile", "Root", "DeletedObjects"] {
                     deleted_objects = read_deleted_objects(&mut reader, &mut buf)?;
@@ -164,18 +164,39 @@ pub fn decode_vault_with_cipher(
 // Group reader
 // ---------------------------------------------------------------------------
 
+/// Maximum permitted nesting depth of `<Group>` elements in the inner
+/// XML payload.
+///
+/// `read_group` recurses for every nested `<Group>`, so a pathological
+/// (but otherwise-valid) inner XML — already past the HMAC and gzip
+/// bomb guards — that nests a million groups would blow the stack and
+/// abort the process. 64 levels is well past any real-world KeePass
+/// hierarchy and leaves comfortable headroom on every supported
+/// platform's default stack.
+const MAX_GROUP_DEPTH: u32 = 64;
+
 /// Read one `<Group>` and its contents. Assumes the opening `<Group>`
 /// tag has just been consumed by the caller; reads up to and including
 /// the matching `</Group>`.
 ///
 /// Linear per-child dispatch, same shape as `read_entry` — breaking up
 /// by category would scatter the logic without meaningful clarity gain.
+///
+/// `depth_remaining` is decremented at each nested `<Group>` and the
+/// call returns [`XmlError::Malformed`] when it would reach zero —
+/// see [`MAX_GROUP_DEPTH`].
 #[allow(clippy::too_many_lines)]
 fn read_group<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
     cipher: &mut InnerStreamCipher,
+    depth_remaining: u32,
 ) -> Result<Group, XmlError> {
+    if depth_remaining == 0 {
+        return Err(XmlError::Malformed(format!(
+            "<Group> nesting exceeds maximum depth of {MAX_GROUP_DEPTH}"
+        )));
+    }
     let mut group = Group {
         id: GroupId(Uuid::nil()),
         name: String::new(),
@@ -206,7 +227,7 @@ fn read_group<R: std::io::BufRead>(
                 if depth == 0 {
                     match name.as_str() {
                         "Group" => {
-                            let child = read_group(reader, buf, cipher)?;
+                            let child = read_group(reader, buf, cipher, depth_remaining - 1)?;
                             group.groups.push(child);
                             // read_group consumed the full nested block
                             // up through its closing </Group>; depth
@@ -2024,6 +2045,29 @@ mod tests {
     </Group>
   </Root>
 </KeePassFile>"#
+    }
+
+    #[test]
+    fn rejects_deeply_nested_groups() {
+        // Build a payload nesting <Group>…</Group> well past MAX_GROUP_DEPTH.
+        // Without the depth guard this would recurse on the stack until
+        // it either overflowed or merely chewed unbounded RAM.
+        let depth = (MAX_GROUP_DEPTH as usize) + 16;
+        let mut xml =
+            String::from(r#"<?xml version="1.0" encoding="UTF-8"?><KeePassFile><Meta/><Root>"#);
+        for _ in 0..depth {
+            xml.push_str("<Group><UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>x</Name>");
+        }
+        for _ in 0..depth {
+            xml.push_str("</Group>");
+        }
+        xml.push_str("</Root></KeePassFile>");
+
+        let err = decode_vault(xml.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, XmlError::Malformed(ref s) if s.contains("nesting exceeds")),
+            "expected nesting-depth error, got: {err:?}"
+        );
     }
 
     #[test]
