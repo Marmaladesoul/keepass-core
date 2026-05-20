@@ -53,3 +53,10 @@ It is **not** responsible for:
 - Key storage (that's the caller's responsibility)
 - Memory protection beyond `zeroize` on `Drop` for sensitive types
 - Protection against a compromised process or host
+
+## Supply chain
+
+See [SUPPLY_CHAIN.md](SUPPLY_CHAIN.md) for the policy applied to
+upstream dependencies — which tools enforce it in CI, how Dependabot
+PRs are triaged into security-critical / parser / routine tiers, and
+what to do when an audit advisory fires.
