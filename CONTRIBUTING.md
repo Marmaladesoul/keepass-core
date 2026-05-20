@@ -37,3 +37,10 @@ By contributing, you agree that your contribution will be dual-licensed under MI
 ## Reporting security issues
 
 **Do not** open public issues for security vulnerabilities. See [SECURITY.md](SECURITY.md).
+
+## Bumping dependencies
+
+Dependency bumps go through Dependabot. Before merging — especially
+for crypto or parser crates — read [SUPPLY_CHAIN.md](SUPPLY_CHAIN.md):
+it describes the review tiers, what gets auto-merged vs hand-reviewed,
+and what to do if `cargo audit` or `cargo deny` fire red in CI.

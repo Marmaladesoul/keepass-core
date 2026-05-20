@@ -30,6 +30,15 @@ updates:
           - "zeroize"
           - "secrecy"
           - "subtle"
+      parsers:
+        # Crates that parse attacker-controlled input. Bumps in this
+        # group share the same "diff-against-release-notes" review
+        # discipline as rustcrypto — see SUPPLY_CHAIN.md.
+        patterns:
+          - "quick-xml"
+          - "winnow"
+          - "flate2"
+          - "base64"
 
   - package-ecosystem: github-actions
     directory: "/"
