@@ -1,0 +1,12 @@
+{
+  "description": "Recycle bin enabled in Meta but no entry has been trashed yet, so the bin group has never been materialised — Meta.RecycleBinUUID is the all-zeros placeholder.",
+  "entry_count": 2,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "group_count": 1,
+  "key_file": null,
+  "master_password": "tëst pässwörd 🔑/\\",
+  "recycle_bin_enabled": true,
+  "recycle_bin_present": false,
+  "source": "pykeepass"
+}

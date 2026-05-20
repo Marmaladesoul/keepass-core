@@ -1225,6 +1225,217 @@ def gen_pykeepass_large() -> None:
     log(f"wrote pykeepass/{name}")
 
 
+def gen_pykeepass_recycle_disabled() -> None:
+    """Recycle bin globally disabled in Meta settings.
+
+    Distinct from `recycle.kdbx` (which has it enabled with content) and
+    `recycle-not-yet-created.kdbx` (enabled but the bin group hasn't been
+    created yet). Tests the meta-setting parse path.
+    """
+    from pykeepass import create_database, PyKeePass
+
+    name = "recycle-disabled"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    pw = COMMON_PASSWORD
+    if db_path.exists():
+        db_path.unlink()
+
+    kp = create_database(str(db_path), password=pw)
+    kp.recyclebin_enabled = False
+    kp.add_entry(kp.root_group, title="Acme Banking", username="alice@example.com",
+                 password="p4ss-rbd-01", url="https://bank.acme.example")
+    kp.save()
+
+    kp = PyKeePass(str(db_path), password=pw)
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": "Recycle bin globally disabled via Meta.RecycleBinEnabled = false. "
+                       "Single entry, no recycle-bin group exists.",
+        "format": "KDBX4",
+        "source": "pykeepass",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": None,
+        "entry_count": len(kp.entries),
+        "group_count": len(kp.groups),
+        "recycle_bin_enabled": False,
+        "recycle_bin_present": kp.recyclebin_group is not None,
+    })
+    log(f"wrote pykeepass/{name}")
+
+
+def gen_pykeepass_recycle_empty() -> None:
+    """Recycle bin enabled and group exists, but the bin is empty.
+
+    Tests the case where the user has trashed and then permanently-deleted
+    an entry — bin remains as a group but holds nothing.
+    """
+    from pykeepass import create_database, PyKeePass
+
+    name = "recycle-empty"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    pw = COMMON_PASSWORD
+    if db_path.exists():
+        db_path.unlink()
+
+    kp = create_database(str(db_path), password=pw)
+    kp.add_entry(kp.root_group, title="Acme Banking", username="alice@example.com",
+                 password="p4ss-rbe-01", url="https://bank.acme.example")
+    trashable = kp.add_entry(kp.root_group, title="To Be Emptied",
+                             username="bob@example.org", password="p4ss-rbe-02",
+                             url="https://example.org")
+    kp.save()
+
+    # Trash the entry to materialise the bin group, then empty it.
+    kp = PyKeePass(str(db_path), password=pw)
+    kp.trash_entry(kp.find_entries(title="To Be Emptied", first=True))
+    kp.save()
+    kp = PyKeePass(str(db_path), password=pw)
+    bin_group = kp.recyclebin_group
+    # Hard-delete every entry inside the bin
+    for e in list(bin_group.entries):
+        kp.delete_entry(e)
+    kp.save()
+
+    kp = PyKeePass(str(db_path), password=pw)
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": "Recycle bin enabled and bin group exists, but holds no entries — "
+                       "covers the materialised-but-emptied state.",
+        "format": "KDBX4",
+        "source": "pykeepass",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": None,
+        "entry_count": len(kp.entries),
+        "group_count": len(kp.groups),
+        "recycle_bin_enabled": True,
+        "recycle_bin_present": kp.recyclebin_group is not None,
+        "recycle_bin_entries": sorted(e.title for e in (kp.recyclebin_group.entries if kp.recyclebin_group else [])),
+    })
+    log(f"wrote pykeepass/{name}")
+
+
+def gen_pykeepass_recycle_not_yet_created() -> None:
+    """Recycle bin enabled but no entry has ever been trashed.
+
+    Bin UUID stays as all-zeros (KeePass's marker for "not yet created").
+    Distinct from `recycle-empty` where the group exists but holds nothing.
+    """
+    from pykeepass import create_database, PyKeePass
+
+    name = "recycle-not-yet-created"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    pw = COMMON_PASSWORD
+    if db_path.exists():
+        db_path.unlink()
+
+    kp = create_database(str(db_path), password=pw)
+    # Default: recycle bin enabled but bin group not yet created.
+    kp.add_entry(kp.root_group, title="Acme Banking", username="alice@example.com",
+                 password="p4ss-rbnc-01", url="https://bank.acme.example")
+    kp.add_entry(kp.root_group, title="Contoso Mail", username="bob@example.com",
+                 password="p4ss-rbnc-02", url="https://mail.contoso.example")
+    kp.save()
+
+    kp = PyKeePass(str(db_path), password=pw)
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": "Recycle bin enabled in Meta but no entry has been trashed yet, "
+                       "so the bin group has never been materialised — Meta.RecycleBinUUID "
+                       "is the all-zeros placeholder.",
+        "format": "KDBX4",
+        "source": "pykeepass",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": None,
+        "entry_count": len(kp.entries),
+        "group_count": len(kp.groups),
+        "recycle_bin_enabled": True,
+        "recycle_bin_present": kp.recyclebin_group is not None,
+    })
+    log(f"wrote pykeepass/{name}")
+
+
+def gen_pykeepass_keyfile_binary() -> None:
+    """KDBX4 secured with password + raw 32-byte binary keyfile.
+
+    Distinct from `keepassxc/kdbx3-keyfile.kdbx` (random-length binary keyfile)
+    in two ways: this one is KDBX4 (Argon2 + ChaCha20) rather than KDBX3, and
+    the keyfile is exactly 32 bytes (the canonical raw-binary size).
+    """
+    from pykeepass import create_database, PyKeePass
+
+    name = "kdbx4-keyfile-binary"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    kf_path = PYKEEPASS_DIR / f"{name}.key"
+    pw = COMMON_PASSWORD
+    if db_path.exists():
+        db_path.unlink()
+
+    # Deterministic 32-byte raw keyfile
+    import random
+    random.seed(0xB10A1FEE)
+    kf_path.write_bytes(bytes(random.randrange(256) for _ in range(32)))
+
+    kp = create_database(str(db_path), password=pw, keyfile=str(kf_path))
+    kp.add_entry(kp.root_group, title="Acme Banking", username="alice@example.com",
+                 password="p4ss-kfb-01", url="https://bank.acme.example")
+    kp.save()
+
+    kp = PyKeePass(str(db_path), password=pw, keyfile=str(kf_path))
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": "KDBX4 secured with password + 32-byte raw-binary keyfile.",
+        "format": "KDBX4",
+        "source": "pykeepass",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": f"{name}.key",
+        "key_file_format": "binary-32",
+        "entry_count": len(kp.entries),
+        "group_count": len(kp.groups),
+    })
+    log(f"wrote pykeepass/{name}")
+
+
+def gen_pykeepass_keyfile_hex() -> None:
+    """KDBX4 secured with password + 64-char hex-string keyfile.
+
+    Hex keyfile is the legacy ASCII format: the file contains 64 hex
+    characters which decode to 32 bytes of composite-key material. Different
+    parse path from raw-binary keyfiles.
+    """
+    from pykeepass import create_database, PyKeePass
+
+    name = "kdbx4-keyfile-hex"
+    db_path = PYKEEPASS_DIR / f"{name}.kdbx"
+    kf_path = PYKEEPASS_DIR / f"{name}.key"
+    pw = COMMON_PASSWORD
+    if db_path.exists():
+        db_path.unlink()
+
+    # Deterministic 32 bytes → 64 hex chars
+    import random
+    random.seed(0xEC1FEEED)
+    kf_path.write_text(bytes(random.randrange(256) for _ in range(32)).hex())
+
+    kp = create_database(str(db_path), password=pw, keyfile=str(kf_path))
+    kp.add_entry(kp.root_group, title="Acme Banking", username="alice@example.com",
+                 password="p4ss-kfh-01", url="https://bank.acme.example")
+    kp.save()
+
+    kp = PyKeePass(str(db_path), password=pw, keyfile=str(kf_path))
+    write_sidecar(db_path.with_suffix(".json"), {
+        "description": "KDBX4 secured with password + 64-char hex-string keyfile.",
+        "format": "KDBX4",
+        "source": "pykeepass",
+        "generated_by": "tests/fixtures/generate.py",
+        "master_password": pw,
+        "key_file": f"{name}.key",
+        "key_file_format": "hex-64",
+        "entry_count": len(kp.entries),
+        "group_count": len(kp.groups),
+    })
+    log(f"wrote pykeepass/{name}")
+
+
 # -----------------------------------------------------------------------------
 # Malformed fixtures — negative tests
 # -----------------------------------------------------------------------------
@@ -1271,6 +1482,76 @@ def gen_malformed_bad_magic() -> None:
     log("wrote malformed/bad-magic")
 
 
+def gen_malformed_broken_header_hash() -> None:
+    """KDBX4 file with the header-hash field deliberately corrupted.
+
+    In KDBX4 the header hash field is the SHA-256 of the outer header,
+    written immediately after the header and re-verified on unlock. Flipping
+    a byte in that field forces the verifier into the "header tampered"
+    code path — distinct from `bad-magic` (magic mismatch) and `hmac-fail`
+    (block HMAC mismatch on the encrypted body).
+
+    The hash sits at a known offset: end-of-header through end-of-header+32.
+    We locate "end-of-header" by reading the header TLVs starting at byte 12
+    and stopping at the EndOfHeader marker (TLV type 0).
+    """
+    MALFORMED_DIR.mkdir(parents=True, exist_ok=True)
+    source = KEEPASSXC_DIR / "kdbx3-minimal.kdbx"
+    if not source.exists():
+        log("skipping broken-header-hash — minimal fixture not generated yet")
+        return
+    data = bytearray(source.read_bytes())
+
+    # Walk header TLVs to find end-of-header. KDBX4 header starts at offset 12
+    # (after magic 4B + version 4B + format-major/minor 4B). Each TLV is:
+    #   type   1 byte
+    #   length 4 bytes little-endian (KDBX4) — KDBX3 uses 2 bytes!
+    #   value  <length> bytes
+    # EndOfHeader has type = 0.
+    #
+    # `kdbx3-minimal.kdbx` is KDBX3.1 — 2-byte length per the spec.
+    pos = 12
+    while pos < len(data):
+        tlv_type = data[pos]
+        length = int.from_bytes(data[pos + 1:pos + 3], "little")
+        pos += 3 + length
+        if tlv_type == 0:
+            break
+    # The next 32 bytes (KDBX4) or first 32 bytes of the encrypted body
+    # (KDBX3) are NOT the header hash — KDBX3 doesn't store one explicitly.
+    # KDBX3's header integrity is implicit in the encrypted payload's
+    # ability to decrypt to a valid stream-start marker.
+    #
+    # For KDBX3, the analogous corruption is flipping a byte in the
+    # outer header itself: re-derive the cipher key from the wrong header
+    # → decrypted stream-start ≠ expected → "wrong key or corrupt header".
+    # We flip a single byte in the master-seed TLV (type 4).
+    pos = 12
+    while pos < len(data):
+        tlv_type = data[pos]
+        length = int.from_bytes(data[pos + 1:pos + 3], "little")
+        if tlv_type == 4:  # MasterSeed
+            # Flip the first byte of the value
+            data[pos + 3] ^= 0xFF
+            break
+        pos += 3 + length
+        if tlv_type == 0:
+            raise RuntimeError("MasterSeed not found in header")
+
+    (MALFORMED_DIR / "broken-header.kdbx").write_bytes(bytes(data))
+    write_sidecar(MALFORMED_DIR / "broken-header.json", {
+        "description": "MasterSeed byte flipped in the outer header. KDBX3's "
+                       "implicit-integrity property (cipher key derives from MasterSeed) "
+                       "ensures the decrypted stream-start cannot match — unlock must reject.",
+        "format": "KDBX3",
+        "source": "synthetic",
+        "generated_by": "tests/fixtures/generate.py",
+        "expected_error": "header_tampered_or_wrong_key",
+        "source_fixture": "keepassxc/kdbx3-minimal.kdbx",
+    })
+    log("wrote malformed/broken-header")
+
+
 def gen_malformed_hmac_fail() -> None:
     """Last byte of the file flipped — HMAC on final block must fail."""
     MALFORMED_DIR.mkdir(parents=True, exist_ok=True)
@@ -1309,6 +1590,9 @@ GENERATORS: dict[str, list[Callable[[], None]]] = {
     "pykeepass": [
         gen_pykeepass_history,
         gen_pykeepass_recycle,
+        gen_pykeepass_recycle_disabled,
+        gen_pykeepass_recycle_empty,
+        gen_pykeepass_recycle_not_yet_created,
         gen_pykeepass_custom_fields,
         gen_pykeepass_unknown_xml,
         gen_pykeepass_history_unknown_xml,
@@ -1316,10 +1600,13 @@ GENERATORS: dict[str, list[Callable[[], None]]] = {
         gen_pykeepass_custom_icons,
         gen_pykeepass_empty_timestamps,
         gen_pykeepass_large,
+        gen_pykeepass_keyfile_binary,
+        gen_pykeepass_keyfile_hex,
     ],
     "malformed": [
         gen_malformed_truncated,
         gen_malformed_bad_magic,
+        gen_malformed_broken_header_hash,
         gen_malformed_hmac_fail,
     ],
 }

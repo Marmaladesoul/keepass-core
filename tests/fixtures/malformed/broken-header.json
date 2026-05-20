@@ -1,0 +1,8 @@
+{
+  "description": "MasterSeed byte flipped in the outer header. KDBX3's implicit-integrity property (cipher key derives from MasterSeed) ensures the decrypted stream-start cannot match — unlock must reject.",
+  "expected_error": "header_tampered_or_wrong_key",
+  "format": "KDBX3",
+  "generated_by": "tests/fixtures/generate.py",
+  "source": "synthetic",
+  "source_fixture": "keepassxc/kdbx3-minimal.kdbx"
+}

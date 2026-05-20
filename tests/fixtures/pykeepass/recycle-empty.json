@@ -1,0 +1,13 @@
+{
+  "description": "Recycle bin enabled and bin group exists, but holds no entries — covers the materialised-but-emptied state.",
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "group_count": 2,
+  "key_file": null,
+  "master_password": "tëst pässwörd 🔑/\\",
+  "recycle_bin_enabled": true,
+  "recycle_bin_entries": [],
+  "recycle_bin_present": true,
+  "source": "pykeepass"
+}

@@ -154,6 +154,15 @@ All fixtures in `attachments/` are generated deterministically by `generate.py`.
 
 - **Native KeeWeb.app fixtures** (generated via the desktop app's GUI, as opposed to the `kdbxweb` library the app bundles) are not yet present. The `kdbxweb/` corpus above covers the same on-disk format since KeeWeb is a thin wrapper around kdbxweb; the only likely difference is the `<Generator>` metadata string (`KdbxWeb` here vs possibly a different string when saved through the app). KeeWeb (the app) is built on the open-source `kdbxweb` JS library. `kdbxweb` requires an externally-supplied Argon2 implementation (it has no built-in one because Argon2 is heavy). `hash-wasm`'s Argon2 rejects hash lengths below 4 bytes, but `kdbxweb`'s self-test invokes `argon2(length=1, parallelism=32, memory=1 KiB)` to verify the implementation before it'll run. Satisfying that self-test requires either `argon2-browser` (WASM) with careful wiring, or a pure-JS Argon2 implementation. Since keepassxc-cli and pykeepass already cover KDBX4 byte-level diversity — a KeeWeb fixture would differ primarily in its `<Generator>` metadata string — this is deferred.
 
+- **XML keyfile variants.** The corpus has binary and hex keyfile fixtures
+  (`pykeepass/kdbx4-keyfile-binary.kdbx`, `pykeepass/kdbx4-keyfile-hex.kdbx`)
+  but no XML-v1 or XML-v2 (`.keyx`) keyfile fixtures. `pykeepass` round-trips
+  both XML formats internally, but the XML keyfiles it writes are rejected
+  by `keepassxc-cli` — the format-validation strictness differs between
+  libraries. Adding XML keyfile fixtures means producing exact byte-for-byte
+  format that all major implementations accept, which is fiddly enough to
+  defer until the parser actually needs the coverage.
+
 - **Cross-client fixtures (KeePassium, Strongbox, MacPass)** are in place — see "Cross-client fixtures" below for the round-trip recipe.
 
 ## Cross-client fixtures
