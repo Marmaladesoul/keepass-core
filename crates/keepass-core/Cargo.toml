@@ -29,13 +29,13 @@ uuid   = { version = "1", features = ["v4"] }
 base64 = "0.22"                     # KeePass UUIDs + protected-value payloads are base64
 
 # Crypto primitives — RustCrypto family, no unsafe.
-sha2   = "0.10"                     # SHA-256, SHA-512
-aes    = "0.8"                      # AES-256 block cipher (used ECB-style by AES-KDF)
-cbc    = { version = "0.1", features = ["block-padding"] }  # AES-256-CBC with PKCS7
+sha2   = "0.11"                     # SHA-256, SHA-512
+aes    = "0.9"                      # AES-256 block cipher (used ECB-style by AES-KDF)
+cbc    = { version = "0.2", features = ["block-padding"] }  # AES-256-CBC with PKCS7
 argon2 = "0.5"                      # Argon2d / Argon2id KDFs
-hmac   = "0.12"                     # HMAC-SHA-256 for KDBX4 block verification
-chacha20 = "0.9"                    # inner-stream cipher for KDBX4 protected XML
-salsa20  = "0.10"                   # inner-stream cipher for KDBX3 protected XML
+hmac   = "0.13"                     # HMAC-SHA-256 for KDBX4 block verification
+chacha20 = "0.10"                    # inner-stream cipher for KDBX4 protected XML
+salsa20  = "0.11"                   # inner-stream cipher for KDBX3 protected XML
 aes-gcm = "0.10"                    # in-memory protected-field wrap (FieldProtector)
 # blake2      = "0.10"
 
