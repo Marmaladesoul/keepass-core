@@ -1947,10 +1947,40 @@ impl Kdbx<Unlocked> {
     /// Serialise this unlocked database back to a KDBX byte stream —
     /// the byte-level inverse of [`Kdbx::<HeaderRead>::unlock`].
     ///
-    /// Reuses the outer-header framing (cipher, master seed, KDF
-    /// parameters, IV) that was parsed at unlock time, plus the
-    /// transformed key cached in the [`Unlocked`] state so no second
-    /// round of Argon2 is needed.
+    /// Reuses the outer-header framing (cipher, KDF parameters) that
+    /// was parsed at unlock time, plus the transformed key cached in
+    /// the [`Unlocked`] state so no second round of Argon2 is needed.
+    /// The encryption IV and master seed are regenerated per save so
+    /// that the outer cipher (key, nonce) pair never repeats across
+    /// successive saves under the same composite key.
+    ///
+    /// # Durability is the caller's responsibility
+    ///
+    /// `save_to_bytes` returns an in-memory `Vec<u8>`. **Do not**
+    /// `fs::write(path, kdbx.save_to_bytes()?)` directly — that
+    /// truncates the destination before writing, so a crash mid-write
+    /// produces a zero-byte or partially-written kdbx file and the
+    /// user's vault is gone. Callers persisting to disk must perform
+    /// the write atomically:
+    ///
+    /// 1. Write the bytes to a sibling tempfile on the **same volume**
+    ///    as the target (so the rename is atomic — a cross-volume
+    ///    rename falls back to copy-and-delete and re-opens the
+    ///    truncation window).
+    /// 2. `fsync` the tempfile so its data hits stable storage.
+    /// 3. `rename(2)` the tempfile over the target — atomic at the
+    ///    POSIX layer.
+    /// 4. `fsync` the parent directory so the rename is durable.
+    ///
+    /// `tempfile::NamedTempFile::new_in(parent).persist(path)` plus
+    /// `sync_all` on the file and the parent directory implements
+    /// the full dance.
+    ///
+    /// The library deliberately stops at bytes-in-memory: callers run
+    /// under sandboxes (macOS security-scoped bookmarks, iOS file
+    /// providers, browser FileSystemAccess) whose I/O constraints
+    /// differ enough that a `save_to_path` helper would have to grow
+    /// a configuration surface comparable to the I/O step itself.
     ///
     /// # Supported configurations
     ///
