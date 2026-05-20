@@ -608,7 +608,7 @@ dependencies = [
  "salsa20",
  "secrecy",
  "serde_json",
- "sha2 0.11.0",
+ "sha2",
  "subtle",
  "thiserror",
  "uuid",
@@ -623,7 +623,7 @@ dependencies = [
  "chrono",
  "keepass-core",
  "proptest",
- "sha2 0.10.9",
+ "sha2",
  "subtle",
  "thiserror",
  "uuid",
@@ -951,17 +951,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
 ]
 
 [[package]]
