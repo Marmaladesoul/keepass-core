@@ -1,7 +1,7 @@
 {
   "description": "Final byte XOR'd with 0xFF — KDBX4 block HMAC verification must reject.",
   "expected_error": "hmac_mismatch",
-  "format": "KDBX3",
+  "format": "KDBX4",
   "generated_by": "tests/fixtures/generate.py",
   "source": "synthetic",
   "source_fixture": "keepassxc/kdbx3-minimal.kdbx"

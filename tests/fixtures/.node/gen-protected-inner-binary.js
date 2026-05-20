@@ -20,6 +20,9 @@ const crypto = require('crypto');
 const argon2 = require('argon2');
 const kdbxweb = require('kdbxweb');
 
+// Common master password — shared with the Python generator.
+const COMMON_PASSWORD = 'tëst pässwörd 🔑/\\';
+
 kdbxweb.CryptoEngine.setArgon2Impl(async (password, salt, memoryKiB, iterations, length, parallelism, type, _v) => {
   const hashType = type === 0 ? argon2.argon2d : argon2.argon2id;
   const buf = await argon2.hash(Buffer.from(password), {
@@ -37,7 +40,7 @@ kdbxweb.CryptoEngine.setArgon2Impl(async (password, salt, memoryKiB, iterations,
 const OUT_DIR = path.resolve(__dirname, '..', 'kdbxweb');
 
 (async () => {
-  const pw = 'test-protected-bin-001';
+  const pw = COMMON_PASSWORD;
   const cred = new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(pw));
   const db = kdbxweb.Kdbx.create(cred, 'kdbxweb Protected Inner Binary Fixture');
   const kdf = db.header.kdfParameters;

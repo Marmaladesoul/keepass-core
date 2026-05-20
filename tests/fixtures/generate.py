@@ -78,6 +78,15 @@ KEEPASSXC_CLI = "/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli"
 
 PEOPLE = ["alice", "bob", "charlie", "dave", "eve", "mallory"]
 
+# Common master password for every standard fixture.
+# Deliberately exercises encoding paths: ASCII, space, multi-byte UTF-8
+# (diaeresis), 4-byte UTF-8 (emoji), and both slash characters that some
+# consumers might mishandle in path / shell contexts.
+# Boundary-case fixtures (empty / whitespace / very long) use their own
+# passwords — those test the edge cases the common password cannot.
+COMMON_PASSWORD = "tëst pässwörd 🔑/\\"
+
+
 SERVICES = [
     # (title, url) — fake companies from Microsoft's official fictional set
     # plus classic "Acme" (universally recognised as synthetic).
@@ -259,7 +268,7 @@ def gen_keepassxc_kdbx3_minimal() -> None:
     """One entry, one group, no attachments. Smallest possible KDBX4."""
     name = "kdbx3-minimal"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
-    pw = "test-minimal-001"
+    pw = COMMON_PASSWORD
     KEEPASSXC_DIR.mkdir(parents=True, exist_ok=True)
 
     _kpxc_create_db(db, pw)
@@ -281,7 +290,7 @@ def gen_keepassxc_kdbx3_basic() -> None:
     """Typical small vault: a few entries across two groups."""
     name = "kdbx3-basic"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
-    pw = "test-basic-002"
+    pw = COMMON_PASSWORD
 
     _kpxc_create_db(db, pw)
     for g in ("Work", "Personal"):
@@ -309,7 +318,7 @@ def gen_keepassxc_kdbx3_keyfile() -> None:
     name = "kdbx3-keyfile"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
     keyfile = KEEPASSXC_DIR / f"{name}.key"
-    pw = "test-keyfile-003"
+    pw = COMMON_PASSWORD
 
     # Deterministic keyfile content
     import random
@@ -336,7 +345,7 @@ def gen_keepassxc_kdbx3_attachments() -> None:
     """Attachments of various sizes — covers binary pool edge cases."""
     name = "kdbx3-attachments"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
-    pw = "test-att-004"
+    pw = COMMON_PASSWORD
 
     _kpxc_create_db(db, pw)
 
@@ -379,7 +388,7 @@ def gen_keepassxc_kdbx3_unicode() -> None:
     """Unicode throughout: titles, usernames, notes, group names, tags."""
     name = "kdbx3-unicode"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
-    pw = "tëst-üni-005"
+    pw = COMMON_PASSWORD
 
     _kpxc_create_db(db, pw)
     for g in ("Работа", "個人用", "Café"):
@@ -428,7 +437,7 @@ def gen_keepassxc_kdbx3_deep_groups() -> None:
     """Deeply nested group hierarchy."""
     name = "kdbx3-deep-groups"
     db = KEEPASSXC_DIR / f"{name}.kdbx"
-    pw = "test-deep-006"
+    pw = COMMON_PASSWORD
 
     _kpxc_create_db(db, pw)
 
@@ -526,7 +535,7 @@ def gen_pykeepass_history() -> None:
 
     name = "history"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-hist-101"
+    pw = COMMON_PASSWORD
     PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -580,7 +589,7 @@ def gen_pykeepass_recycle() -> None:
 
     name = "recycle"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-recycle-102"
+    pw = COMMON_PASSWORD
     if db_path.exists():
         db_path.unlink()
 
@@ -627,7 +636,7 @@ def gen_pykeepass_custom_fields() -> None:
 
     name = "custom-fields"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-custom-104"
+    pw = COMMON_PASSWORD
     if db_path.exists():
         db_path.unlink()
 
@@ -685,7 +694,7 @@ def gen_pykeepass_unknown_xml() -> None:
 
     name = "unknown-xml"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-unknown-106"
+    pw = COMMON_PASSWORD
     PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -775,7 +784,7 @@ def gen_pykeepass_history_unknown_xml() -> None:
 
     name = "history-unknown-xml"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-hist-unk-108"
+    pw = COMMON_PASSWORD
     PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -856,7 +865,7 @@ def gen_pykeepass_custom_icons() -> None:
 
     name = "custom-icons"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-icons-109"
+    pw = COMMON_PASSWORD
     PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -959,7 +968,7 @@ def gen_pykeepass_editor_fields() -> None:
 
     name = "editor-fields"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-editor-107"
+    pw = COMMON_PASSWORD
     PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -1131,7 +1140,7 @@ def gen_pykeepass_empty_timestamps() -> None:
 
     name = "empty-timestamps"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-empty-ts-107"
+    pw = COMMON_PASSWORD
     PYKEEPASS_DIR.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -1185,7 +1194,7 @@ def gen_pykeepass_large() -> None:
 
     name = "large"
     db_path = PYKEEPASS_DIR / f"{name}.kdbx"
-    pw = "test-large-105"
+    pw = COMMON_PASSWORD
     if db_path.exists():
         db_path.unlink()
 

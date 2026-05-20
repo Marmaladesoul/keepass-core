@@ -12,6 +12,6 @@
   "format": "KDBX4",
   "generated_by": "tests/fixtures/generate.py",
   "key_file": null,
-  "master_password": "test-icons-109",
+  "master_password": "tëst pässwörd 🔑/\\",
   "source": "pykeepass+lxml"
 }
