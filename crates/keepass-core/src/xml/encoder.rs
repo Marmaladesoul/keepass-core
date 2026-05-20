@@ -727,8 +727,11 @@ fn uuid_to_base64(uuid: uuid::Uuid) -> String {
 
 // `map_err(xml_err)` hands us the Error by value, so matching that
 // callback shape is cleaner than juggling borrows.
+//
+// quick-xml v0.34 switched `Writer::write_event` from `quick_xml::Error`
+// to `std::io::Error`; this signature follows.
 #[allow(clippy::needless_pass_by_value)]
-fn xml_err(e: quick_xml::Error) -> XmlError {
+fn xml_err(e: std::io::Error) -> XmlError {
     XmlError::Malformed(e.to_string())
 }
 

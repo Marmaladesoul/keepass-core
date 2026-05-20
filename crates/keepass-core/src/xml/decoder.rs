@@ -810,10 +810,15 @@ fn read_text<R: std::io::BufRead>(
                 depth -= 1;
             }
             Ok(Event::Text(t)) => {
+                // quick-xml ≥ 0.38: text events are verbatim — entity refs
+                // arrive separately as `Event::GeneralRef`. Decode here.
                 let decoded = t
-                    .unescape()
+                    .decode()
                     .map_err(|e| XmlError::Malformed(e.to_string()))?;
                 collected.push_str(&decoded);
+            }
+            Ok(Event::GeneralRef(r)) => {
+                collected.push_str(&super::resolve_general_ref(r.as_ref())?);
             }
             Ok(Event::CData(c)) => {
                 let s = std::str::from_utf8(&c).map_err(|e| XmlError::Malformed(e.to_string()))?;
