@@ -81,3 +81,34 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    # Checks Cargo.lock against the RustSec Advisory Database for known
+    # CVEs in any transitive dependency. Fast (~5 s) and a no-brainer for
+    # a crypto / password-handling library.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    # Stricter than cargo audit: enforces a license allowlist (no GPL
+    # / unknown licenses sneaking into this MIT/Apache crate), a source
+    # allowlist (deps must come from crates.io — blocks an attacker who
+    # slips in a path/git override), a banned-crates list, and detects
+    # duplicate-version bloat. Config lives in `deny.toml` at the
+    # workspace root.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          # `advisories` and `licenses` overlap with audit but having
+          # both fail on the same advisory gives belt-and-braces. The
+          # interesting additions are `bans` and `sources`.
+          arguments: --all-features
