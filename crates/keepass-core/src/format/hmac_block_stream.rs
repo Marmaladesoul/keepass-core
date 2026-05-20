@@ -40,7 +40,8 @@
 //! responsibility (it lives above this layer, tied to the outer-header
 //! bytes); this module reads only the post-header block stream.
 
-use hmac::{Hmac, Mac};
+// hmac 0.13: `new_from_slice` migrated from `Mac` to `KeyInit`.
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -93,7 +94,7 @@ pub fn read_hmac_block_stream(
         // Derive the per-block key and verify.
         let key = per_block_hmac_key(hmac_base, block_index);
         let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+            <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
         mac.update(&block_index.to_le_bytes());
         mac.update(&size.to_le_bytes());
         mac.update(data);
@@ -160,7 +161,7 @@ pub fn write_hmac_block_stream(
         let size = u32::try_from(chunk.len()).expect("chunks are bounded by block_size ≤ u32::MAX");
         let key = per_block_hmac_key(hmac_base, block_index);
         let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+            <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
         mac.update(&block_index.to_le_bytes());
         mac.update(&size.to_le_bytes());
         mac.update(chunk);
@@ -176,7 +177,7 @@ pub fn write_hmac_block_stream(
     // End marker: same shape as a block but with size = 0 and no data.
     let key = per_block_hmac_key(hmac_base, block_index);
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+        <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(&block_index.to_le_bytes());
     mac.update(&0u32.to_le_bytes());
     let tag = mac.finalize().into_bytes();
@@ -262,7 +263,7 @@ mod tests {
             let index = i as u64;
             let key = per_block_hmac_key(hmac_base, index);
             let size = u32::try_from(data.len()).unwrap();
-            let mut mac = <HmacSha256 as Mac>::new_from_slice(&key).unwrap();
+            let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&key).unwrap();
             mac.update(&index.to_le_bytes());
             mac.update(&size.to_le_bytes());
             mac.update(data);
@@ -275,7 +276,7 @@ mod tests {
         // End marker: next index, empty data, matching tag.
         let end_index = blocks.len() as u64;
         let key = per_block_hmac_key(hmac_base, end_index);
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&key).unwrap();
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&key).unwrap();
         mac.update(&end_index.to_le_bytes());
         mac.update(&0u32.to_le_bytes());
         let tag = mac.finalize().into_bytes();

@@ -9,7 +9,7 @@
 //! No unsafe; all primitives are RustCrypto crates.
 
 use aes::Aes256;
-use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+use aes::cipher::{Array, BlockCipherEncrypt, KeyInit};
 use argon2::{Algorithm, Argon2, Params, Version as Argon2LibVersion};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -104,14 +104,16 @@ fn aes_kdf(
     let mut work = [0u8; 32];
     work.copy_from_slice(composite.as_bytes());
 
-    let cipher = Aes256::new(GenericArray::from_slice(seed));
+    // aes 0.9 replaced `generic-array` with `hybrid-array`; the public
+    // `Array` type from `aes::cipher` is the new key / block container.
+    let cipher = Aes256::new(&Array::from(*seed));
 
     // AES-256 block size is 16 bytes. Encrypt the two halves of the
     // 32-byte work buffer independently, once per round.
     for _ in 0..rounds {
         let (first, second) = work.split_at_mut(16);
-        cipher.encrypt_block(GenericArray::from_mut_slice(first));
-        cipher.encrypt_block(GenericArray::from_mut_slice(second));
+        cipher.encrypt_block(first.try_into().expect("16-byte slice"));
+        cipher.encrypt_block(second.try_into().expect("16-byte slice"));
     }
 
     // Final SHA-256 of the 32 post-AES bytes is the transformed key.
