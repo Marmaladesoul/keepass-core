@@ -1,0 +1,11 @@
+{
+  "description": "KDBX4 secured with password + 32-byte raw-binary keyfile.",
+  "entry_count": 1,
+  "format": "KDBX4",
+  "generated_by": "tests/fixtures/generate.py",
+  "group_count": 1,
+  "key_file": "kdbx4-keyfile-binary.key",
+  "key_file_format": "binary-32",
+  "master_password": "tëst pässwörd 🔑/\\",
+  "source": "pykeepass"
+}
