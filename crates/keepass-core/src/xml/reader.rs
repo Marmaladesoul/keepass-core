@@ -115,9 +115,7 @@ pub fn extract_text_at_path(xml: &[u8], path: &[&str]) -> Result<Option<String>,
                 // quick-xml ≥ 0.38: text events are verbatim — entity refs
                 // arrive separately as `Event::GeneralRef`. Just decode
                 // the bytes here.
-                let decoded = t
-                    .decode()
-                    .map_err(|e| XmlError::Malformed(e.to_string()))?;
+                let decoded = t.decode().map_err(|e| XmlError::Malformed(e.to_string()))?;
                 collected.push_str(&decoded);
             }
             Ok(Event::GeneralRef(r)) if in_target => {
