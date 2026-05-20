@@ -38,11 +38,12 @@ fn kdbx4_basic() -> PathBuf {
 fn password_from_sidecar(path: &Path) -> String {
     let sidecar_path = path.with_extension("json");
     let text = fs::read_to_string(sidecar_path).unwrap();
-    text.split("\"master_password\"")
-        .nth(1)
-        .and_then(|s| s.split('"').nth(1))
+    serde_json::from_str::<serde_json::Value>(&text)
         .unwrap()
-        .to_owned()
+        .get("master_password")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap()
 }
 
 #[test]

@@ -22,6 +22,6 @@
   "kdf": "Argon2d",
   "kdf_parallelism": 8,
   "key_file": null,
-  "master_password": "test-kdbxweb-argon2d-p8-204",
+  "master_password": "tëst pässwörd 🔑/\\",
   "source": "kdbxweb (node)"
 }

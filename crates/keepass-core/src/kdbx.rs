@@ -3920,12 +3920,12 @@ mod tests {
         let sidecar_path = fixture.with_extension("json");
         let sidecar_text = fs::read_to_string(&sidecar_path).unwrap();
         // Minimal parse: find "master_password": "...".
-        let password = sidecar_text
-            .split("\"master_password\"")
-            .nth(1)
-            .and_then(|s| s.split('"').nth(1))
+        let password: String = serde_json::from_str::<serde_json::Value>(&sidecar_text)
             .unwrap()
-            .to_owned();
+            .get("master_password")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .unwrap();
         let composite = CompositeKey::from_password(password.as_bytes());
 
         // Leg 1: unlock.
@@ -4053,12 +4053,12 @@ mod tests {
             .unwrap()
             .join("tests/fixtures/kdbxweb/kdbx4-basic.kdbx");
         let sidecar_text = fs::read_to_string(fixture.with_extension("json")).unwrap();
-        let password = sidecar_text
-            .split("\"master_password\"")
-            .nth(1)
-            .and_then(|s| s.split('"').nth(1))
+        let password: String = serde_json::from_str::<serde_json::Value>(&sidecar_text)
             .unwrap()
-            .to_owned();
+            .get("master_password")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .unwrap();
         let composite = CompositeKey::from_password(password.as_bytes());
         let bytes = fs::read(&fixture).unwrap();
         let mut unlocked = Kdbx::<Sealed>::open_from_bytes(bytes)

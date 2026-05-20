@@ -34,6 +34,6 @@
   "group_count": 1,
   "group_paths": [],
   "key_file": "kdbx3-keyfile.key",
-  "master_password": "test-keyfile-003",
+  "master_password": "tëst pässwörd 🔑/\\",
   "source": "keepassxc-cli"
 }

@@ -1,6 +1,6 @@
 {
   "database_name": "Passwords",
-  "description": "Smallest KDBX4 fixture — one entry, default root group.",
+  "description": "Smallest KDBX3 fixture — one entry, default root group.",
   "entries": [
     {
       "attachment_count": 0,
@@ -22,6 +22,6 @@
   "group_count": 1,
   "group_paths": [],
   "key_file": null,
-  "master_password": "test-minimal-001",
+  "master_password": "tëst pässwörd 🔑/\\",
   "source": "keepassxc-cli"
 }

@@ -49,7 +49,7 @@
     "/Work"
   ],
   "key_file": null,
-  "master_password": "test-keeweb-203",
+  "master_password": "tëst pässwörd 🔑/\\",
   "outer_cipher": "ChaCha20",
   "source": "kdbxweb (node)"
 }

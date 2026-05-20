@@ -18,7 +18,7 @@ use keepass_core::CompositeKey;
 use keepass_core::kdbx::{Kdbx, Sealed, Unlocked};
 use keepass_core::model::{AutoType, AutoTypeAssociation, Entry, Group, HistoryPolicy};
 
-const FIXTURE_PASSWORD: &str = "test-editor-107";
+const FIXTURE_PASSWORD: &str = "tëst pässwörd 🔑/\\";
 
 fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
