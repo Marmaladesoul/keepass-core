@@ -1,0 +1,87 @@
+# cargo-deny configuration for the keepass-core workspace.
+#
+# Run locally: `cargo deny check`.
+# CI invokes this via `EmbarkStudios/cargo-deny-action` in `.github/workflows/ci.yml`.
+#
+# Schema docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Restrict checks to host targets we actually ship to. Avoids spurious
+# license warnings from platform-specific transitive crates we never link.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Advisories — RustSec advisory database
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Fail the build on any vulnerability or unmaintained crate. Yanked
+# versions also fail — if a release was yanked from crates.io there's
+# usually a security reason and we shouldn't be depending on it.
+yanked = "deny"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses — MIT / Apache-2.0 / BSD family only
+# ---------------------------------------------------------------------------
+# keepass-core itself ships as MIT OR Apache-2.0. We pull in only
+# permissively-licensed deps to keep the redistribution story clean for
+# the macOS / Windows / iOS apps that link against us.
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",       # unicode-ident, idna
+    "Unicode-DFS-2016",  # older unicode-ident
+    "Zlib",              # adler / miniz_oxide
+    "Unlicense",         # encoding_rs etc.
+    "CC0-1.0",           # tiny-keccak etc.
+    "MPL-2.0",           # webpki-roots if it leaks in
+]
+# Default to "deny" on anything not listed. No GPL / LGPL / AGPL —
+# those would force keepass-core itself into a copyleft posture, which
+# would propagate to every downstream consumer.
+confidence-threshold = 0.93
+
+# ---------------------------------------------------------------------------
+# Bans — explicit deny-list + duplicate detection
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Crates we never want pulled in transitively, with rationale.
+deny = [
+    # OpenSSL has a sprawling C codebase, FFI surface, and historic CVE
+    # cadence we don't want anywhere near a password vault. RustCrypto
+    # (pure-Rust, audited, in-tree) covers every primitive we need.
+    { crate = "openssl", reason = "use RustCrypto family instead" },
+    { crate = "openssl-sys", reason = "use RustCrypto family instead" },
+    { crate = "native-tls", reason = "no TLS in this crate; if added, use rustls" },
+]
+# `skip` is for known-acceptable duplicate-version situations. Empty
+# for now; populate with rationale if a real one appears.
+skip = []
+
+# ---------------------------------------------------------------------------
+# Sources — only crates.io and our own git
+# ---------------------------------------------------------------------------
+# Blocks an attacker who tries to inject a `path = "..."` or
+# `git = "https://malicious"` override into Cargo.toml.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
