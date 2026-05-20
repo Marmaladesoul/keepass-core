@@ -24,7 +24,7 @@
 
 use aes::Aes256;
 use aes::cipher::block_padding::Pkcs7;
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use chacha20::ChaCha20;
 use chacha20::cipher::StreamCipher as _;
 use thiserror::Error;
@@ -75,10 +75,12 @@ pub fn aes_256_cbc_decrypt(
         .map_err(|_| CipherError::InvalidPadding)?;
 
     // Decrypt into a fresh buffer of the same length, then trim to the
-    // length returned by the PKCS7-stripping helper.
+    // length returned by the PKCS7-stripping helper. cbc 0.2 dropped the
+    // `_mut` suffix from `decrypt_padded_b2b` — consumes the decryptor
+    // by value, same shape otherwise.
     let mut out = vec![0u8; ciphertext.len()];
     let n = dec
-        .decrypt_padded_b2b_mut::<Pkcs7>(ciphertext, &mut out)
+        .decrypt_padded_b2b::<Pkcs7>(ciphertext, &mut out)
         .map_err(|_| CipherError::InvalidPadding)?
         .len();
     out.truncate(n);
@@ -121,9 +123,10 @@ pub fn aes_256_cbc_encrypt(
         .map_err(|_| CipherError::InvalidPadding)?;
 
     // Output buffer: plaintext length plus up to one full padding block.
+    // cbc 0.2 dropped the `_mut` suffix; consumes the encryptor by value.
     let mut out = vec![0u8; plaintext.len() + 16];
     let n = enc
-        .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut out)
+        .encrypt_padded_b2b::<Pkcs7>(plaintext, &mut out)
         .expect("output buffer sized for plaintext + 16")
         .len();
     out.truncate(n);

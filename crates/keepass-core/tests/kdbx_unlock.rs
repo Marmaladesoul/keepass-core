@@ -18,6 +18,18 @@ use keepass_core::secret::keyfile_hash;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// Lower-case hex string. sha2 0.11 returns a `hybrid-array::Array` from
+/// `digest()` which no longer implements `LowerHex`; this two-liner
+/// reproduces the old `format!("{:x}", …)` output for byte slices.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{b:02x}").expect("writing to String never fails");
+    }
+    out
+}
+
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -152,7 +164,7 @@ fn check_entry_against_sidecar(
                     vault.binaries.len()
                 ));
             };
-            let got_sha = format!("{:x}", Sha256::digest(&bin.data));
+            let got_sha = hex_encode(Sha256::digest(&bin.data).as_slice());
             if got_sha != expected_sha {
                 return Err(format!(
                     "attachment {filename:?} sha256 {got_sha} ≠ expected {expected_sha}"
@@ -280,7 +292,7 @@ fn unlock_one(path: &Path) -> Result<(), String> {
                     vault.binaries.len()
                 ));
             };
-            let got_sha = format!("{:x}", Sha256::digest(&bin.data));
+            let got_sha = hex_encode(Sha256::digest(&bin.data).as_slice());
             if got_sha != expected_sha {
                 return Err(format!(
                     "attachment {filename:?} sha256 {got_sha} ≠ expected {expected_sha}"

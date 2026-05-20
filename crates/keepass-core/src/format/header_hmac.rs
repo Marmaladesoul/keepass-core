@@ -29,7 +29,7 @@
 //!
 //! This module verifies both. Compared in constant time.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -83,7 +83,7 @@ pub fn compute_header_hash(header_bytes: &[u8]) -> [u8; 32] {
 pub fn compute_header_hmac(header_bytes: &[u8], hmac_base: &HmacBaseKey) -> [u8; 32] {
     let key = per_block_hmac_key(hmac_base, HEADER_HMAC_BLOCK_INDEX);
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+        <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(header_bytes);
     let digest = mac.finalize().into_bytes();
     let mut out = [0u8; 32];
@@ -147,7 +147,7 @@ pub fn verify_header_hmac(
 ) -> Result<(), HeaderAuthError> {
     let key = per_block_hmac_key(hmac_base, HEADER_HMAC_BLOCK_INDEX);
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+        <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(header_bytes);
     let computed = mac.finalize().into_bytes();
 
@@ -194,7 +194,7 @@ mod tests {
     }
 
     fn hmac_tag(key: &[u8], data: &[u8]) -> [u8; 32] {
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(key).unwrap();
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(key).unwrap();
         mac.update(data);
         let digest = mac.finalize().into_bytes();
         let mut out = [0u8; 32];
