@@ -5,7 +5,7 @@
   "generated_by": "tests/fixtures/generate.py",
   "group_count": 3,
   "key_file": null,
-  "master_password": "test-recycle-102",
+  "master_password": "tëst pässwörd 🔑/\\",
   "recycle_bin_entries": [
     "Standalone Entry"
   ],

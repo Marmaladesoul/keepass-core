@@ -33,7 +33,7 @@ fn fixture_path() -> PathBuf {
         .join("tests/fixtures/pykeepass/unknown-xml.kdbx")
 }
 
-const FIXTURE_PASSWORD: &str = "test-unknown-106";
+const FIXTURE_PASSWORD: &str = "tëst pässwörd 🔑/\\";
 
 fn open_fixture() -> Kdbx<Unlocked> {
     let path = fixture_path();

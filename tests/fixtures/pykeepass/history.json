@@ -14,6 +14,6 @@
   "format": "KDBX4",
   "generated_by": "tests/fixtures/generate.py",
   "key_file": null,
-  "master_password": "test-hist-101",
+  "master_password": "tëst pässwörd 🔑/\\",
   "source": "pykeepass"
 }

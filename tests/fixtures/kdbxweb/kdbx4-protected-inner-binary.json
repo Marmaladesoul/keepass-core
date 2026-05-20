@@ -15,6 +15,6 @@
   "generator": "KdbxWeb",
   "group_count": 2,
   "key_file": null,
-  "master_password": "test-protected-bin-001",
+  "master_password": "tëst pässwörd 🔑/\\",
   "source": "kdbxweb (node)"
 }

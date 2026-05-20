@@ -4,7 +4,7 @@
   "format": "KDBX4",
   "generated_by": "tests/fixtures/generate.py",
   "key_file": null,
-  "master_password": "test-unknown-106",
+  "master_password": "tëst pässwörd 🔑/\\",
   "source": "pykeepass+lxml",
   "unknown_xml": {
     "entries": [

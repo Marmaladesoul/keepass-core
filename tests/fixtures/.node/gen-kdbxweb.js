@@ -18,6 +18,9 @@ const crypto = require('crypto');
 const argon2 = require('argon2');
 const kdbxweb = require('kdbxweb');
 
+// Common master password — shared with the Python generator.
+const COMMON_PASSWORD = 'tëst pässwörd 🔑/\\';
+
 // -----------------------------------------------------------------------------
 // Argon2 adapter — kdbxweb calls a configurable function; we delegate to the
 // native `argon2` npm package. kdbxweb's type IDs: 0 = Argon2d, 2 = Argon2id.
@@ -88,7 +91,7 @@ function sha256Hex(buf) {
 
 async function genKeewebBasic() {
   const name = 'kdbx4-basic';
-  const pw = 'test-keeweb-201';
+  const pw = COMMON_PASSWORD;
 
   const cred = new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(pw));
   const db = kdbxweb.Kdbx.create(cred, 'kdbxweb Basic Fixture');
@@ -139,7 +142,7 @@ async function genKeewebBasic() {
 
 async function genKeewebAttachments() {
   const name = 'kdbx4-attachments';
-  const pw = 'test-keeweb-202';
+  const pw = COMMON_PASSWORD;
 
   const cred = new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(pw));
   const db = kdbxweb.Kdbx.create(cred, 'kdbxweb Attachments Fixture');
@@ -201,7 +204,7 @@ async function genKeewebAttachments() {
 
 async function genKeewebChaCha20() {
   const name = 'kdbx4-chacha20';
-  const pw = 'test-keeweb-203';
+  const pw = COMMON_PASSWORD;
 
   const cred = new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(pw));
   const db = kdbxweb.Kdbx.create(cred, 'kdbxweb ChaCha20 Fixture');
@@ -260,7 +263,7 @@ async function genKeewebArgon2dP8() {
   // spurious "wrong key" on real-world Argon2d/P=8 files. This fixture is
   // an independently-produced (kdbxweb → npm `argon2`) regression guard.
   const name = 'kdbx4-argon2d-p8';
-  const pw = 'test-kdbxweb-argon2d-p8-204';
+  const pw = COMMON_PASSWORD;
 
   const cred = new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(pw));
   const db = kdbxweb.Kdbx.create(cred, 'kdbxweb Argon2d P=8 Fixture');
