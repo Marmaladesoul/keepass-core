@@ -93,8 +93,8 @@ pub fn read_hmac_block_stream(
 
         // Derive the per-block key and verify.
         let key = per_block_hmac_key(hmac_base, block_index);
-        let mut mac =
-            <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&key)
+            .expect("HMAC-SHA-256 accepts any key length");
         mac.update(&block_index.to_le_bytes());
         mac.update(&size.to_le_bytes());
         mac.update(data);
@@ -160,8 +160,8 @@ pub fn write_hmac_block_stream(
     for chunk in payload.chunks(block_size) {
         let size = u32::try_from(chunk.len()).expect("chunks are bounded by block_size ≤ u32::MAX");
         let key = per_block_hmac_key(hmac_base, block_index);
-        let mut mac =
-            <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&key)
+            .expect("HMAC-SHA-256 accepts any key length");
         mac.update(&block_index.to_le_bytes());
         mac.update(&size.to_le_bytes());
         mac.update(chunk);
