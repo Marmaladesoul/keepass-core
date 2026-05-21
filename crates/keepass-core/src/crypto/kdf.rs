@@ -210,6 +210,14 @@ mod tests {
         }
     }
 
+    // Tests below that actually run a KDF cycle (AES-KDF rounds or
+    // Argon2 memory-hard derivation) are skipped under Miri: the
+    // interpreter slows crypto primitives by ~100×, pushing each test
+    // well past the CI job timeout. The unsafe inside `aes`/`argon2` is
+    // already exercised by the lighter-weight cipher tests; rerunning
+    // it via KDF adds no Miri signal, only minutes.
+
+    #[cfg_attr(miri, ignore = "AES-KDF rounds are too slow under Miri")]
     #[test]
     fn aes_kdf_is_deterministic() {
         let composite = CompositeKey::from_password(b"hello");
@@ -222,6 +230,7 @@ mod tests {
         assert_eq!(a.as_bytes(), b.as_bytes());
     }
 
+    #[cfg_attr(miri, ignore = "AES-KDF rounds are too slow under Miri")]
     #[test]
     fn aes_kdf_different_rounds_yield_different_keys() {
         let composite = CompositeKey::from_password(b"hello");
@@ -244,6 +253,7 @@ mod tests {
         assert_ne!(k1.as_bytes(), k2.as_bytes());
     }
 
+    #[cfg_attr(miri, ignore = "AES-KDF rounds are too slow under Miri")]
     #[test]
     fn aes_kdf_different_seeds_yield_different_keys() {
         let composite = CompositeKey::from_password(b"hello");
@@ -305,6 +315,7 @@ mod tests {
         ));
     }
 
+    #[cfg_attr(miri, ignore = "Argon2 memory-hard KDF is too slow under Miri")]
     #[test]
     fn argon2d_is_deterministic() {
         let composite = CompositeKey::from_password(b"hello");
@@ -314,6 +325,7 @@ mod tests {
         assert_eq!(a.as_bytes(), b.as_bytes());
     }
 
+    #[cfg_attr(miri, ignore = "Argon2 memory-hard KDF is too slow under Miri")]
     #[test]
     fn argon2id_is_deterministic() {
         let composite = CompositeKey::from_password(b"hello");
@@ -323,6 +335,7 @@ mod tests {
         assert_eq!(a.as_bytes(), b.as_bytes());
     }
 
+    #[cfg_attr(miri, ignore = "Argon2 memory-hard KDF is too slow under Miri")]
     #[test]
     fn argon2d_and_argon2id_produce_different_outputs() {
         let composite = CompositeKey::from_password(b"hello");
@@ -333,6 +346,7 @@ mod tests {
         assert_ne!(d.as_bytes(), id.as_bytes());
     }
 
+    #[cfg_attr(miri, ignore = "Argon2 memory-hard KDF is too slow under Miri")]
     #[test]
     fn argon2_different_salts_yield_different_keys() {
         let composite = CompositeKey::from_password(b"hello");
@@ -349,6 +363,7 @@ mod tests {
         assert_ne!(k1.as_bytes(), k2.as_bytes());
     }
 
+    #[cfg_attr(miri, ignore = "Argon2 memory-hard KDF is too slow under Miri")]
     #[test]
     fn argon2_output_is_32_bytes() {
         let composite = CompositeKey::from_password(b"hello");
@@ -367,6 +382,7 @@ mod tests {
     ///
     /// We use `from_raw_bytes` to bypass the SHA chain and feed argon2 a
     /// known 32-byte "password".
+    #[cfg_attr(miri, ignore = "Argon2 memory-hard KDF is too slow under Miri")]
     #[test]
     fn argon2id_reference_vector() {
         let raw_password = [
@@ -403,6 +419,7 @@ mod tests {
         assert_eq!(k.as_bytes(), k2.as_bytes());
     }
 
+    #[cfg_attr(miri, ignore = "Argon2 memory-hard KDF is too slow under Miri")]
     #[test]
     fn composite_key_is_unchanged_after_kdf() {
         // KDF should take the composite key by reference and not mutate it.
