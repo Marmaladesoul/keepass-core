@@ -79,6 +79,13 @@ relevant — e.g. §4.8.7 on error-collapse discipline.
 
 ### Don'ts
 
+- Don't propose adding Miri to CI without a specific bug class in
+  mind that the existing test/clippy/cargo-deny stack can't catch.
+  We tried it (2026-05): workspace forbids `unsafe_code`, RustCrypto
+  deps are already Miri-tested upstream, and the interpreter is so
+  slow that every crypto-touching test had to be gated or it'd hit
+  the 60-min CI cap. Net signal: zero. Net cost: rolling test
+  exclusions every time a new module lands. Killed it.
 - Don't re-invent a primitive that already lives in `crypto::` or
   `format::` — wire what's there.
 - Don't commit anything from `_design/` or any vault / keyfile /
