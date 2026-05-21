@@ -33,6 +33,23 @@ use thiserror::Error;
 
 use super::FormatError;
 
+/// Hard cap on a single block's declared `size` field, in bytes.
+///
+/// The on-disk writer defaults to a [`DEFAULT_BLOCK_SIZE`] of 1 MiB and
+/// every known KeePass-family writer emits blocks in that ballpark.
+/// 64 MiB is two orders of magnitude past the natural ceiling, generous
+/// enough to accept any plausible legit writer while rejecting a
+/// hostile `size = u32::MAX` declaration before it reaches
+/// [`Vec::extend_from_slice`].
+///
+/// The cast `size as usize` is safe on every supported target
+/// (both 64-bit and 32-bit `usize` are at least 32 bits wide), so the
+/// hazard here isn't truncation — it's a more legible failure mode.
+/// Without this check the same input still fails, but as a generic
+/// [`HashedBlockError::Truncated`]; with it, the caller learns the
+/// stream claimed a block larger than this implementation will accept.
+pub const MAX_BLOCK_BYTES: usize = 64 * 1024 * 1024;
+
 /// Decode a KDBX3 `HashedBlockStream` into the concatenation of its
 /// `data` segments.
 ///
@@ -74,6 +91,19 @@ pub fn read_hashed_block_stream(input: &[u8]) -> Result<Vec<u8>, HashedBlockErro
             return Err(HashedBlockError::BlockIndexOutOfOrder {
                 expected: expected_index,
                 got: block_index,
+            });
+        }
+
+        // Bound the declared per-block size before we hand it to the
+        // reader. Bytes past `MAX_BLOCK_BYTES` are not something any
+        // legitimate KeePass writer emits; an attacker-controlled
+        // `size = u32::MAX` would otherwise be reported as a generic
+        // truncation only after `read_bytes` walked the rest of the
+        // input.
+        if size as usize > MAX_BLOCK_BYTES {
+            return Err(HashedBlockError::BlockTooLarge {
+                size,
+                max: MAX_BLOCK_BYTES,
             });
         }
 
@@ -213,6 +243,18 @@ pub enum HashedBlockError {
     /// [`write_hashed_block_stream`] was called with a zero block size.
     #[error("hashed-block stream writer requires a non-zero block size")]
     BlockSizeZero,
+
+    /// A block declared a `size` field exceeding [`MAX_BLOCK_BYTES`].
+    /// No legitimate KeePass writer emits blocks anywhere near this
+    /// cap; this guards against a hostile `size = u32::MAX` declaration
+    /// in an attacker-controlled file.
+    #[error("hashed-block declared size {size} exceeds maximum {max}")]
+    BlockTooLarge {
+        /// The declared block size from the on-disk stream.
+        size: u32,
+        /// The compiled-in maximum ([`MAX_BLOCK_BYTES`]).
+        max: usize,
+    },
 }
 
 impl From<HashedBlockError> for FormatError {
@@ -226,6 +268,7 @@ impl From<HashedBlockError> for FormatError {
             HashedBlockError::HashMismatch { .. } => "hashed-block hash mismatch",
             HashedBlockError::MalformedEndMarker => "hashed-block end marker malformed",
             HashedBlockError::BlockSizeZero => "hashed-block writer given zero block size",
+            HashedBlockError::BlockTooLarge { .. } => "hashed-block declared size too large",
         })
     }
 }
@@ -471,5 +514,67 @@ mod tests {
                 HashedBlockError::HashMismatch { .. }
             ));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Block-size bound (defense-in-depth against hostile size declarations)
+    // -----------------------------------------------------------------------
+
+    /// Hand-assemble a header that declares `claimed_size` without supplying
+    /// any data — exactly the shape an attacker would use to provoke a giant
+    /// allocation. We don't bother computing a real hash; the size check
+    /// runs before the hash is even consulted.
+    fn header_with_size(claimed_size: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(40);
+        out.extend_from_slice(&0u32.to_le_bytes()); // block_index = 0
+        out.extend_from_slice(&[0u8; 32]); // hash (unchecked at this stage)
+        out.extend_from_slice(&claimed_size.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn rejects_block_size_at_u32_max() {
+        let stream = header_with_size(u32::MAX);
+        let err = read_hashed_block_stream(&stream).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                HashedBlockError::BlockTooLarge {
+                    size: u32::MAX,
+                    max: MAX_BLOCK_BYTES,
+                }
+            ),
+            "expected BlockTooLarge; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn rejects_block_size_just_over_cap() {
+        // The cap is checked with `>`, so cap + 1 must reject and cap itself
+        // must be accepted-up-to-the-data-read (truncation, since we don't
+        // supply data — but specifically not BlockTooLarge).
+        let just_over = u32::try_from(MAX_BLOCK_BYTES + 1)
+            .expect("MAX_BLOCK_BYTES + 1 fits in u32 for any sensible cap");
+        let stream = header_with_size(just_over);
+        let err = read_hashed_block_stream(&stream).unwrap_err();
+        assert!(
+            matches!(err, HashedBlockError::BlockTooLarge { .. }),
+            "expected BlockTooLarge; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn block_size_exactly_at_cap_is_not_block_too_large() {
+        // At the boundary the size check must *not* reject — the cap is
+        // inclusive — so the failure mode falls back to Truncated (we
+        // declared the size but didn't supply the bytes).
+        let exactly = u32::try_from(MAX_BLOCK_BYTES)
+            .expect("MAX_BLOCK_BYTES fits in u32 for any sensible cap");
+        let stream = header_with_size(exactly);
+        let err = read_hashed_block_stream(&stream).unwrap_err();
+        assert!(
+            matches!(err, HashedBlockError::Truncated),
+            "expected Truncated; got {err:?}",
+        );
     }
 }
