@@ -68,10 +68,18 @@ jobs:
     # entire 6h budget.
     timeout-minutes: 60
     env:
+      # -Zmiri-tree-borrows: use the Tree Borrows aliasing model instead
+      #   of Miri's default Stacked Borrows. SB is strict to the point of
+      #   rejecting code that's sound in practice — notably the RustCrypto
+      #   `inout` crate, which our AES path goes through. TB is the newer
+      #   model designed specifically to be more permissive while still
+      #   catching real UB, and is the direction Rust's aliasing model is
+      #   heading. Without this flag the first run failed on a probable
+      #   false positive in inout v0.2.2.
       # -Zmiri-strict-provenance: stricter pointer-provenance checking.
       # -Zmiri-disable-isolation: lets tests touch the clock / RNG. Keep
       #   this off-by-default; enable per-test if a crypto dep needs it.
-      MIRIFLAGS: "-Zmiri-strict-provenance"
+      MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-strict-provenance"
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
