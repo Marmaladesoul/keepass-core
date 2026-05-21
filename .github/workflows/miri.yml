@@ -1,0 +1,91 @@
+# Nightly Miri run — detects undefined behaviour in the workspace and its
+# unsafe dependencies (crypto, alloc-heavy parsers) under an interpreter
+# that enforces the Rust aliasing model and exposes the kind of UB that
+# normal builds happily miscompile.
+#
+# Deliberately not gating PRs: Miri is ~10–50× slower than native tests
+# and many crypto deps use FFI/SIMD it can't execute. A nightly schedule
+# with a "skip if nothing changed in the last day" guard keeps signal
+# without spending minutes on idle days.
+#
+# Honest expectations: the workspace forbids `unsafe_code`, so Miri only
+# exercises UB *through* dependencies (RustCrypto et al), which are
+# already heavily audited and Miri-tested upstream. The realistic hit
+# rate is low. If after a month or so this job has been quietly green,
+# killing it is a sensible call — re-add it when we grow new internal
+# unsafe or take on a less-scrutinised dep.
+
+name: Miri
+
+on:
+  schedule:
+    # 03:15 UTC daily (13:15 AEST). Offset from the 02:30 fuzz cron so
+    # they don't fight for the same runner pool.
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: miri-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Cheap gate job: exits early on scheduled runs if no commits landed in
+  # the last 25 hours. Manual `workflow_dispatch` always runs.
+  changes:
+    name: check recent activity
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "manual dispatch — running"
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          recent=$(git log --since='25 hours ago' --oneline)
+          if [ -n "$recent" ]; then
+            echo "commits in the last 25h — running"
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no commits in the last 25h — skipping"
+            echo "should-run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  miri:
+    name: cargo miri test
+    needs: changes
+    if: needs.changes.outputs.should-run == 'true'
+    runs-on: ubuntu-latest
+    # Generous timeout — Miri is slow, but a runaway shouldn't burn an
+    # entire 6h budget.
+    timeout-minutes: 60
+    env:
+      # -Zmiri-strict-provenance: stricter pointer-provenance checking.
+      # -Zmiri-disable-isolation: lets tests touch the clock / RNG. Keep
+      #   this off-by-default; enable per-test if a crypto dep needs it.
+      MIRIFLAGS: "-Zmiri-strict-provenance"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri,rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Miri uses its own target dir under target/miri; cache it
+          # separately from the regular CI cache to avoid evictions.
+          key: miri
+      - name: cargo miri setup
+        run: cargo miri setup
+      - name: cargo miri test (keepass-core lib)
+        # Scoped to --lib for keepass-core only as a starting point.
+        # Widen to --workspace / integration tests once we know which
+        # dependency calls trip the FFI/SIMD limits.
+        run: cargo miri test -p keepass-core --lib --no-fail-fast
