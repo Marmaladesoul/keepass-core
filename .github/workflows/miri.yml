@@ -7,6 +7,13 @@
 # and many crypto deps use FFI/SIMD it can't execute. A nightly schedule
 # with a "skip if nothing changed in the last day" guard keeps signal
 # without spending minutes on idle days.
+#
+# Honest expectations: the workspace forbids `unsafe_code`, so Miri only
+# exercises UB *through* dependencies (RustCrypto et al), which are
+# already heavily audited and Miri-tested upstream. The realistic hit
+# rate is low. If after a month or so this job has been quietly green,
+# killing it is a sensible call — re-add it when we grow new internal
+# unsafe or take on a less-scrutinised dep.
 
 name: Miri
 
