@@ -290,14 +290,21 @@ fn decode_argon2(
         });
     }
 
-    // M = memory in bytes (u64), in [8 KiB, 4 TiB).
+    // M = memory in bytes (u64).
     //
-    // Upper bound matches KeePassXC's `kibibytes < (1ULL << 32)` check
-    // in `Argon2Kdf::setMemory` — i.e. the memory must fit in a u32
-    // when expressed in KiB, which is also the type the `argon2` crate
-    // accepts. Without this cap, a hostile file requesting e.g. 100 GiB
-    // would cause the unlock attempt to OOM-kill the host before any
-    // password check could run.
+    // Lower bound: 8 KiB (Argon2's own minimum, also KeePassXC's floor).
+    // Upper bound: the memory-in-KiB value must fit in a u32, because
+    // the RustCrypto `argon2` crate (and KeePassXC's Botan backend)
+    // both take `u32` KiB. Express the cap in *KiB space* so the
+    // bytes→KiB→u32 conversion the KDF layer performs (see
+    // `crypto::kdf::derive_argon2`, `try_from(memory_bytes / 1024)`)
+    // cannot truncate past it. Expressing the cap directly in bytes
+    // (e.g. `1u64 << 42`) is correct today but fragile under future
+    // edits — bumping the bytes constant by even 1024 silently widens
+    // the accepted KiB range past `u32::MAX`.
+    //
+    // Without this cap, a hostile file requesting e.g. 100 GiB would
+    // OOM-kill the host before any password check could run.
     let memory_bytes = dict.get_u64("M").ok_or(KdfParamsError::Missing("M"))?;
     if memory_bytes < 8 * 1024 {
         return Err(KdfParamsError::OutOfRange {
@@ -305,10 +312,10 @@ fn decode_argon2(
             detail: "memory must be ≥ 8 KiB (8192 bytes)",
         });
     }
-    if memory_bytes >= 1u64 << 42 {
+    if memory_bytes / 1024 > u64::from(u32::MAX) {
         return Err(KdfParamsError::OutOfRange {
             key: "M",
-            detail: "memory in KiB must fit in a u32 (< 4 TiB)",
+            detail: "memory in KiB must fit in a u32 (≤ u32::MAX KiB)",
         });
     }
 
@@ -679,6 +686,83 @@ mod tests {
             ("S", VarValue::Bytes(vec![0xAB; 16])),
             ("I", VarValue::U64(2)),
             ("M", VarValue::U64(1u64 << 42)), // = 4 TiB, first rejected value
+            ("P", VarValue::U32(1)),
+            ("V", VarValue::U32(0x13)),
+        ]);
+        assert!(matches!(
+            KdfParams::from_var_dictionary(&dict).unwrap_err(),
+            KdfParamsError::OutOfRange { key: "M", .. }
+        ));
+    }
+
+    /// Boundary: the largest accepted value is `u32::MAX` KiB, i.e.
+    /// `u64::from(u32::MAX) * 1024` bytes. Below that the cap accepts;
+    /// above it the cap rejects. Pin both sides.
+    #[test]
+    fn accepts_argon2_memory_at_exactly_u32_max_kib() {
+        // u32::MAX KiB expressed in bytes — the largest legal value.
+        let bytes_at_cap = u64::from(u32::MAX) * 1024;
+        let dict = dict_from([
+            ("$UUID", VarValue::Bytes(argon2id_uuid())),
+            ("S", VarValue::Bytes(vec![0xAB; 16])),
+            ("I", VarValue::U64(2)),
+            ("M", VarValue::U64(bytes_at_cap)),
+            ("P", VarValue::U32(1)),
+            ("V", VarValue::U32(0x13)),
+        ]);
+        let parsed = KdfParams::from_var_dictionary(&dict).expect("at-cap should parse");
+        match parsed {
+            KdfParams::Argon2 { memory_bytes, .. } => {
+                assert_eq!(memory_bytes, bytes_at_cap);
+            }
+            other => panic!("expected Argon2, got {other:?}"),
+        }
+    }
+
+    /// Regression guard for the bytes→KiB→u32 conversion in
+    /// `crypto::kdf::derive_argon2`. The cap is expressed in KiB-space
+    /// precisely so that `memory_bytes / 1024 ≤ u32::MAX` is true for
+    /// every accepted value — so the `try_from(memory_bytes / 1024)`
+    /// inside the KDF cannot fail for anything parsed past this cap.
+    #[test]
+    fn at_cap_memory_kib_fits_in_u32() {
+        let bytes_at_cap = u64::from(u32::MAX) * 1024;
+        let kib = bytes_at_cap / 1024;
+        u32::try_from(kib).expect("at-cap KiB must fit in u32 by construction");
+    }
+
+    /// Boundary on the reject side: the smallest *rejected* value is
+    /// `u32::MAX KiB + 1 KiB` = `(u32::MAX as u64 + 1) * 1024` bytes.
+    /// Anywhere in `[bytes_at_cap + 1, bytes_at_cap + 1023]` still
+    /// integer-divides to `u32::MAX` and is accepted by design (the
+    /// excess bytes don't form a full KiB and get rounded down by the
+    /// `argon2` crate's KiB-granular memory model). The first value
+    /// that *increases* the resulting KiB is `bytes_at_cap + 1024`.
+    #[test]
+    fn rejects_argon2_memory_one_kib_above_cap() {
+        let bytes_above = u64::from(u32::MAX) * 1024 + 1024;
+        let dict = dict_from([
+            ("$UUID", VarValue::Bytes(argon2id_uuid())),
+            ("S", VarValue::Bytes(vec![0xAB; 16])),
+            ("I", VarValue::U64(2)),
+            ("M", VarValue::U64(bytes_above)),
+            ("P", VarValue::U32(1)),
+            ("V", VarValue::U32(0x13)),
+        ]);
+        assert!(matches!(
+            KdfParams::from_var_dictionary(&dict).unwrap_err(),
+            KdfParamsError::OutOfRange { key: "M", .. }
+        ));
+    }
+
+    /// `u64::MAX` is the most extreme hostile input. Pin it.
+    #[test]
+    fn rejects_argon2_memory_at_u64_max() {
+        let dict = dict_from([
+            ("$UUID", VarValue::Bytes(argon2id_uuid())),
+            ("S", VarValue::Bytes(vec![0xAB; 16])),
+            ("I", VarValue::U64(2)),
+            ("M", VarValue::U64(u64::MAX)),
             ("P", VarValue::U32(1)),
             ("V", VarValue::U32(0x13)),
         ]);
