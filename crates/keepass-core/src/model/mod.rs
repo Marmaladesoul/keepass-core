@@ -231,7 +231,7 @@ pub struct Timestamps {
 /// Fields beyond the "string-key/string-value" pairs that appear in every
 /// KeePass entry (Title, UserName, Password, URL, Notes) are carried in
 /// [`Self::custom_fields`] keyed by their `<Key>` name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Entry {
     /// Unique identifier.
@@ -365,6 +365,43 @@ impl Entry {
     }
 }
 
+/// Manual `Debug` impl: redact the entry's `password` field unconditionally.
+///
+/// A derived `Debug` would dump plaintext passwords into any panic message
+/// or log line that touches an `Entry`. The `password` field is *named for*
+/// credential material — there is no per-entry "this isn't really a password"
+/// signal at this layer, so the safest discipline is to redact every time.
+/// `custom_fields` recurses through [`CustomField`]'s own redacting impl;
+/// `history` recurses through this impl (history snapshots never nest, so
+/// recursion terminates after one level).
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entry")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("url", &self.url)
+            .field("notes", &self.notes)
+            .field("custom_fields", &self.custom_fields)
+            .field("tags", &self.tags)
+            .field("history", &self.history)
+            .field("attachments", &self.attachments)
+            .field("foreground_color", &self.foreground_color)
+            .field("background_color", &self.background_color)
+            .field("override_url", &self.override_url)
+            .field("custom_icon_uuid", &self.custom_icon_uuid)
+            .field("icon_id", &self.icon_id)
+            .field("custom_data", &self.custom_data)
+            .field("quality_check", &self.quality_check)
+            .field("previous_parent_group", &self.previous_parent_group)
+            .field("auto_type", &self.auto_type)
+            .field("times", &self.times)
+            .field("unknown_xml", &self.unknown_xml)
+            .finish()
+    }
+}
+
 /// Auto-type configuration on an [`Entry`] — the macro framework
 /// KeePass uses to type credentials into a target window.
 ///
@@ -474,7 +511,7 @@ impl Attachment {
 }
 
 /// One custom string field on an [`Entry`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CustomField {
     /// The `<Key>` name.
@@ -501,6 +538,28 @@ impl CustomField {
             value: value.into(),
             protected,
         }
+    }
+}
+
+/// Manual `Debug` impl: redact `value` whenever `protected` is set.
+///
+/// The `protected` flag is the entry's own declaration that the field
+/// carries credential material; a derived `Debug` would surface that
+/// material into logs and panic messages. Non-protected values are shown
+/// as-is — KeePass's own UI surfaces them in cleartext, so they're treated
+/// as user-visible metadata at this layer.
+impl std::fmt::Debug for CustomField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value: &dyn std::fmt::Debug = if self.protected {
+            &"[REDACTED]"
+        } else {
+            &self.value
+        };
+        f.debug_struct("CustomField")
+            .field("key", &self.key)
+            .field("value", value)
+            .field("protected", &self.protected)
+            .finish()
     }
 }
 
@@ -1315,5 +1374,104 @@ mod tests {
         let when = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let t2 = DeletedObject::new(id, Some(when));
         assert_eq!(t2.deleted_at, Some(when));
+    }
+
+    // -----------------------------------------------------------------------
+    // Debug-redaction tests (§4.8.7 — never leak credential material into
+    // log/panic output, mirroring `PortableEntry`'s manual `Debug` impl).
+    // -----------------------------------------------------------------------
+
+    const SECRET: &str = "hunter2-CORRECT-HORSE-BATTERY-STAPLE";
+
+    #[test]
+    fn entry_debug_redacts_password() {
+        let mut e = Entry::empty(EntryId(Uuid::from_u128(1)));
+        e.password = SECRET.to_owned();
+        let rendered = format!("{e:?}");
+        assert!(
+            !rendered.contains(SECRET),
+            "Entry Debug must never surface the password field; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED]"),
+            "Entry Debug must explicitly mark the redaction; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn entry_debug_redacts_password_in_history_snapshots() {
+        let mut e = Entry::empty(EntryId(Uuid::from_u128(2)));
+        let mut prior = Entry::empty(EntryId(Uuid::from_u128(3)));
+        prior.password = SECRET.to_owned();
+        e.history.push(prior);
+        let rendered = format!("{e:?}");
+        assert!(
+            !rendered.contains(SECRET),
+            "history snapshots must redact their passwords too; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn custom_field_debug_redacts_protected_value() {
+        let f = CustomField::new("OTPSecret", SECRET, true);
+        let rendered = format!("{f:?}");
+        assert!(
+            !rendered.contains(SECRET),
+            "protected CustomField must redact its value; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED]"),
+            "protected CustomField must mark the redaction; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn custom_field_debug_shows_non_protected_value() {
+        let f = CustomField::new("Department", "Engineering", false);
+        let rendered = format!("{f:?}");
+        assert!(
+            rendered.contains("Engineering"),
+            "non-protected CustomField values are user-visible metadata and should debug as-is; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn entry_debug_redacts_protected_custom_field_via_cascade() {
+        let mut e = Entry::empty(EntryId(Uuid::from_u128(4)));
+        e.custom_fields
+            .push(CustomField::new("OTPSecret", SECRET, true));
+        let rendered = format!("{e:?}");
+        assert!(
+            !rendered.contains(SECRET),
+            "Entry Debug must transitively redact protected custom fields via CustomField's impl; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn group_debug_redacts_nested_entry_password() {
+        let mut g = group_with_name("Personal");
+        let mut e = Entry::empty(EntryId(Uuid::from_u128(5)));
+        e.password = SECRET.to_owned();
+        g.entries.push(e);
+        let rendered = format!("{g:?}");
+        assert!(
+            !rendered.contains(SECRET),
+            "Group derives Debug, but its entries must use the redacted Entry impl; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn vault_debug_redacts_deeply_nested_entry_password() {
+        let mut v = Vault::empty(GroupId(Uuid::from_u128(6)));
+        let mut child = group_with_name("Banking");
+        let mut e = Entry::empty(EntryId(Uuid::from_u128(7)));
+        e.password = SECRET.to_owned();
+        child.entries.push(e);
+        v.root.groups.push(child);
+        let rendered = format!("{v:?}");
+        assert!(
+            !rendered.contains(SECRET),
+            "Vault Debug must redact passwords at any nesting depth; got: {rendered}"
+        );
     }
 }
