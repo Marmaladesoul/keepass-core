@@ -604,6 +604,7 @@ dependencies = [
  "flate2",
  "getrandom 0.4.2",
  "hmac",
+ "proptest",
  "quick-xml",
  "salsa20",
  "secrecy",

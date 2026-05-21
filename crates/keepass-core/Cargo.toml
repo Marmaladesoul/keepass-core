@@ -64,8 +64,9 @@ serde_json = "1"
 # Snapshot testing for XML round-trips.
 # insta = { version = "1", features = ["yaml"] }
 
-# Property-based testing for round-trip invariants.
-# proptest = "1"
+# Property-based testing for round-trip invariants. Matches the dep in
+# keepass-merge so both crates' proptest suites resolve to the same version.
+proptest = "1"
 
 # Benchmarking.
 # criterion = { version = "0.5", features = ["html_reports"] }
