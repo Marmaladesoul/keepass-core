@@ -58,6 +58,17 @@ type HmacSha256 = Hmac<Sha256>;
 /// verify the header HMAC can reuse the same constant.
 pub const HEADER_HMAC_BLOCK_INDEX: u64 = u64::MAX;
 
+/// Hard cap on a single block's declared `size` field, in bytes.
+///
+/// Mirrors the cap in `hashed_block_stream`. The on-disk writer
+/// defaults to a [`DEFAULT_BLOCK_SIZE`] of 1 MiB and every known
+/// KeePass-family writer emits blocks in that ballpark. 64 MiB is two
+/// orders of magnitude past the natural ceiling, generous enough to
+/// accept any plausible legit writer while rejecting a hostile
+/// `size = u32::MAX` declaration before it reaches
+/// [`Vec::extend_from_slice`].
+pub const MAX_BLOCK_BYTES: usize = 64 * 1024 * 1024;
+
 /// Decode a KDBX4 `HmacBlockStream` into the concatenation of its
 /// `data` segments.
 ///
@@ -89,6 +100,17 @@ pub fn read_hmac_block_stream(
     loop {
         let declared_tag = read_bytes(&mut cursor, 32)?;
         let size = read_u32_le(&mut cursor)?;
+
+        // Bound the declared per-block size before we hand it to the
+        // reader. Defense in depth against a hostile `size = u32::MAX`
+        // in attacker-controlled input.
+        if size as usize > MAX_BLOCK_BYTES {
+            return Err(HmacBlockError::BlockTooLarge {
+                size,
+                max: MAX_BLOCK_BYTES,
+            });
+        }
+
         let data = read_bytes(&mut cursor, size as usize)?;
 
         // Derive the per-block key and verify.
@@ -234,6 +256,18 @@ pub enum HmacBlockError {
     /// [`write_hmac_block_stream`] was called with a zero block size.
     #[error("HMAC block stream writer requires a non-zero block size")]
     BlockSizeZero,
+
+    /// A block declared a `size` field exceeding [`MAX_BLOCK_BYTES`].
+    /// No legitimate KeePass writer emits blocks anywhere near this
+    /// cap; this guards against a hostile `size = u32::MAX` declaration
+    /// in an attacker-controlled file.
+    #[error("HMAC-block declared size {size} exceeds maximum {max}")]
+    BlockTooLarge {
+        /// The declared block size from the on-disk stream.
+        size: u32,
+        /// The compiled-in maximum ([`MAX_BLOCK_BYTES`]).
+        max: usize,
+    },
 }
 
 impl From<HmacBlockError> for FormatError {
@@ -242,6 +276,7 @@ impl From<HmacBlockError> for FormatError {
             HmacBlockError::Truncated => "HMAC-block stream truncated",
             HmacBlockError::HmacMismatch { .. } => "HMAC-block tag mismatch",
             HmacBlockError::BlockSizeZero => "HMAC-block writer given zero block size",
+            HmacBlockError::BlockTooLarge { .. } => "HMAC-block declared size too large",
         })
     }
 }
@@ -488,5 +523,62 @@ mod tests {
         let stream_b_prefix_len = stream_b.len() - 36; // strip end marker
         victim[..stream_b_prefix_len].copy_from_slice(&stream_b[..stream_b_prefix_len]);
         assert!(read_hmac_block_stream(&victim, &base).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Block-size bound (defense-in-depth against hostile size declarations)
+    // -----------------------------------------------------------------------
+
+    /// Hand-assemble a header that declares `claimed_size` without supplying
+    /// any data. The size check runs before the HMAC verifier is consulted,
+    /// so we don't need a real tag.
+    fn header_with_size(claimed_size: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(36);
+        out.extend_from_slice(&[0u8; 32]); // tag (unchecked at this stage)
+        out.extend_from_slice(&claimed_size.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn rejects_block_size_at_u32_max() {
+        let base = fixed_base();
+        let stream = header_with_size(u32::MAX);
+        let err = read_hmac_block_stream(&stream, &base).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                HmacBlockError::BlockTooLarge {
+                    size: u32::MAX,
+                    max: MAX_BLOCK_BYTES,
+                }
+            ),
+            "expected BlockTooLarge; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn rejects_block_size_just_over_cap() {
+        let base = fixed_base();
+        let just_over = u32::try_from(MAX_BLOCK_BYTES + 1)
+            .expect("MAX_BLOCK_BYTES + 1 fits in u32 for any sensible cap");
+        let stream = header_with_size(just_over);
+        let err = read_hmac_block_stream(&stream, &base).unwrap_err();
+        assert!(
+            matches!(err, HmacBlockError::BlockTooLarge { .. }),
+            "expected BlockTooLarge; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn block_size_exactly_at_cap_is_not_block_too_large() {
+        let base = fixed_base();
+        let exactly = u32::try_from(MAX_BLOCK_BYTES)
+            .expect("MAX_BLOCK_BYTES fits in u32 for any sensible cap");
+        let stream = header_with_size(exactly);
+        let err = read_hmac_block_stream(&stream, &base).unwrap_err();
+        assert!(
+            matches!(err, HmacBlockError::Truncated),
+            "expected Truncated; got {err:?}",
+        );
     }
 }
