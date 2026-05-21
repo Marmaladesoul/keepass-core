@@ -33,9 +33,6 @@ jobs:
   fuzz:
     name: fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
-    # Placeholder — this job will be enabled once fuzz targets exist in
-    # fuzz/fuzz_targets/. Until then the step below is a no-op.
-    if: false
     strategy:
       fail-fast: false
       matrix:

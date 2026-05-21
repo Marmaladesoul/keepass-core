@@ -1,0 +1,44 @@
+[package]
+name = "keepass-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Standalone crate — see comment below. Empty [workspace] table tells
+# cargo this is its own root, not a member of the parent workspace.
+[workspace]
+
+# Standalone crate (deliberately not in the top-level workspace's
+# `members`): cargo-fuzz needs nightly + libFuzzer-specific flags
+# and a fuzz binary it can sanitise. Living outside the workspace
+# keeps stable `cargo build` / `cargo test` calls in the main
+# workspace free of libFuzzer noise.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+keepass-core = { path = "../crates/keepass-core" }
+
+# Suppress "unused manifest key" noise from cargo-fuzz's metadata
+# probe — the binaries below are what cargo-fuzz actually invokes.
+[[bin]]
+name = "header_parser"
+path = "fuzz_targets/header_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xml_parser"
+path = "fuzz_targets/xml_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block_reader"
+path = "fuzz_targets/block_reader.rs"
+test = false
+doc = false
+bench = false
