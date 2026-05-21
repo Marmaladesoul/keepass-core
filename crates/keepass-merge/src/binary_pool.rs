@@ -99,10 +99,19 @@ impl<'a> BinaryPoolRemap<'a> {
         if self.local_index.is_none() {
             let mut idx_map = HashMap::with_capacity(self.local_binaries.len());
             for (i, b) in self.local_binaries.iter().enumerate() {
+                // Indices that don't fit in `u32` aren't addressable on
+                // the KDBX wire (`<Binary Ref="N"/>` is a u32), so skip
+                // them rather than substitute `u32::MAX` and corrupt
+                // later lookups. Matches the existing
+                // skip-malformed-records posture documented on
+                // `rebind`.
+                let Some(idx_u32) = u32_from_usize(i) else {
+                    continue;
+                };
                 let k = (sha256(&b.data), b.protected);
                 // First occurrence wins; later identical entries (legal
                 // per KDBX, just refcount-redundant) keep their slot.
-                idx_map.entry(k).or_insert_with(|| u32_from_usize(i));
+                idx_map.entry(k).or_insert(idx_u32);
             }
             self.local_index = Some(idx_map);
         }
@@ -111,7 +120,13 @@ impl<'a> BinaryPoolRemap<'a> {
         let local_id = if let Some(&existing) = local_index.get(&key) {
             existing
         } else {
-            let new_idx = u32_from_usize(self.local_binaries.len());
+            // Same overflow posture: if `local_binaries.len()` won't fit
+            // in `u32`, we can't address the new slot on disk — refuse
+            // to push and skip this attachment. `?` propagates the
+            // `None` into `translate`'s caller, which leaves the
+            // attachment's ref unchanged (matching the documented
+            // skip-malformed posture on `rebind`).
+            let new_idx = u32_from_usize(self.local_binaries.len())?;
             self.local_binaries.push(remote_bin.clone());
             local_index.insert(key, new_idx);
             new_idx
@@ -127,16 +142,19 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-fn u32_from_usize(n: usize) -> u32 {
+fn u32_from_usize(n: usize) -> Option<u32> {
     // Binary-pool indices have to fit in `u32` because the on-disk
     // KDBX `<Binary Ref="N"/>` attribute is a `u32`. Pools approaching
-    // that size are not a realistic vault — this is a debug-time
-    // sanity check, not a hot path.
+    // that size are not a realistic vault, but the prior implementation
+    // substituted `u32::MAX` for any oversize index — silently corrupting
+    // every subsequent lookup that landed on the sentinel. Returning
+    // `Option<u32>` lets callers propagate the overflow into their
+    // existing skip-malformed-records flow instead.
     debug_assert!(
         u32::try_from(n).is_ok(),
         "binary-pool index exceeds u32::MAX — refusing to truncate",
     );
-    u32::try_from(n).unwrap_or(u32::MAX)
+    u32::try_from(n).ok()
 }
 
 #[cfg(test)]
@@ -224,5 +242,30 @@ mod tests {
         remap.rebind(&mut atts);
         assert_eq!(atts[0].ref_id, 0);
         assert_eq!(local.len(), 2, "no new append for content-dedup hit");
+    }
+
+    /// Regression guard for the previous silent `u32::MAX` fallback.
+    /// Now returns `Option<u32>` so the merge can skip an index that
+    /// can't be addressed on disk rather than corrupting later lookups
+    /// by routing them all to a sentinel slot.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn u32_from_usize_overflow_returns_none_in_release() {
+        // Only meaningful in release builds — debug builds intentionally
+        // panic via the `debug_assert!` so an overflow can't reach
+        // production silently. Release builds degrade safely to `None`.
+        let too_big = (u32::MAX as usize).saturating_add(1);
+        assert_eq!(super::u32_from_usize(too_big), None);
+    }
+
+    #[test]
+    fn u32_from_usize_accepts_in_range_values() {
+        assert_eq!(super::u32_from_usize(0), Some(0));
+        assert_eq!(super::u32_from_usize(42), Some(42));
+        assert_eq!(
+            super::u32_from_usize(u32::MAX as usize),
+            Some(u32::MAX),
+            "exactly at u32::MAX is the largest legal index",
+        );
     }
 }
