@@ -46,7 +46,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz
       - name: Run fuzz target
         run: |
           cargo fuzz run ${{ matrix.target }} \
