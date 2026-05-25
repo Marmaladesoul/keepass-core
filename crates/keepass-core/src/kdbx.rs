@@ -1059,8 +1059,13 @@ impl Kdbx<Unlocked> {
         // any staged attach intents out of the editor before its
         // borrow drops — they get applied against the Vault's
         // shared binaries pool after the &mut Entry borrow ends.
+        // Split-borrow: `entry` is &mut into `self.state.vault.root`;
+        // the binary pool is a sibling field of the same Vault. Rust
+        // allows holding both borrows simultaneously because they
+        // target disjoint fields.
+        let binaries: &[Binary] = &self.state.vault.binaries;
         let (result, pending) = {
-            let mut editor = EntryEditor::new(entry);
+            let mut editor = EntryEditor::new(entry, binaries);
             let r = f(&mut editor);
             let p = editor.take_pending_binary_ops();
             (r, p)

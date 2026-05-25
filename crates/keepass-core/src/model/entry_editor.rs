@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use uuid::Uuid;
 
-use super::{AutoType, CustomField, Entry};
+use super::{AutoType, Binary, CustomDataItem, CustomField, Entry};
 
 /// Attach intents staged inside an `edit_entry` closure that
 /// [`crate::kdbx::Kdbx::edit_entry`] applies to the shared
@@ -75,16 +75,23 @@ pub struct EntryEditor<'a> {
     /// Detaches don't go here — they touch only
     /// [`Entry::attachments`] and run in-place inside `detach`.
     binary_ops: PendingBinaryOps,
+    /// Read-only view of the vault's binary pool. Surfaced via
+    /// [`Self::binaries`] so callers performing advanced operations
+    /// (e.g., content-hashing a history record before deleting it)
+    /// can access the pool the entry's attachment `ref_id`s point at.
+    binaries: &'a [Binary],
 }
 
 impl<'a> EntryEditor<'a> {
     /// Crate-internal constructor. Called by
     /// [`crate::kdbx::Kdbx::edit_entry`] with a `&mut Entry` freshly
-    /// looked up under the target id.
-    pub(crate) fn new(inner: &'a mut Entry) -> Self {
+    /// looked up under the target id, plus a read-only borrow of the
+    /// vault's binary pool for advanced callers that need it.
+    pub(crate) fn new(inner: &'a mut Entry, binaries: &'a [Binary]) -> Self {
         Self {
             inner,
             binary_ops: PendingBinaryOps::default(),
+            binaries,
         }
     }
 
@@ -322,6 +329,66 @@ impl<'a> EntryEditor<'a> {
         n
     }
 
+    /// Read-only access to the history list. Useful when a caller
+    /// needs to inspect a snapshot's content before deciding whether
+    /// to remove it (e.g. tombstone-aware history pruning that
+    /// computes the snapshot's content hash before deletion).
+    #[must_use]
+    pub fn history(&self) -> &[Entry] {
+        &self.inner.history
+    }
+
+    // -----------------------------------------------------------------
+    // Custom data — opaque plugin / extension namespace.
+    // -----------------------------------------------------------------
+
+    /// Mutable access to the entry's `<CustomData>` collection. This
+    /// is the KDBX 4 extension namespace plugins write app-specific
+    /// data to (the canonical example: `KPXC_DECRYPTION_TIME_PREFERENCE`).
+    ///
+    /// Surfaced for callers that need to read or write extension
+    /// keys — most notably the `keepass-merge` tombstone mechanism
+    /// (`keys.history_tombstones.v1`). Standard-field setters above
+    /// remain the right choice for everything the type system knows
+    /// about; this accessor is for keys the library doesn't model
+    /// directly.
+    pub fn custom_data_mut(&mut self) -> &mut Vec<CustomDataItem> {
+        &mut self.inner.custom_data
+    }
+
+    // -----------------------------------------------------------------
+    // Vault-pool view for advanced callers.
+    // -----------------------------------------------------------------
+
+    /// Read-only view of the vault's binary pool. Surfaced so callers
+    /// that need to hash a history record (or any other entry-rooted
+    /// content) can dereference its attachment `ref_id`s. The pool is
+    /// the same one `Kdbx::edit_entry` consults when applying the
+    /// staged attach intents on closure return.
+    #[must_use]
+    pub fn binaries(&self) -> &[Binary] {
+        self.binaries
+    }
+
+    /// Direct mutable access to the underlying [`Entry`].
+    ///
+    /// This is an **advanced-use accessor** — the type-specific
+    /// setters above are preferred for any field they model. Direct
+    /// access is here for cross-crate helpers that operate on whole
+    /// entries (e.g.
+    /// `keepass_merge::add_history_tombstone`) and can't be
+    /// expressed in terms of individual setter calls without lots of
+    /// awkward field-splitting.
+    ///
+    /// Mutating `times.last_modification_time` here is **not**
+    /// useful: `Kdbx::edit_entry` overwrites it after the closure
+    /// returns. Mutating `id` or `previous_parent_group` is unsound
+    /// — both are vault-tree invariants the editor pattern was
+    /// designed to protect. Don't.
+    pub fn entry_mut(&mut self) -> &mut Entry {
+        self.inner
+    }
+
     // -----------------------------------------------------------------
     // Attachments
     // -----------------------------------------------------------------
@@ -405,7 +472,7 @@ mod tests {
     fn canonical_setters_assign_fields() {
         let mut e = fresh_entry();
         {
-            let mut editor = EntryEditor::new(&mut e);
+            let mut editor = EntryEditor::new(&mut e, &[]);
             editor.set_title("Gmail");
             editor.set_username("alice@example.com");
             editor.set_password(SecretString::from("hunter2"));
@@ -423,7 +490,7 @@ mod tests {
     fn tag_setters_replace_add_and_remove_with_dedup() {
         let mut e = fresh_entry();
         {
-            let mut editor = EntryEditor::new(&mut e);
+            let mut editor = EntryEditor::new(&mut e, &[]);
             editor.set_tags(vec!["a".into(), "b".into()]);
             editor.add_tag("c");
             editor.add_tag("a"); // duplicate — should be a no-op
@@ -431,7 +498,7 @@ mod tests {
         assert_eq!(e.tags, vec!["a".to_string(), "b".into(), "c".into()]);
 
         {
-            let mut editor = EntryEditor::new(&mut e);
+            let mut editor = EntryEditor::new(&mut e, &[]);
             assert!(editor.remove_tag("b"));
             assert!(!editor.remove_tag("nope"));
         }
@@ -442,7 +509,7 @@ mod tests {
     fn custom_field_set_inserts_then_overwrites_in_place() {
         let mut e = fresh_entry();
         {
-            let mut editor = EntryEditor::new(&mut e);
+            let mut editor = EntryEditor::new(&mut e, &[]);
             editor.set_custom_field("Recovery", CustomFieldValue::Plain("ABC".into()));
             editor.set_custom_field(
                 "TOTP",
@@ -458,7 +525,7 @@ mod tests {
 
         // Overwrite preserves position and updates flag + value.
         {
-            let mut editor = EntryEditor::new(&mut e);
+            let mut editor = EntryEditor::new(&mut e, &[]);
             editor.set_custom_field(
                 "Recovery",
                 CustomFieldValue::Protected(SecretString::from("XYZ")),
@@ -478,7 +545,7 @@ mod tests {
             value: "1234".into(),
             protected: false,
         });
-        let mut editor = EntryEditor::new(&mut e);
+        let mut editor = EntryEditor::new(&mut e, &[]);
         assert!(editor.remove_custom_field("PIN"));
         assert!(!editor.remove_custom_field("PIN"));
     }
@@ -488,7 +555,7 @@ mod tests {
         let icon = Uuid::from_u128(0xDEAD_BEEF);
         let mut e = fresh_entry();
         {
-            let mut editor = EntryEditor::new(&mut e);
+            let mut editor = EntryEditor::new(&mut e, &[]);
             editor.set_foreground_color("#FF0000");
             editor.set_background_color("#00FFAA");
             editor.set_override_url("cmd://firefox %1");
@@ -504,7 +571,7 @@ mod tests {
         assert!(!e.quality_check);
 
         // Clearing the custom icon round-trips back to None.
-        EntryEditor::new(&mut e).set_custom_icon(None);
+        EntryEditor::new(&mut e, &[]).set_custom_icon(None);
         assert_eq!(e.custom_icon_uuid, None);
     }
 
@@ -512,11 +579,11 @@ mod tests {
     fn set_expiry_toggles_expires_flag() {
         let mut e = fresh_entry();
         let at: DateTime<Utc> = "2030-01-02T03:04:05Z".parse().unwrap();
-        EntryEditor::new(&mut e).set_expiry(Some(at));
+        EntryEditor::new(&mut e, &[]).set_expiry(Some(at));
         assert!(e.times.expires);
         assert_eq!(e.times.expiry_time, Some(at));
 
-        EntryEditor::new(&mut e).set_expiry(None);
+        EntryEditor::new(&mut e, &[]).set_expiry(None);
         assert!(!e.times.expires);
         assert_eq!(e.times.expiry_time, None);
     }
@@ -524,7 +591,7 @@ mod tests {
     #[test]
     fn attach_stages_pending_op_without_touching_entry() {
         let mut e = fresh_entry();
-        let mut editor = EntryEditor::new(&mut e);
+        let mut editor = EntryEditor::new(&mut e, &[]);
         editor.attach("note.txt", b"hello".to_vec(), false);
         editor.attach("secret.bin", b"shh".to_vec(), true);
         let pending = editor.take_pending_binary_ops();
@@ -549,7 +616,7 @@ mod tests {
             name: "b.txt".into(),
             ref_id: 1,
         });
-        let mut editor = EntryEditor::new(&mut e);
+        let mut editor = EntryEditor::new(&mut e, &[]);
         assert!(editor.detach("a.txt"));
         assert!(!editor.detach("a.txt"));
         assert!(editor.detach("b.txt"));
@@ -568,7 +635,69 @@ mod tests {
                 keystroke_sequence: "{PASSWORD}{ENTER}".into(),
             }],
         };
-        EntryEditor::new(&mut e).set_auto_type(at.clone());
+        EntryEditor::new(&mut e, &[]).set_auto_type(at.clone());
         assert_eq!(e.auto_type, at);
+    }
+
+    #[test]
+    fn history_accessor_exposes_existing_records_in_order() {
+        let mut e = fresh_entry();
+        let mut h1 = fresh_entry();
+        h1.title = "old".into();
+        let mut h2 = fresh_entry();
+        h2.title = "newer".into();
+        e.history.push(h1);
+        e.history.push(h2);
+        let editor = EntryEditor::new(&mut e, &[]);
+        let history = editor.history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].title, "old");
+        assert_eq!(history[1].title, "newer");
+    }
+
+    #[test]
+    fn custom_data_mut_round_trips_a_new_item() {
+        let mut e = fresh_entry();
+        let mut editor = EntryEditor::new(&mut e, &[]);
+        editor.custom_data_mut().push(CustomDataItem::new(
+            "test.plugin.key".to_owned(),
+            "payload".to_owned(),
+            None,
+        ));
+        assert_eq!(e.custom_data.len(), 1);
+        assert_eq!(e.custom_data[0].key, "test.plugin.key");
+        assert_eq!(e.custom_data[0].value, "payload");
+    }
+
+    #[test]
+    fn binaries_accessor_passes_through_the_pool_view() {
+        let mut e = fresh_entry();
+        let pool = vec![
+            Binary {
+                data: b"alpha".to_vec(),
+                protected: false,
+            },
+            Binary {
+                data: b"beta".to_vec(),
+                protected: true,
+            },
+        ];
+        let editor = EntryEditor::new(&mut e, &pool);
+        let view = editor.binaries();
+        assert_eq!(view.len(), 2);
+        assert_eq!(view[0].data, b"alpha");
+        assert!(view[1].protected);
+    }
+
+    #[test]
+    fn entry_mut_returns_the_same_entry_the_editor_was_constructed_with() {
+        let mut e = fresh_entry();
+        let original_uuid = e.id;
+        let mut editor = EntryEditor::new(&mut e, &[]);
+        // Modify a field via entry_mut and confirm it lands.
+        editor.entry_mut().title = "via raw access".into();
+        assert_eq!(e.title, "via raw access");
+        // Identity preserved.
+        assert_eq!(e.id, original_uuid);
     }
 }
