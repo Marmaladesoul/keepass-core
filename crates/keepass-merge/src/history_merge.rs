@@ -54,7 +54,8 @@ use crate::hash::{ct_eq, entry_content_hash};
 type Mtime = Option<DateTime<Utc>>;
 type Bucket<'a> = Vec<([u8; 32], &'a Entry)>;
 
-/// Merge two `<History>` lists losslessly. See module docs for the
+/// Merge two `<History>` lists losslessly **except** for records
+/// the caller has explicitly tombstoned. See module docs for the
 /// dedup, ordering, and scope contracts.
 ///
 /// `binaries` is the (single) binary pool every record in `local` and
@@ -62,20 +63,36 @@ type Bucket<'a> = Vec<([u8; 32], &'a Entry)>;
 /// records to local's pool before calling — `apply.rs` does this via
 /// `BinaryPoolRemap`. Once attachments are part of `entry_content_hash`
 /// (slice B5), the dedup needs the pool to dereference `ref_id`s.
+///
+/// `tombstones` is the unioned `(mtime, hash)` set from both sides'
+/// `keys.history_tombstones.v1` lists. Any candidate record matching
+/// an entry in this set is filtered out — that's the mechanism by
+/// which user-driven history deletions, quota truncations, and
+/// conflict-resolution cleanup all persist across merges. Pass an
+/// empty set to recover the prior purely-additive behaviour.
+///
+/// See `tombstone.rs` for the schema and the
+/// [`crate::tombstone::union_tombstones`] / [`crate::tombstone::tombstone_set`]
+/// helpers callers use to build the set.
 pub(crate) fn merge_histories(
     local: &[Entry],
     remote: &[Entry],
     binaries: &[Binary],
+    tombstones: &crate::tombstone::TombstoneSet,
 ) -> Vec<Entry> {
     // Group by mtime; within a group dedup by content hash. Walking
     // local first then remote gives us the "local before remote on
-    // collision" invariant.
+    // collision" invariant. Tombstoned `(mtime, hash)` pairs are
+    // filtered at the point of grouping so they never enter the
+    // output.
     let mut by_mtime: HashMap<Mtime, Bucket<'_>> = HashMap::new();
     for snap in local.iter().chain(remote.iter()) {
         let hash = entry_content_hash(snap, binaries);
-        let bucket = by_mtime
-            .entry(snap.times.last_modification_time)
-            .or_default();
+        let mtime = snap.times.last_modification_time;
+        if tombstones.contains(&(mtime, hash)) {
+            continue;
+        }
+        let bucket = by_mtime.entry(mtime).or_default();
         if !bucket.iter().any(|(h, _)| ct_eq(h, &hash)) {
             bucket.push((hash, snap));
         }
@@ -97,6 +114,7 @@ pub(crate) fn merge_histories(
 #[cfg(test)]
 mod tests {
     use super::merge_histories;
+    use crate::tombstone::TombstoneSet;
     use chrono::{TimeZone, Utc};
     use keepass_core::model::{CustomField, Entry, EntryId, Timestamps};
     use uuid::Uuid;
@@ -114,16 +132,22 @@ mod tests {
         e
     }
 
+    /// Tests that exercise the pre-tombstone behaviour use this empty
+    /// set — additive merge is recovered by passing it.
+    fn no_tombstones() -> TombstoneSet {
+        TombstoneSet::default()
+    }
+
     #[test]
     fn empty_inputs_produce_empty_output() {
-        assert!(merge_histories(&[], &[], &[]).is_empty());
+        assert!(merge_histories(&[], &[], &[], &no_tombstones()).is_empty());
     }
 
     #[test]
     fn disjoint_mtimes_interleave_by_sort_order() {
         let local = vec![snapshot("a", at(2026, 1)), snapshot("c", at(2026, 3))];
         let remote = vec![snapshot("b", at(2026, 2))];
-        let out = merge_histories(&local, &remote, &[]);
+        let out = merge_histories(&local, &remote, &[], &no_tombstones());
         let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["a", "b", "c"]);
     }
@@ -131,7 +155,12 @@ mod tests {
     #[test]
     fn identical_record_on_both_sides_is_deduped() {
         let s = snapshot("same", at(2026, 1));
-        let out = merge_histories(std::slice::from_ref(&s), std::slice::from_ref(&s), &[]);
+        let out = merge_histories(
+            std::slice::from_ref(&s),
+            std::slice::from_ref(&s),
+            &[],
+            &no_tombstones(),
+        );
         assert_eq!(out.len(), 1);
     }
 
@@ -139,7 +168,7 @@ mod tests {
     fn same_mtime_divergent_content_keeps_both_local_first() {
         let local = vec![snapshot("L", at(2026, 1))];
         let remote = vec![snapshot("R", at(2026, 1))];
-        let out = merge_histories(&local, &remote, &[]);
+        let out = merge_histories(&local, &remote, &[], &no_tombstones());
         let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["L", "R"]);
     }
@@ -155,7 +184,12 @@ mod tests {
         let mut untimed_remote = Entry::empty(EntryId(Uuid::nil()));
         untimed_remote.title = "UR".into();
         let timed = snapshot("T", at(2026, 1));
-        let out = merge_histories(&[untimed_local, timed.clone()], &[untimed_remote], &[]);
+        let out = merge_histories(
+            &[untimed_local, timed.clone()],
+            &[untimed_remote],
+            &[],
+            &no_tombstones(),
+        );
         let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["UL", "UR", "T"]);
     }
@@ -164,8 +198,8 @@ mod tests {
     fn merging_is_idempotent() {
         let a = vec![snapshot("a", at(2026, 1)), snapshot("b", at(2026, 2))];
         let b = vec![snapshot("b", at(2026, 2)), snapshot("c", at(2026, 3))];
-        let once = merge_histories(&a, &b, &[]);
-        let twice = merge_histories(&once, &b, &[]);
+        let once = merge_histories(&a, &b, &[], &no_tombstones());
+        let twice = merge_histories(&once, &b, &[], &no_tombstones());
         let once_titles: Vec<&str> = once.iter().map(|e| e.title.as_str()).collect();
         let twice_titles: Vec<&str> = twice.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(once_titles, twice_titles);
@@ -182,11 +216,41 @@ mod tests {
         a.custom_fields = vec![CustomField::new("k", "v", false)];
         let mut b = snapshot("same", mtime);
         b.custom_fields = vec![CustomField::new("k", "v", true)];
-        let out = merge_histories(&[a], &[b], &[]);
+        let out = merge_histories(&[a], &[b], &[], &no_tombstones());
         assert_eq!(
             out.len(),
             2,
             "protected-flag flip must not collapse records"
+        );
+    }
+
+    #[test]
+    fn tombstoned_record_is_filtered_even_when_only_one_side_has_it() {
+        use crate::hash::entry_content_hash;
+        let a = snapshot("keep", at(2026, 1));
+        let b = snapshot("drop", at(2026, 2));
+        let mut tombstones = TombstoneSet::default();
+        tombstones.insert((b.times.last_modification_time, entry_content_hash(&b, &[])));
+        let out = merge_histories(&[a], &[b], &[], &tombstones);
+        let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["keep"]);
+    }
+
+    #[test]
+    fn tombstoned_record_present_on_both_sides_is_still_filtered() {
+        use crate::hash::entry_content_hash;
+        let s = snapshot("drop", at(2026, 1));
+        let mut tombstones = TombstoneSet::default();
+        tombstones.insert((s.times.last_modification_time, entry_content_hash(&s, &[])));
+        let out = merge_histories(
+            std::slice::from_ref(&s),
+            std::slice::from_ref(&s),
+            &[],
+            &tombstones,
+        );
+        assert!(
+            out.is_empty(),
+            "presence on both sides shouldn't override a tombstone"
         );
     }
 }

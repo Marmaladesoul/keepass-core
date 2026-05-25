@@ -20,6 +20,9 @@ use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice};
+use crate::tombstone::{
+    parse_tombstones, tombstone_set, union_history_tombstones, write_tombstones_to_custom_data,
+};
 use crate::{MergeError, MergeOutcome, Resolution};
 
 use super::{remove_entry, replace_entry};
@@ -346,22 +349,33 @@ pub(super) fn build_resolved_entry(
     // entry; the rest of build_resolved_entry needs only a read-only
     // view of it for hashing + history dedup.
     let local_binaries: &[Binary] = remap.local_binaries();
+    // Union the two sides' history tombstones — same shape as
+    // `build_merged_entry` in tree.rs; parse failures degrade
+    // silently to empty.
+    let local_ts = parse_tombstones(&conflict.local.custom_data).unwrap_or_default();
+    let remote_ts = parse_tombstones(&conflict.remote.custom_data).unwrap_or_default();
+    let unioned_ts = union_history_tombstones(&local_ts, &remote_ts);
+    let ts_set = tombstone_set(&unioned_ts);
     let mut combined = merge_histories(
         &conflict.local.history,
         &rebound_remote_history,
         local_binaries,
+        &ts_set,
     );
     let mut snapshot = conflict.local.clone();
     snapshot.history.clear();
     let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
+    let snapshot_mtime = snapshot.times.last_modification_time;
+    let snapshot_is_tombstoned = ts_set.contains(&(snapshot_mtime, snapshot_hash));
     let already_present = combined.iter().any(|h| {
-        h.times.last_modification_time == snapshot.times.last_modification_time
+        h.times.last_modification_time == snapshot_mtime
             && entry_content_hash(h, local_binaries) == snapshot_hash
     });
-    if !already_present {
+    if !already_present && !snapshot_is_tombstoned {
         combined.push(snapshot);
     }
     merged.history = combined;
+    write_tombstones_to_custom_data(&mut merged.custom_data, &unioned_ts, None);
     merged
 }
 

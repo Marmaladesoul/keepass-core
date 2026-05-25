@@ -60,7 +60,8 @@ use resolution::{
 };
 use tree::{
     EntryWinner, apply_group_tree, build_merged_entry, reconcile_entry_timestamps_recursive,
-    reconcile_group_timestamps_recursive, union_tombstones,
+    reconcile_group_timestamps_recursive, union_history_tombstones_across_entries,
+    union_tombstones,
 };
 
 /// Mutate `local` in place by applying `outcome` and `resolution`'s
@@ -91,6 +92,16 @@ pub fn apply_merge(
     // Group-tree LWW first so any newly-added remote groups are in
     // place before `added_on_disk` looks for parent-group paths.
     apply_group_tree(local, remote);
+
+    // History-tombstone pre-pass: union both sides' per-entry
+    // tombstone lists in-place on local, and filter local's history
+    // against the result. Runs over every both-sides-present entry,
+    // regardless of which bucket (if any) the entry routes through
+    // — the entry-merge classifier excludes <History> and <CustomData>
+    // from its comparator, so an entry whose only divergence is a
+    // tombstone list would otherwise hit no bucket and never get
+    // unioned.
+    union_history_tombstones_across_entries(&mut local.root, remote);
 
     // Split-borrow Vault fields so `BinaryPoolRemap` can hold
     // `&mut local.binaries` while the entry-mutation steps work on
