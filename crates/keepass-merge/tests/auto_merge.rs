@@ -1,29 +1,32 @@
-//! End-to-end coverage for `apply_merge_auto` — the auto-resolving
-//! merge that powers `conflict-resolution-rework`.
+//! End-to-end coverage for `apply_merge_park_conflicts` — the
+//! non-blocking conflict-parking variant of `apply_merge`.
 //!
-//! Property surface (matching §6.tests of the design doc):
+//! Property surface:
 //!
-//! 1. `apply_merge_auto` never errors on conflict-bucket-bearing
-//!    outcomes (the synthesised Resolution is always valid).
-//! 2. After auto-merge, every entry that went through a field-LWW
-//!    resolution has a marker on at least one of its history
-//!    records.
-//! 3. Two peers running `apply_merge_auto` on the same `(local,
-//!    remote)` pair converge — same shape as `p2p_convergence.rs`'s
-//!    pre-existing test, but without the `is_auto_mergeable` guard
-//!    because `apply_merge_auto` handles everything.
+//! 1. `apply_merge_park_conflicts` never errors on
+//!    conflict-bearing outcomes (the synthesised KeepLocal
+//!    resolution is always valid).
+//! 2. After parking, every entry whose conflict was parked has at
+//!    least one history record carrying the parked-conflict marker.
+//! 3. Local's *current* state for parked entries is unchanged —
+//!    parking only adds to history, never mutates the live entry's
+//!    main fields. (This is what makes the rework "preserve user
+//!    edits" rather than the silently-LWW design we're replacing.)
+//! 4. Two peers running `apply_merge_park_conflicts` on the same
+//!    `(local, remote)` pair converge on the same set of parked
+//!    conflicts.
 
 use chrono::{TimeZone, Utc};
 use keepass_core::model::{CustomField, Entry, EntryId, GroupId, Timestamps, Vault};
 use keepass_merge::{
-    AutoMergeConfig, FIELD_CONFLICT_CUSTOM_DATA_KEY, FieldConflictMarker, MergeOutcome,
-    apply_merge_auto, merge,
+    FIELD_CONFLICT_CUSTOM_DATA_KEY, FieldConflictMarker, MergeOutcome, ParkConflictsConfig,
+    apply_merge_park_conflicts, merge,
 };
 use proptest::prelude::*;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Strategies — same shape as `p2p_convergence.rs` for consistency.
+// Strategies — same shape as p2p_convergence.rs / auto_merge previous slice.
 // ---------------------------------------------------------------------------
 
 fn entry_strategy() -> impl Strategy<Value = Entry> {
@@ -79,12 +82,12 @@ fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap()
 }
 
-fn config() -> AutoMergeConfig {
-    AutoMergeConfig::with_now(now())
+fn config() -> ParkConflictsConfig {
+    ParkConflictsConfig::with_now(now())
 }
 
 /// `MergeOutcome` doesn't expose a trivial "is anything to do?"
-/// check; this gathers everything the auto-merge would touch.
+/// check; gathers everything the auto-merge would touch.
 fn outcome_has_work(outcome: &MergeOutcome) -> bool {
     !outcome.entry_conflicts.is_empty()
         || !outcome.delete_edit_conflicts.is_empty()
@@ -96,7 +99,7 @@ fn outcome_has_work(outcome: &MergeOutcome) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 1. apply_merge_auto never errors on conflict-bearing outcomes.
+// 1. apply_merge_park_conflicts never errors.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -107,16 +110,16 @@ proptest! {
     })]
 
     #[test]
-    fn auto_resolve_never_errors(a in vault_strategy(), b in vault_strategy()) {
+    fn park_never_errors(a in vault_strategy(), b in vault_strategy()) {
         let outcome = merge(&a, &b).expect("merge");
         let mut local = a.clone();
-        let _report = apply_merge_auto(&mut local, &b, &outcome, &config())
-            .expect("apply_merge_auto must never error on a valid merge outcome");
+        let _report = apply_merge_park_conflicts(&mut local, &b, &outcome, &config())
+            .expect("apply_merge_park_conflicts must never error on a valid merge outcome");
     }
 }
 
 // ---------------------------------------------------------------------------
-// 2. Every field-LWW entry gets a marker on at least one history record.
+// 2. Every parked-conflict entry has a marker on a history record.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -127,41 +130,96 @@ proptest! {
     })]
 
     #[test]
-    fn field_lww_resolution_marks_loser_snapshot(
+    fn parked_conflict_pushes_remote_as_marked_history(
         a in vault_strategy(), b in vault_strategy(),
     ) {
         let outcome = merge(&a, &b).expect("merge");
-        // Only exercise generations that actually produce a
-        // field-LWW conflict, otherwise there's nothing to assert.
-        prop_assume!(outcome
-            .entry_conflicts
-            .iter()
-            .any(|c| !c.field_deltas.is_empty()));
+        prop_assume!(!outcome.entry_conflicts.is_empty());
         let mut local = a.clone();
-        let report = apply_merge_auto(&mut local, &b, &outcome, &config()).expect("apply");
-        for entry_id in &report.entries_with_field_lww {
+        let report = apply_merge_park_conflicts(&mut local, &b, &outcome, &config())
+            .expect("apply");
+        for entry_id in &report.entries_with_parked_conflict {
             let entry = find_entry(&local.root, *entry_id).expect("entry survives merge");
-            let has_marker = entry
+            let marked: Vec<&Entry> = entry
                 .history
                 .iter()
-                .any(|h| h.custom_data.iter().any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY));
+                .filter(|h| {
+                    h.custom_data
+                        .iter()
+                        .any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
+                })
+                .collect();
             prop_assert!(
-                has_marker,
-                "entry {entry_id:?} went through field-LWW but no history record carries a marker",
+                !marked.is_empty(),
+                "parked entry {entry_id:?} has no marked history record"
             );
-            // Pin the marker's JSON shape too — round-trip should parse.
-            for h in &entry.history {
-                if let Some(cd) = h.custom_data.iter().find(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY) {
-                    let _marker: FieldConflictMarker = FieldConflictMarker::from_value(&cd.value)
-                        .expect("marker JSON must round-trip");
-                }
+            // Marker JSON round-trips.
+            for h in &marked {
+                let cd = h
+                    .custom_data
+                    .iter()
+                    .find(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
+                    .unwrap();
+                let parsed = FieldConflictMarker::from_value(&cd.value)
+                    .expect("marker JSON must round-trip");
+                prop_assert_eq!(parsed.at, now(), "marker timestamp matches config");
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// 3. Two peers running apply_merge_auto on the same (a, b) converge.
+// 3. Parked entries' main state is unchanged. This is the core
+// behavioural promise of the rework: we don't silently overwrite a
+// user's edit with the other side's edit just because the merge
+// classifier saw a conflict.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        max_global_rejects: 100_000,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn parked_entry_main_state_unchanged(
+        a in vault_strategy(), b in vault_strategy(),
+    ) {
+        let outcome = merge(&a, &b).expect("merge");
+        prop_assume!(!outcome.entry_conflicts.is_empty());
+
+        // Capture pre-merge titles for the conflict entries.
+        let pre_titles: std::collections::HashMap<EntryId, String> = outcome
+            .entry_conflicts
+            .iter()
+            .filter_map(|c| {
+                find_entry(&a.root, c.entry_id)
+                    .map(|e| (c.entry_id, e.title.clone()))
+            })
+            .collect();
+
+        let mut local = a.clone();
+        apply_merge_park_conflicts(&mut local, &b, &outcome, &config()).expect("apply");
+
+        for (entry_id, pre_title) in &pre_titles {
+            let post = find_entry(&local.root, *entry_id).expect("entry survives");
+            prop_assert_eq!(
+                &post.title,
+                pre_title,
+                "parked entry {:?}'s current title changed from {:?} to {:?} — \
+                 the rework promises NOT to mutate parked entries' main state",
+                entry_id, pre_title, post.title,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 4. Two peers running park_conflicts on the same (a, b) end up with
+// the same set of parked-conflict entries. The merge crate already
+// guarantees `entry_conflicts.len()` is symmetric — this propagates
+// that to the parked-marker bookkeeping.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -172,26 +230,28 @@ proptest! {
     })]
 
     #[test]
-    fn two_peers_auto_resolve_converge(a in vault_strategy(), b in vault_strategy()) {
-        // Each peer merges the other's vault into its own state.
+    fn two_peers_park_same_conflict_set(
+        a in vault_strategy(), b in vault_strategy(),
+    ) {
         let outcome_ab = merge(&a, &b).expect("merge a<-b");
         let outcome_ba = merge(&b, &a).expect("merge b<-a");
-
         prop_assume!(outcome_has_work(&outcome_ab) || outcome_has_work(&outcome_ba));
 
         let mut a_prime = a.clone();
-        apply_merge_auto(&mut a_prime, &b, &outcome_ab, &config())
+        let report_a = apply_merge_park_conflicts(&mut a_prime, &b, &outcome_ab, &config())
             .expect("apply on peer A");
         let mut b_prime = b.clone();
-        apply_merge_auto(&mut b_prime, &a, &outcome_ba, &config())
+        let report_b = apply_merge_park_conflicts(&mut b_prime, &a, &outcome_ba, &config())
             .expect("apply on peer B");
 
-        // Convergence: re-merging the two `_prime` vaults produces
-        // an outcome with nothing left to do.
-        let convergence = merge(&a_prime, &b_prime).expect("convergence merge");
-        prop_assert!(
-            !outcome_has_work(&convergence),
-            "two-peer convergence failed; convergence outcome = {convergence:?}"
+        // Same SET of parked entries (order may differ).
+        let mut parked_a: Vec<EntryId> = report_a.entries_with_parked_conflict.clone();
+        let mut parked_b: Vec<EntryId> = report_b.entries_with_parked_conflict.clone();
+        parked_a.sort_by_key(|id| id.0);
+        parked_b.sort_by_key(|id| id.0);
+        prop_assert_eq!(
+            parked_a, parked_b,
+            "two peers must park the same set of entries"
         );
     }
 }

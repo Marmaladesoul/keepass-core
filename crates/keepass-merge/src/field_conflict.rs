@@ -1,26 +1,31 @@
-//! Field-LWW conflict markers — the loser-snapshot tag the
+//! Parked-conflict markers — the loser-snapshot tag the
 //! conflict-resolver UI keys off.
 //!
-//! When `apply_merge_auto` auto-resolves an entry conflict via the
-//! per-field LWW + tiebreaker policy, the *loser* snapshot — the
-//! entry state we pushed into the merged entry's `<History>` as the
-//! pre-merge record of the side that didn't win — gets a small
-//! marker written into its own `custom_data`:
+//! When `apply_merge_park_conflicts` decides not to auto-resolve a
+//! genuine "both sides edited the same field off the LCA" conflict,
+//! it parks the remote side by pushing a clone of remote's entry into
+//! local's `<History>` and tagging that snapshot's `custom_data` with
+//! a marker:
 //!
 //! ```text
-//! loser_snapshot.custom_data["keys.field_conflict.v1"] = json({
-//!   at:          <ISO8601>,
-//!   winner_side: "local" | "remote"
+//! parked_remote_snapshot.custom_data["keys.field_conflict.v1"] = json({
+//!   at: <ISO8601>
 //! })
 //! ```
 //!
-//! That marker is what Keys-Mac (and any other consumer) checks to
+//! The marker is what Keys-Mac (and any other consumer) checks to
 //! decide whether an entry has a pending conflict review. The marker
-//! is **on the loser snapshot**, not on the entry's top-level
-//! custom_data: this co-locates the signal with the data it
-//! describes, avoids same-mtime-collision identifier pain, and means
-//! no ack flag is needed — once a history tombstone removes the
-//! loser snapshot, the marker dies with it.
+//! is **on the parked remote snapshot**, not on the entry's
+//! top-level custom_data, so the parked snapshot is identifiable
+//! among the entry's history records, and so removing the marker
+//! happens naturally when the history record is tombstoned via the
+//! slice-2 mechanism (see `history-tombstones.md`).
+//!
+//! The marker carries only its timestamp — no winner / loser
+//! semantics — because the conflict isn't auto-resolved. The user's
+//! choice is captured later by the resolver UI; the marker just
+//! says "this snapshot is the parked-remote alternative; review
+//! against current state."
 //!
 //! See `_project-management/conflict-resolution-rework.md` (Keys
 //! repo) for the broader design rationale.
@@ -28,35 +33,28 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// `<CustomData>` key under which the field-LWW marker lives on a
-/// loser history snapshot. Suffix `.v1` reserves room for schema
-/// migration.
+/// `<CustomData>` key under which the parked-conflict marker lives
+/// on the parked-remote history snapshot. Suffix `.v1` reserves room
+/// for schema migration.
 pub const FIELD_CONFLICT_CUSTOM_DATA_KEY: &str = "keys.field_conflict.v1";
 
-/// Side of the field-LWW resolution that won. Diagnostic-only; the
-/// resolver UI doesn't depend on it — both sides are reachable via
-/// the entry's current state + the loser snapshot itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum WinnerSide {
-    /// The locally-held entry's state won the LWW comparison.
-    Local,
-    /// The remote-side (incoming) entry's state won the LWW
-    /// comparison.
-    Remote,
-}
-
-/// The marker written into a loser snapshot's `custom_data`.
+/// The marker written into a parked-remote history snapshot's
+/// `custom_data`.
+///
+/// Intentionally carries only its emission timestamp. There is no
+/// winner / loser — the existing keepass-merge three-way merge
+/// surfaced this as a genuine "both sides changed" conflict and the
+/// rework chose to park it rather than silently LWW-resolve. The
+/// resolver UI is the only thing that picks a side, and that's
+/// recorded by editing the entry + tombstoning the marker snapshot,
+/// not by writing into the marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FieldConflictMarker {
-    /// When the auto-merge ran. Stamped from
-    /// [`crate::AutoMergeConfig::now`] for deterministic testability.
+    /// When the auto-merge parked this conflict. Stamped from
+    /// [`crate::ParkConflictsConfig::now`] for deterministic
+    /// testability.
     pub at: DateTime<Utc>,
-    /// Which side won the field-LWW resolution this marker belongs
-    /// to.
-    pub winner_side: WinnerSide,
 }
 
 impl FieldConflictMarker {
