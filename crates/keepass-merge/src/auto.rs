@@ -204,12 +204,19 @@ fn collect_field_lww_loser_intents(_remote: &Vault, outcome: &MergeOutcome) -> V
             continue;
         }
         let winner = pick_entry_winner_for_field_lww(&conflict.local, &conflict.remote);
+        if !winner.tiebreaker_engaged {
+            // Strictly-newer-mtime side won. That's unambiguous LWW
+            // evidence — nothing for the user to review, so skip the
+            // marker. Only same-mtime ties (or one-sided absence)
+            // produce a pending-conflict signal.
+            continue;
+        }
         let snapshot = &conflict.local;
         out.push(LoserIntent {
             entry_id: conflict.entry_id,
             loser_mtime: snapshot.times.last_modification_time,
             loser_hash: entry_content_hash(snapshot, &[]),
-            winner_side: winner,
+            winner_side: winner.side,
         });
     }
     out
@@ -218,13 +225,25 @@ fn collect_field_lww_loser_intents(_remote: &Vault, outcome: &MergeOutcome) -> V
 /// Decide which side wins the entry-level LWW by mtime, with a
 /// symmetric content-hash tiebreaker on exact-time ties (or when
 /// one side has no mtime).
-fn pick_entry_winner_for_field_lww(local: &Entry, remote: &Entry) -> WinnerSide {
+///
+/// The `tiebreaker_engaged` flag is `true` exactly when the mtime
+/// comparison was inconclusive and the content-hash fallback had to
+/// pick. That's the signal the loser-snapshot marker keys off: a
+/// strictly-newer mtime means LWW had unambiguous evidence and the
+/// user has nothing to review.
+fn pick_entry_winner_for_field_lww(local: &Entry, remote: &Entry) -> EntryWinner {
     match (
         local.times.last_modification_time,
         remote.times.last_modification_time,
     ) {
-        (Some(l), Some(r)) if l > r => WinnerSide::Local,
-        (Some(l), Some(r)) if r > l => WinnerSide::Remote,
+        (Some(l), Some(r)) if l > r => EntryWinner {
+            side: WinnerSide::Local,
+            tiebreaker_engaged: false,
+        },
+        (Some(l), Some(r)) if r > l => EntryWinner {
+            side: WinnerSide::Remote,
+            tiebreaker_engaged: false,
+        },
         _ => {
             // Tie OR one-sided absence: deterministic
             // content-hash tiebreaker. We hash against empty pools
@@ -232,13 +251,23 @@ fn pick_entry_winner_for_field_lww(local: &Entry, remote: &Entry) -> WinnerSide 
             // bytes, so symmetric. Lower hash wins by convention.
             let local_hash = entry_content_hash(local, &[]);
             let remote_hash = entry_content_hash(remote, &[]);
-            if local_hash <= remote_hash {
+            let side = if local_hash <= remote_hash {
                 WinnerSide::Local
             } else {
                 WinnerSide::Remote
+            };
+            EntryWinner {
+                side,
+                tiebreaker_engaged: true,
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EntryWinner {
+    side: WinnerSide,
+    tiebreaker_engaged: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +279,7 @@ fn synthesize_resolution(outcome: &MergeOutcome) -> Resolution {
 
     for conflict in &outcome.entry_conflicts {
         let winner = pick_entry_winner_for_field_lww(&conflict.local, &conflict.remote);
-        let winner_choice = match winner {
+        let winner_choice = match winner.side {
             WinnerSide::Local => ConflictSide::Local,
             WinnerSide::Remote => ConflictSide::Remote,
         };
@@ -429,19 +458,20 @@ mod tests {
     }
 
     #[test]
-    fn winner_is_newer_mtime_side() {
+    fn winner_is_newer_mtime_side_without_tiebreaker() {
         let local = entry_with_title("local", at(2026, 1));
         let remote = entry_with_title("remote", at(2026, 5));
-        assert_eq!(
-            pick_entry_winner_for_field_lww(&local, &remote),
-            WinnerSide::Remote,
+        let w = pick_entry_winner_for_field_lww(&local, &remote);
+        assert_eq!(w.side, WinnerSide::Remote);
+        assert!(
+            !w.tiebreaker_engaged,
+            "strictly-newer mtime must not engage the tiebreaker",
         );
         let later_local = entry_with_title("local", at(2026, 10));
         let earlier_remote = entry_with_title("remote", at(2026, 5));
-        assert_eq!(
-            pick_entry_winner_for_field_lww(&later_local, &earlier_remote),
-            WinnerSide::Local,
-        );
+        let w = pick_entry_winner_for_field_lww(&later_local, &earlier_remote);
+        assert_eq!(w.side, WinnerSide::Local);
+        assert!(!w.tiebreaker_engaged);
     }
 
     #[test]
@@ -451,11 +481,27 @@ mod tests {
         let from_a = pick_entry_winner_for_field_lww(&local, &remote);
         // Mirror: swap sides — the symmetric tiebreaker must agree.
         let from_b = pick_entry_winner_for_field_lww(&remote, &local);
+        assert!(
+            from_a.tiebreaker_engaged && from_b.tiebreaker_engaged,
+            "tied mtimes must engage the tiebreaker on both sides",
+        );
         // Both peers should pick the same logical winner.
         assert!(
-            (from_a == WinnerSide::Local && from_b == WinnerSide::Remote)
-                || (from_a == WinnerSide::Remote && from_b == WinnerSide::Local),
-            "tiebreaker must be symmetric; got {from_a:?} / {from_b:?}"
+            (from_a.side == WinnerSide::Local && from_b.side == WinnerSide::Remote)
+                || (from_a.side == WinnerSide::Remote && from_b.side == WinnerSide::Local),
+            "tiebreaker must be symmetric; got {from_a:?} / {from_b:?}",
+        );
+    }
+
+    #[test]
+    fn one_sided_mtime_absence_engages_tiebreaker() {
+        let local = entry_with_title("local", at(2026, 5));
+        let mut remote = entry_with_title("remote", at(2026, 5));
+        remote.times.last_modification_time = None;
+        let w = pick_entry_winner_for_field_lww(&local, &remote);
+        assert!(
+            w.tiebreaker_engaged,
+            "one-sided mtime absence must engage the tiebreaker",
         );
     }
 
