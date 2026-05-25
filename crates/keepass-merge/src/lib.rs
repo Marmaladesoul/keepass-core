@@ -19,6 +19,7 @@ pub mod error;
 pub mod outcome;
 
 pub mod resolution;
+pub mod tombstone;
 
 mod apply;
 mod binary_pool;
@@ -36,3 +37,7 @@ pub use crate::error::MergeError;
 pub use crate::merge::merge;
 pub use crate::outcome::MergeOutcome;
 pub use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice, Resolution};
+pub use crate::tombstone::{
+    HistoryTombstone, TOMBSTONE_CUSTOM_DATA_KEY, TombstoneError, TombstoneReason,
+    add_history_tombstone, parse_tombstones,
+};

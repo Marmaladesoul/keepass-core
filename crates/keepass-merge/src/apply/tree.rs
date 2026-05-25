@@ -12,6 +12,9 @@ use crate::binary_pool::BinaryPoolRemap;
 use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
+use crate::tombstone::{
+    parse_tombstones, tombstone_set, union_history_tombstones, write_tombstones_to_custom_data,
+};
 
 use super::resolution::{apply_attachment_resolutions, rebind_history, set_field_from};
 use super::{collect_group_ids, collect_groups, find_group_mut};
@@ -203,17 +206,36 @@ pub(super) fn build_merged_entry(
     // Past this point we only need read-only access to the local
     // pool for hashing + history dedup.
     let local_binaries: &[Binary] = remap.local_binaries();
-    let mut combined = merge_histories(&local.history, &rebound_remote_history, local_binaries);
+    // Union the two sides' history tombstones before merging. Both
+    // sides' lists must contribute so a deletion issued on either
+    // peer survives this merge — see history-tombstones design doc.
+    // Parse failures degrade silently to empty (a corrupt custom_data
+    // value shouldn't crash a merge; the value will be overwritten
+    // by the unioned-and-reserialised list below regardless).
+    let local_ts = parse_tombstones(&local.custom_data).unwrap_or_default();
+    let remote_ts = parse_tombstones(&remote.custom_data).unwrap_or_default();
+    let unioned_ts = union_history_tombstones(&local_ts, &remote_ts);
+    let ts_set = tombstone_set(&unioned_ts);
+    let mut combined = merge_histories(
+        &local.history,
+        &rebound_remote_history,
+        local_binaries,
+        &ts_set,
+    );
     // Dedup the snapshot if a record at its mtime *and content* is
     // already present (avoids spurious duplication on a no-op merge).
     // Tightened in slice 5b per #R21 to use the slice-2 content hash
     // alongside the mtime, matching the slice-4 dedup discipline.
     let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
+    let snapshot_mtime = snapshot.times.last_modification_time;
+    let snapshot_is_tombstoned = ts_set.contains(&(snapshot_mtime, snapshot_hash));
     let already_present = combined.iter().any(|h| {
-        h.times.last_modification_time == snapshot.times.last_modification_time
+        h.times.last_modification_time == snapshot_mtime
             && entry_content_hash(h, local_binaries) == snapshot_hash
     });
-    if !already_present {
+    // Don't push a snapshot that the user has already tombstoned: it
+    // would defeat the deletion the moment the merge runs.
+    if !already_present && !snapshot_is_tombstoned {
         combined.push(snapshot);
     }
 
@@ -266,11 +288,83 @@ pub(super) fn build_merged_entry(
     // the classifier had a clear answer on.
     apply_attachment_resolutions(&mut merged, local, remote, attachment_resolutions, remap);
     merged.history = combined;
+    // Persist the unioned tombstone list so it propagates to peers on
+    // next sync. Without this, the merged side would carry only its
+    // own pre-merge tombstones and the other side's would have to
+    // arrive (and need re-merging) on every subsequent sync round.
+    // Apply path is pure → no wall-clock stamp.
+    write_tombstones_to_custom_data(&mut merged.custom_data, &unioned_ts, None);
     merged
 }
 
 // ---------------------------------------------------------------------------
-// Tombstone union
+// History-tombstone pre-pass
+// ---------------------------------------------------------------------------
+
+/// Walk every entry present on both sides; union their history
+/// tombstones into local in-place, and filter local's `<History>`
+/// against the result.
+///
+/// Required because the bucket-driven mutations downstream
+/// ([`build_merged_entry`], [`crate::apply::resolution::build_resolved_entry`])
+/// only run for entries whose **standard fields** diverged — and the
+/// entry-merge classifier deliberately excludes `<History>` and
+/// `<CustomData>` from its comparator. An entry that differs *only*
+/// in its tombstone list would route to no bucket at all, leaving
+/// local's tombstones unmerged. This pass closes the gap: it touches
+/// every both-sides-present entry regardless of bucket.
+///
+/// Idempotent w.r.t. the downstream bucket logic: the latter re-reads
+/// tombstones from both sides and recomputes the union when it builds
+/// its merged entry, so the pre-pass's in-place mutation just feeds
+/// it a head start.
+pub(super) fn union_history_tombstones_across_entries(local_root: &mut Group, remote: &Vault) {
+    let mut remote_entries: HashMap<EntryId, &Entry> = HashMap::new();
+    super::collect_entries(&remote.root, &mut remote_entries);
+    union_tombstones_recursive(local_root, &remote_entries);
+}
+
+fn union_tombstones_recursive(group: &mut Group, remote_entries: &HashMap<EntryId, &Entry>) {
+    for entry in &mut group.entries {
+        let Some(&remote_entry) = remote_entries.get(&entry.id) else {
+            continue;
+        };
+        let local_ts = crate::tombstone::parse_tombstones(&entry.custom_data).unwrap_or_default();
+        let remote_ts =
+            crate::tombstone::parse_tombstones(&remote_entry.custom_data).unwrap_or_default();
+        // Skip the rewrite work entirely when neither side has any
+        // tombstones — the overwhelmingly common case. Bare scan
+        // cost only.
+        if local_ts.is_empty() && remote_ts.is_empty() {
+            continue;
+        }
+        let unioned = crate::tombstone::union_history_tombstones(&local_ts, &remote_ts);
+        let ts_set = crate::tombstone::tombstone_set(&unioned);
+        // Filter local's history against the unioned set. Records
+        // tombstoned on either side drop here. We treat content-hash
+        // mismatch as "not in set"; binaries are passed as &[]
+        // because slice B5's attachment-hashing extension isn't
+        // landed yet and the production paths in build_*_entry use
+        // the local pool — empty matches the current
+        // `entry_content_hash` contract (uses binaries only for
+        // attachment refs, no-op for the entries we hold here).
+        entry.history.retain(|h| {
+            let hash = crate::hash::entry_content_hash(h, &[]);
+            !ts_set.contains(&(h.times.last_modification_time, hash))
+        });
+        // Write unioned tombstones back so downstream bucket logic
+        // and future syncs see the merged set on local. `None` for
+        // last_modified — apply path is pure.
+        crate::tombstone::write_tombstones_to_custom_data(&mut entry.custom_data, &unioned, None);
+    }
+    for sub in &mut group.groups {
+        union_tombstones_recursive(sub, remote_entries);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tombstone union (vault-level DeletedObjects — distinct from history
+// tombstones above)
 // ---------------------------------------------------------------------------
 
 pub(super) fn union_tombstones(
