@@ -18,6 +18,7 @@ pub mod conflict;
 pub mod error;
 pub mod outcome;
 
+pub mod prune;
 pub mod resolution;
 pub mod tombstone;
 
@@ -36,6 +37,7 @@ pub use crate::conflict::{
 pub use crate::error::MergeError;
 pub use crate::merge::merge;
 pub use crate::outcome::MergeOutcome;
+pub use crate::prune::prune_history_with_tombstones;
 pub use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice, Resolution};
 pub use crate::tombstone::{
     HistoryTombstone, TOMBSTONE_CUSTOM_DATA_KEY, TombstoneError, TombstoneReason,
