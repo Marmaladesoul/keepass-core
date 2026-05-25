@@ -32,13 +32,13 @@ mod history_merge;
 mod merge;
 
 pub use crate::apply::{apply_merge, reconcile_timestamps};
-pub use crate::auto::{AutoMergeConfig, AutoMergeReport, apply_merge_auto};
+pub use crate::auto::{ParkConflictsConfig, ParkedConflictsReport, apply_merge_park_conflicts};
 pub use crate::conflict::{
     AttachmentDelta, AttachmentDeltaKind, EntryConflict, FieldDelta, FieldDeltaKind, GroupConflict,
     IconDelta,
 };
 pub use crate::error::MergeError;
-pub use crate::field_conflict::{FIELD_CONFLICT_CUSTOM_DATA_KEY, FieldConflictMarker, WinnerSide};
+pub use crate::field_conflict::{FIELD_CONFLICT_CUSTOM_DATA_KEY, FieldConflictMarker};
 pub use crate::merge::merge;
 pub use crate::outcome::MergeOutcome;
 pub use crate::prune::prune_history_with_tombstones;
