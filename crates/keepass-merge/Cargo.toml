@@ -23,6 +23,9 @@ serde_json = "1"
 sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
+# Activity-log emission (sync-merge-strategies §6). Default features only —
+# we emit at warn/info/error levels and let the engine layer pick a subscriber.
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 uuid = "1"
 
 [dev-dependencies]

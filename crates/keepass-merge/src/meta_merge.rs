@@ -51,6 +51,11 @@ pub(crate) fn merge_meta(local: &mut Meta, remote: &Meta) {
     // when the remote side wins; that surface lands with audit item 10
     // (PR-3.3) — the merge crate just performs the LWW for now.
     if remote_wins(local.database_name_changed, remote.database_name_changed) {
+        crate::events::emit(&crate::MergeEvent::VaultMetaFieldLww {
+            field: "DatabaseName",
+            local_value: local.database_name.clone(),
+            remote_value: remote.database_name.clone(),
+        });
         local.database_name.clone_from(&remote.database_name);
         local.database_name_changed = remote.database_name_changed;
     }
@@ -58,6 +63,11 @@ pub(crate) fn merge_meta(local: &mut Meta, remote: &Meta) {
         local.database_description_changed,
         remote.database_description_changed,
     ) {
+        crate::events::emit(&crate::MergeEvent::VaultMetaFieldLww {
+            field: "DatabaseDescription",
+            local_value: local.database_description.clone(),
+            remote_value: remote.database_description.clone(),
+        });
         local
             .database_description
             .clone_from(&remote.database_description);
@@ -67,6 +77,11 @@ pub(crate) fn merge_meta(local: &mut Meta, remote: &Meta) {
         local.default_username_changed,
         remote.default_username_changed,
     ) {
+        crate::events::emit(&crate::MergeEvent::VaultMetaFieldLww {
+            field: "DefaultUserName",
+            local_value: local.default_username.clone(),
+            remote_value: remote.default_username.clone(),
+        });
         local.default_username.clone_from(&remote.default_username);
         local.default_username_changed = remote.default_username_changed;
     }
@@ -114,8 +129,16 @@ pub(crate) fn merge_meta(local: &mut Meta, remote: &Meta) {
     // sentinel (`-1`) treated as "infinity". A side that prefers
     // shorter retention always wins so the merge can't silently expand
     // a user's chosen quota.
+    let prev_max_items = local.history_max_items;
     local.history_max_items =
         min_with_unlimited_i32(local.history_max_items, remote.history_max_items);
+    if prev_max_items != remote.history_max_items && prev_max_items != local.history_max_items {
+        crate::events::emit(&crate::MergeEvent::HistoryRetentionConverged {
+            local_max_items: prev_max_items,
+            remote_max_items: remote.history_max_items,
+            picked_max_items: local.history_max_items,
+        });
+    }
     local.history_max_size =
         min_with_unlimited_i64(local.history_max_size, remote.history_max_size);
 

@@ -16,6 +16,7 @@
 
 pub mod conflict;
 pub mod error;
+pub mod events;
 pub mod field_conflict;
 pub mod outcome;
 
@@ -39,6 +40,7 @@ pub use crate::conflict::{
     IconDelta,
 };
 pub use crate::error::MergeError;
+pub use crate::events::MergeEvent;
 pub use crate::field_conflict::{FIELD_CONFLICT_CUSTOM_DATA_KEY, FieldConflictMarker};
 pub use crate::merge::merge;
 pub use crate::outcome::MergeOutcome;
