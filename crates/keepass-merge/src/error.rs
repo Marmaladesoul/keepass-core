@@ -75,6 +75,31 @@ pub enum MergeError {
         /// The attachment name.
         attachment: String,
     },
+
+    /// The two replicas' `<Meta><MasterKeyChanged>` timestamps are both
+    /// set but disagree, signalling that the master key was rotated
+    /// independently on each side. Per the sync-merge spec §6 this is
+    /// a hard fault: silently picking one side would drop the other's
+    /// password rotation. The merge aborts for this vault; recovery
+    /// requires the user to unlock both replicas with their respective
+    /// keys and explicitly choose one (out-of-band; expected to be
+    /// vanishingly rare).
+    ///
+    /// The variant carries both sides' `master_key_changed` timestamps
+    /// so the engine layer can surface them in the hard-fault banner.
+    /// Both are `DateTime<Utc>` (not `Option`): the disagreement signal
+    /// only fires when both sides carry a concrete timestamp — if only
+    /// one side rotated, that side's value LWWs through the vault-meta
+    /// merge path with no fault.
+    #[error(
+        "master key rotation disagreement: local changed at {local_changed_at}, remote at {remote_changed_at}"
+    )]
+    MasterKeyDisagreement {
+        /// `<MasterKeyChanged>` on the local side.
+        local_changed_at: chrono::DateTime<chrono::Utc>,
+        /// `<MasterKeyChanged>` on the remote side.
+        remote_changed_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[cfg(test)]
