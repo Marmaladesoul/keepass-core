@@ -174,6 +174,34 @@ pub fn apply_merge_park_conflicts(
     // sensitive-field case).
     let decisions = parking_decisions(outcome);
 
+    // Spec §6 always-info: one event per parked entry for the activity
+    // log + badge. Emit before apply mutates the tree so the events
+    // reference the pre-merge state.
+    for conflict in &outcome.entry_conflicts {
+        let sensitive = matches!(
+            decisions.get(&conflict.entry_id),
+            Some(ParkingDecision::BothSidesSensitive)
+        );
+        crate::events::emit(&crate::MergeEvent::ConflictParked {
+            entry: conflict.entry_id,
+            title: conflict.local.title.clone(),
+            fields: conflict
+                .field_deltas
+                .iter()
+                .map(|d| d.key.clone())
+                .collect(),
+            sensitive,
+        });
+    }
+    // Edit-wins on delete-vs-edit fires as its own event.
+    for entry_id in &outcome.delete_edit_conflicts {
+        let title = find_entry_title(&local.root, *entry_id).unwrap_or_default();
+        crate::events::emit(&crate::MergeEvent::EntryRestoredFromDeletion {
+            entry: *entry_id,
+            title,
+        });
+    }
+
     // Step 1: synthesise a Resolution that picks the winner per
     // decision. apply_merge then materialises the winner's field
     // values onto the merged entry.
@@ -426,6 +454,23 @@ fn tag_existing_snapshot_at_mtime(
         marker_now,
     ));
     true
+}
+
+/// Walk `group` looking for the entry with `id`; returns its title
+/// (a clone) if found. Used by the activity-log emission for the
+/// delete-vs-edit restoration prose.
+fn find_entry_title(group: &Group, id: EntryId) -> Option<String> {
+    for entry in &group.entries {
+        if entry.id == id {
+            return Some(entry.title.clone());
+        }
+    }
+    for sub in &group.groups {
+        if let Some(title) = find_entry_title(sub, id) {
+            return Some(title);
+        }
+    }
+    None
 }
 
 fn find_entry_mut(group: &mut Group, id: EntryId) -> Option<&mut Entry> {
