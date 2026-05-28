@@ -38,6 +38,24 @@ pub struct MergeOutcome {
     pub delete_edit_conflicts: Vec<EntryId>,
     /// Group structural conflicts. Always empty in v0.1; reserved for v0.2.
     pub group_conflicts: Vec<GroupConflict>,
+    /// Entries whose per-entry 3-way merge found no shared ancestor
+    /// (both sides' `<History>` lists either diverged past the LCA or
+    /// were truncated beyond it). Per spec §3 these enter the merge's
+    /// conservative-fallback path — every field that differs parks
+    /// rather than auto-resolves — and the FFI layer is expected to
+    /// surface a warn-severity log per spec §6 ("Entry 'X' had no
+    /// shared history — manual review needed for all changed fields").
+    /// Populated regardless of whether the entry ended up in
+    /// `entry_conflicts`: an LCA-missing entry whose fields happened
+    /// to agree is still worth knowing about.
+    pub lca_missing_entries: Vec<EntryId>,
+    /// Entries that tripped the spec §3 corruption signal: same UUID
+    /// on both sides, no shared ancestor, no history on either side,
+    /// both sides carry an mtime. Cannot arise from a normal sync flow.
+    /// The merge still parks rather than auto-fixing; the caller is
+    /// expected to surface a structured error log entry. Every entry
+    /// in this list is also in `lca_missing_entries`.
+    pub corruption_signals: Vec<EntryId>,
     /// Crate-private sidecar: per-entry attachment auto-resolutions
     /// produced by the classifier in [`crate::entry_merge::merge_entry`].
     /// Keyed by [`EntryId`] for every entry that ended up in
@@ -92,5 +110,7 @@ mod tests {
         assert!(outcome.local_deletions_pending_sync.is_empty());
         assert!(outcome.delete_edit_conflicts.is_empty());
         assert!(outcome.group_conflicts.is_empty());
+        assert!(outcome.lca_missing_entries.is_empty());
+        assert!(outcome.corruption_signals.is_empty());
     }
 }

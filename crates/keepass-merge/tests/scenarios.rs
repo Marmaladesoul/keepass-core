@@ -11,6 +11,7 @@
 
 mod common;
 
+use chrono::TimeZone as _;
 use common::{
     Scenario, all, assert_outcome_matches, clean_add, clean_delete, delete_vs_edit, disjoint_edit,
     edit_vs_delete, history_divergence, history_truncation_fallback, overlap_edit,
@@ -108,9 +109,26 @@ fn corpus_tombstone_union() {
         &scenario.default_resolution,
     )
     .expect("apply");
-    // Tombstone-union-specific assertion: post-apply local has both
-    // (uuid=1, 2026-01-05) and (uuid=1, 2026-02-05) tombstones plus
-    // the orphan (uuid=0xdead, 2026-03-05).
+    // Tombstone-union-specific assertion: post-apply local has a single
+    // tombstone for uuid=1 (the duplicate UUIDs collapse per spec §2.8,
+    // taking the earliest `deleted_at` as provenance) plus the orphan
+    // (uuid=0xdead) propagated from remote.
+    let collected: Vec<_> = scenario
+        .local
+        .deleted_objects
+        .iter()
+        .filter(|t| t.uuid == uuid::Uuid::from_u128(1))
+        .collect();
+    assert_eq!(
+        collected.len(),
+        1,
+        "duplicate UUID tombstones collapse to one per spec §2.8"
+    );
+    assert_eq!(
+        collected[0].deleted_at,
+        Some(chrono::Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap()),
+        "earliest deleted_at wins on duplicate UUID"
+    );
     let count_for = |id: u128| {
         scenario
             .local
@@ -119,11 +137,6 @@ fn corpus_tombstone_union() {
             .filter(|t| t.uuid == uuid::Uuid::from_u128(id))
             .count()
     };
-    assert_eq!(
-        count_for(1),
-        2,
-        "two tombstones for uuid=1 preserved by exact-tuple union"
-    );
     assert_eq!(
         count_for(0xdead),
         1,
