@@ -362,6 +362,88 @@ fn union_tombstones_recursive(group: &mut Group, remote_entries: &HashMap<EntryI
     }
 }
 
+/// Walk every entry present on both sides; union their
+/// attachment-tombstone lists into local in-place, and filter local's
+/// `attachments` against the result.
+///
+/// Same rationale as [`union_tag_states_across_entries`]: the
+/// entry-merge classifier excludes `<CustomData>` from its
+/// comparator, so an entry that differs *only* in its attachment-
+/// tombstone surface would route to no bucket and the tombstone state
+/// would never propagate. `local_binaries` is the local vault's
+/// binary pool — used to dereference each attachment's `ref_id` for
+/// hashing.
+pub(super) fn union_attachment_tombstones_across_entries(
+    local_root: &mut Group,
+    remote: &Vault,
+    local_binaries: &[Binary],
+) {
+    let mut remote_entries: HashMap<EntryId, &Entry> = HashMap::new();
+    super::collect_entries(&remote.root, &mut remote_entries);
+    union_attachment_tombstones_recursive(local_root, &remote_entries, local_binaries);
+}
+
+fn union_attachment_tombstones_recursive(
+    group: &mut Group,
+    remote_entries: &HashMap<EntryId, &Entry>,
+    local_binaries: &[Binary],
+) {
+    for entry in &mut group.entries {
+        let Some(&remote_entry) = remote_entries.get(&entry.id) else {
+            continue;
+        };
+        let local_ts =
+            crate::tombstone::parse_attachment_tombstones(&entry.custom_data).unwrap_or_default();
+        let remote_ts = crate::tombstone::parse_attachment_tombstones(&remote_entry.custom_data)
+            .unwrap_or_default();
+        if local_ts.is_empty() && remote_ts.is_empty() {
+            continue;
+        }
+        let unioned = crate::tombstone::union_attachment_tombstones(&local_ts, &remote_ts);
+        let ts_set = crate::tombstone::attachment_tombstone_set(&unioned);
+        let local_mtime = entry.times.last_modification_time;
+        entry.attachments.retain(|att| {
+            let Some(bin) = local_binaries.get(att.ref_id as usize) else {
+                return true;
+            };
+            let hash = sha256_attachment(&bin.data);
+            let key = (att.name.clone(), hash);
+            if !ts_set.contains(&key) {
+                return true;
+            }
+            // Re-attach wins only when local's mtime is strictly newer
+            // than the tombstone's `at`. The pre-pass can't observe the
+            // remote side's mtime relative to remote's bytes — that
+            // case is covered by the per-bucket
+            // `apply_attachment_tombstones` after the bucket logic
+            // installs remote's bytes locally.
+            let rm_at = unioned
+                .iter()
+                .find(|t| t.filename == att.name && t.hash == hash)
+                .map(|t| t.at);
+            match (local_mtime, rm_at) {
+                (Some(m), Some(a)) => m > a,
+                _ => false,
+            }
+        });
+        crate::tombstone::write_attachment_tombstones_to_custom_data(
+            &mut entry.custom_data,
+            &unioned,
+            None,
+        );
+    }
+    for sub in &mut group.groups {
+        union_attachment_tombstones_recursive(sub, remote_entries, local_binaries);
+    }
+}
+
+fn sha256_attachment(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().into()
+}
+
 /// Walk every entry present on both sides; union their tag-state
 /// tombstones into local in-place, and filter local's `tags` against
 /// the result.
