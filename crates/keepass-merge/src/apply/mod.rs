@@ -1125,6 +1125,43 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_timestamps_takes_earlier_creation_time_per_entry() {
+        // Spec §2.3: `creation_time` is identity-bearing — the
+        // earliest concrete value wins. A later write that revised
+        // this timestamp upward must NOT survive a reconcile.
+        let early = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let later = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+        let mut local_entry = entry(1, "A", at(2026, 1));
+        local_entry.times.creation_time = Some(later);
+        let mut remote_entry = entry(1, "A", at(2026, 1));
+        remote_entry.times.creation_time = Some(early);
+
+        let mut local = vault_with(vec![local_entry]);
+        let remote = vault_with(vec![remote_entry]);
+
+        reconcile_timestamps(&mut local, &remote);
+
+        assert_eq!(local.root.entries[0].times.creation_time, Some(early));
+    }
+
+    #[test]
+    fn reconcile_timestamps_takes_concrete_creation_time_over_none() {
+        let when = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let mut local_entry = entry(1, "A", at(2026, 1));
+        local_entry.times.creation_time = None;
+        let mut remote_entry = entry(1, "A", at(2026, 1));
+        remote_entry.times.creation_time = Some(when);
+
+        let mut local = vault_with(vec![local_entry]);
+        let remote = vault_with(vec![remote_entry]);
+
+        reconcile_timestamps(&mut local, &remote);
+
+        assert_eq!(local.root.entries[0].times.creation_time, Some(when));
+    }
+
+    #[test]
     fn reconcile_timestamps_takes_later_per_entry() {
         let mut local_entry = entry(1, "A", at(2026, 1));
         local_entry.times.last_access_time =

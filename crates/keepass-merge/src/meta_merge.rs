@@ -39,7 +39,7 @@
 //! resolves cleanly.
 
 use chrono::{DateTime, Utc};
-use keepass_core::model::{CustomIcon, Meta};
+use keepass_core::model::{CustomDataItem, CustomIcon, Meta};
 
 /// Apply the spec §2.1 per-field rules to `local.meta`, taking
 /// remote's values where the local-vs-remote arbitration falls to
@@ -124,10 +124,13 @@ pub(crate) fn merge_meta(local: &mut Meta, remote: &Meta) {
     // resave on one side propagates.
     local.custom_icons = union_custom_icons(&local.custom_icons, &remote.custom_icons);
 
-    // NOTE: vault-level `custom_data` is deliberately untouched here —
-    // per-key 3-way merge is audit item 9 / PR-3.3. Until that lands,
-    // the vault-level CustomData rides along on local, matching the
-    // pre-slice behaviour.
+    // --- Vault-level `<Meta><CustomData>`: per-key union with LWW
+    // arbitration on the per-item `last_modified` timestamp. Spec
+    // §2.1 names this "Per-key 3-way (§4)"; without a vault-level LCA
+    // the 3-way collapses to "union by key, LWW per key on
+    // collision". Audit item 4b's `keys.cd_tombstones.v1` filter will
+    // plug in on top of this once it lands.
+    local.custom_data = merge_meta_custom_data(&local.custom_data, &remote.custom_data);
 
     // NOTE: `generator`, `header_hash`, `unknown_xml` are not merged
     // per the spec. `generator` is overwritten by whichever writer
@@ -174,6 +177,52 @@ fn min_with_unlimited_i64(a: i64, b: i64) -> i64 {
         (true, false) => b,
         (false, true) => a,
         (false, false) => a.min(b),
+    }
+}
+
+/// Per-key union of two `<Meta><CustomData>` lists. Keys present on
+/// either side land in the merged result; per-key value collisions
+/// arbitrate by LWW on each item's `last_modified` field, with a
+/// concrete `Some` always winning over `None` (a writer that set the
+/// timestamp positively recorded the edit). Output is sorted by key
+/// so the merge is deterministic.
+fn merge_meta_custom_data(a: &[CustomDataItem], b: &[CustomDataItem]) -> Vec<CustomDataItem> {
+    use std::collections::HashMap;
+    let mut by_key: HashMap<&str, &CustomDataItem> = HashMap::new();
+    for item in a.iter().chain(b.iter()) {
+        match by_key.get(item.key.as_str()).copied() {
+            None => {
+                by_key.insert(item.key.as_str(), item);
+            }
+            Some(existing) if item.value == existing.value => {
+                // Same value on both sides — pick the entry with the
+                // later (or any concrete) `last_modified` so the
+                // merged timestamp is the freshest one we've seen.
+                if take_later_lm(existing.last_modified, item.last_modified) {
+                    by_key.insert(item.key.as_str(), item);
+                }
+            }
+            Some(existing) => {
+                // Value disagreement — LWW on `last_modified`.
+                if take_later_lm(existing.last_modified, item.last_modified) {
+                    by_key.insert(item.key.as_str(), item);
+                }
+            }
+        }
+    }
+    let mut out: Vec<CustomDataItem> = by_key.into_values().cloned().collect();
+    out.sort_by(|x, y| x.key.cmp(&y.key));
+    out
+}
+
+/// `true` when the candidate's `last_modified` should beat the
+/// incumbent's. Concrete `Some` beats `None`; among two `Some`s the
+/// strictly-later one wins; among two `None`s the incumbent stays.
+fn take_later_lm(incumbent: Option<DateTime<Utc>>, candidate: Option<DateTime<Utc>>) -> bool {
+    match (incumbent, candidate) {
+        (Some(i), Some(c)) => c > i,
+        (None, Some(_)) => true,
+        _ => false,
     }
 }
 
@@ -364,6 +413,50 @@ mod tests {
         merge_meta(&mut l, &r);
         assert_eq!(l.custom_icons.len(), 1);
         assert_eq!(l.custom_icons[0].name, "new-name");
+    }
+
+    fn cd(key: &str, value: &str, last_modified: Option<DateTime<Utc>>) -> CustomDataItem {
+        CustomDataItem::new(key.to_string(), value.to_string(), last_modified)
+    }
+
+    #[test]
+    fn meta_custom_data_unions_disjoint_keys_from_both_sides() {
+        let mut l = fresh();
+        l.custom_data
+            .push(cd("plugin.a.setting", "L-only", Some(at(2026, 4, 1))));
+        let mut r = fresh();
+        r.custom_data
+            .push(cd("plugin.b.setting", "R-only", Some(at(2026, 4, 1))));
+        merge_meta(&mut l, &r);
+        let keys: std::collections::HashSet<&str> =
+            l.custom_data.iter().map(|i| i.key.as_str()).collect();
+        assert!(keys.contains("plugin.a.setting"));
+        assert!(keys.contains("plugin.b.setting"));
+    }
+
+    #[test]
+    fn meta_custom_data_lww_picks_later_modified_on_key_collision() {
+        let mut l = fresh();
+        l.custom_data
+            .push(cd("plugin.x", "old", Some(at(2026, 4, 1))));
+        let mut r = fresh();
+        r.custom_data
+            .push(cd("plugin.x", "new", Some(at(2026, 5, 1))));
+        merge_meta(&mut l, &r);
+        assert_eq!(l.custom_data.len(), 1);
+        assert_eq!(l.custom_data[0].value, "new");
+    }
+
+    #[test]
+    fn meta_custom_data_concrete_modified_beats_none() {
+        let mut l = fresh();
+        l.custom_data.push(cd("plugin.x", "none-side", None));
+        let mut r = fresh();
+        r.custom_data
+            .push(cd("plugin.x", "remote-wins", Some(at(2026, 4, 1))));
+        merge_meta(&mut l, &r);
+        assert_eq!(l.custom_data.len(), 1);
+        assert_eq!(l.custom_data[0].value, "remote-wins");
     }
 
     #[test]
