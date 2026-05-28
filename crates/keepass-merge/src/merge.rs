@@ -69,6 +69,10 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
         remote.meta.master_key_changed,
     ) {
         if local_at != remote_at {
+            crate::events::emit(&crate::MergeEvent::MasterKeyDisagreement {
+                local_changed_at: local_at,
+                remote_changed_at: remote_at,
+            });
             return Err(MergeError::MasterKeyDisagreement {
                 local_changed_at: local_at,
                 remote_changed_at: remote_at,
@@ -133,9 +137,17 @@ fn route_both_present(
     // logs and surface the "no shared history" banner.
     if !merge_out.had_ancestor {
         outcome.lca_missing_entries.push(id);
+        crate::events::emit(&crate::MergeEvent::LcaMissing {
+            entry: id,
+            title: local.title.clone(),
+        });
     }
     if merge_out.corruption_signal {
         outcome.corruption_signals.push(id);
+        crate::events::emit(&crate::MergeEvent::CorruptionSignal {
+            entry: id,
+            title: local.title.clone(),
+        });
     }
 
     // Stash the attachment auto-resolutions for apply to consume.

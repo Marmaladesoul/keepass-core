@@ -112,12 +112,22 @@ pub(super) fn apply_concurrent_entry_moves(local: &mut Vault, remote: &Vault) {
     }
 
     for (id, new_parent_id) in moves {
+        let local_parent = local_parents.get(&id).copied();
         let Some(detached) = detach_entry(&mut local.root, id) else {
             continue;
         };
+        let title = detached.title.clone();
         match find_group_mut(&mut local.root, new_parent_id) {
             Some(parent) => parent.entries.push(detached),
             None => local.root.entries.push(detached),
+        }
+        if let Some(local_parent) = local_parent {
+            crate::events::emit(&crate::MergeEvent::EntryConcurrentMove {
+                entry: id,
+                title,
+                local_parent,
+                remote_parent: new_parent_id,
+            });
         }
     }
 }
@@ -219,15 +229,25 @@ pub(super) fn apply_concurrent_group_moves(local: &mut Vault, remote: &Vault) {
         if !is_safe_reparent(&local.root, id, new_parent_id) {
             continue;
         }
+        let local_parent = local_parents.get(&id).copied();
         let Some(detached) = detach_group(&mut local.root, id) else {
             continue;
         };
+        let name = detached.name.clone();
         // Find new parent and insert. If the new parent isn't present
         // locally either (e.g. concurrent restructure on both sides),
         // restore at the root so the group isn't lost.
         match find_group_mut(&mut local.root, new_parent_id) {
             Some(parent) => parent.groups.push(detached),
             None => local.root.groups.push(detached),
+        }
+        if let Some(local_parent) = local_parent {
+            crate::events::emit(&crate::MergeEvent::GroupConcurrentMove {
+                group: id,
+                name,
+                local_parent,
+                remote_parent: new_parent_id,
+            });
         }
     }
 }
