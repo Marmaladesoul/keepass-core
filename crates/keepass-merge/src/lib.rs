@@ -44,6 +44,8 @@ pub use crate::outcome::MergeOutcome;
 pub use crate::prune::prune_history_with_tombstones;
 pub use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice, Resolution};
 pub use crate::tombstone::{
-    HistoryTombstone, TAG_STATE_CUSTOM_DATA_KEY, TOMBSTONE_CUSTOM_DATA_KEY, TagRemoval, TagState,
-    TombstoneError, TombstoneReason, add_history_tombstone, parse_tag_state, parse_tombstones,
+    ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY, AttachmentTombstone, HistoryTombstone,
+    TAG_STATE_CUSTOM_DATA_KEY, TOMBSTONE_CUSTOM_DATA_KEY, TagRemoval, TagState, TombstoneError,
+    TombstoneReason, add_history_tombstone, parse_attachment_tombstones, parse_tag_state,
+    parse_tombstones,
 };

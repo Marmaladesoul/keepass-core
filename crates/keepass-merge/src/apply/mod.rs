@@ -55,8 +55,8 @@ mod resolution;
 mod tree;
 
 use resolution::{
-    apply_delete_edit_resolutions, apply_entry_conflict_resolutions, apply_merged_tags,
-    validate_resolution,
+    apply_attachment_tombstones, apply_delete_edit_resolutions, apply_entry_conflict_resolutions,
+    apply_merged_tags, validate_resolution,
 };
 use tree::{
     EntryWinner, apply_group_tree, build_merged_entry, reconcile_entry_timestamps_recursive,
@@ -79,6 +79,7 @@ use tree::{
 /// `Resolution::default()` is the auto-apply incantation: when the
 /// outcome's `entry_conflicts` and `delete_edit_conflicts` buckets
 /// are empty, an empty resolution is sufficient.
+#[allow(clippy::too_many_lines)]
 pub fn apply_merge(
     local: &mut Vault,
     remote: &Vault,
@@ -106,6 +107,10 @@ pub fn apply_merge(
     // (`keys.tag_state.v1`). The classifier excludes `<CustomData>`,
     // so this pre-pass covers the entries that route to no bucket.
     tree::union_tag_states_across_entries(&mut local.root, remote);
+    // Likewise for attachment detach-tombstones
+    // (`keys.attachment_tombstones.v1`). Reads from local.binaries
+    // before the BinaryPoolRemap split-borrow steals it.
+    tree::union_attachment_tombstones_across_entries(&mut local.root, remote, &local.binaries);
 
     // Split-borrow Vault fields so `BinaryPoolRemap` can hold
     // `&mut local.binaries` while the entry-mutation steps work on
@@ -158,6 +163,12 @@ pub fn apply_merge(
             &mut remap,
         );
         apply_merged_tags(&mut merged, outcome, *id, local_entry, remote_entry);
+        apply_attachment_tombstones(
+            &mut merged,
+            local_entry,
+            remote_entry,
+            remap.local_binaries(),
+        );
         replace_entry(local_root, *id, merged);
     }
 
@@ -190,6 +201,12 @@ pub fn apply_merge(
             &mut remap,
         );
         apply_merged_tags(&mut merged, outcome, *id, local_entry, remote_entry);
+        apply_attachment_tombstones(
+            &mut merged,
+            local_entry,
+            remote_entry,
+            remap.local_binaries(),
+        );
         replace_entry(local_root, *id, merged);
     }
 
