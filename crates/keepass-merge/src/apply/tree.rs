@@ -839,12 +839,18 @@ pub(super) fn reconcile_entry_timestamps_recursive(
 ) {
     for entry in &mut group.entries {
         if let Some(r) = remote_entries.get(&entry.id) {
+            // Advancing timestamps — max-of-two.
             take_later_opt(
                 &mut entry.times.last_modification_time,
                 r.times.last_modification_time,
             );
             take_later_opt(&mut entry.times.last_access_time, r.times.last_access_time);
             take_later_opt(&mut entry.times.location_changed, r.times.location_changed);
+            // Identity-bearing timestamp (spec §2.3 entry row) —
+            // min-of-two. The first creation time is the canonical one;
+            // a later write that revised this timestamp upward is
+            // discarded.
+            take_earlier_opt(&mut entry.times.creation_time, r.times.creation_time);
         }
     }
     for sub in &mut group.groups {
@@ -869,6 +875,8 @@ pub(super) fn reconcile_group_timestamps_walk(
         );
         take_later_opt(&mut group.times.last_access_time, r.times.last_access_time);
         take_later_opt(&mut group.times.location_changed, r.times.location_changed);
+        // Identity-bearing (spec §2.2 group row) — min-of-two.
+        take_earlier_opt(&mut group.times.creation_time, r.times.creation_time);
     }
     for sub in &mut group.groups {
         reconcile_group_timestamps_walk(sub, remote_by_id);
@@ -882,6 +890,21 @@ pub(super) fn take_later_opt(
     match (*target, candidate) {
         (None, Some(c)) => *target = Some(c),
         (Some(t), Some(c)) if c > t => *target = Some(c),
+        _ => {}
+    }
+}
+
+/// Take the earlier of two optional timestamps — the "identity-bearing"
+/// reconciliation rule for creation times. `None` is treated as
+/// "unknown" and loses to any concrete value; once a concrete value
+/// is on either side, the earliest one wins.
+pub(super) fn take_earlier_opt(
+    target: &mut Option<chrono::DateTime<chrono::Utc>>,
+    candidate: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    match (*target, candidate) {
+        (None, Some(c)) => *target = Some(c),
+        (Some(t), Some(c)) if c < t => *target = Some(c),
         _ => {}
     }
 }
