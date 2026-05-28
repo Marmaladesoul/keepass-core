@@ -111,13 +111,23 @@ pub(crate) struct EntryMergeOutput {
     /// every conflicting field was classified conservatively (no
     /// auto-resolution attempted).
     ///
-    /// Slice 3's vault walker doesn't read this directly — the
-    /// per-field auto-resolution profile carries enough information
-    /// for routing. Kept as a `pub(crate)` signal so a future slice
-    /// can emit a `debug!` ("no LCA found, conservative fallback")
-    /// if the FFI layer grows a tracing subscriber.
-    #[allow(dead_code)]
+    /// Read by [`crate::merge::merge`]'s routing pass: when `false` and
+    /// the entry routes to a conflict bucket, the entry id is recorded
+    /// in [`crate::MergeOutcome::lca_missing_entries`] so the FFI layer
+    /// can surface the spec §6 warn-severity log ("Entry 'X' had no
+    /// shared history — manual review needed for all changed fields").
     pub had_ancestor: bool,
+    /// `true` when this entry's merge tripped the "independent
+    /// same-UUID creation, no LCA, no shared history" corruption signal
+    /// per spec §3 case 2: both sides hold the entry, both sides'
+    /// `<History>` lists are empty, both sides carry a
+    /// `last_modification_time`, and no shared ancestor was found.
+    /// This combination cannot arise from a normal sync flow — UUIDs
+    /// are random and unique — and is a stronger signal than a plain
+    /// "histories truncated" no-LCA fall-through. The merge still
+    /// routes the entry through the parking path (don't auto-fix) but
+    /// the caller is expected to surface a structured error.
+    pub corruption_signal: bool,
 }
 
 /// One auto-resolved attachment decision. Companion to the field-level
@@ -160,6 +170,23 @@ pub(crate) fn merge_entry(
     let merged_tag_set_view: std::collections::BTreeSet<&str> =
         merged_tags.iter().map(String::as_str).collect();
     let tags_changed_from_local = merged_tag_set_view != local_tag_set;
+    let had_ancestor = ancestor.is_some();
+    // Corruption signal per spec §3: same UUID seen on both sides, no
+    // shared ancestor, and neither side has any history records. Real
+    // edit divergence either produces a shared ancestor (LCA found) or
+    // leaves at least one side with a non-empty history (the side that
+    // did the editing). Two history-empty entries with the same UUID
+    // and disjoint state can only arise from independent creation —
+    // i.e. UUID collision, which kdbx UUIDs make vanishingly unlikely
+    // — or a corruption bug elsewhere in the stack. Require both sides
+    // to carry a `last_modification_time`: an empty-history entry with
+    // an absent mtime is just a freshly-defaulted shell, not a
+    // corruption signal.
+    let corruption_signal = !had_ancestor
+        && local.history.is_empty()
+        && remote.history.is_empty()
+        && local.times.last_modification_time.is_some()
+        && remote.times.last_modification_time.is_some();
     let mut out = EntryMergeOutput {
         conflicts: Vec::new(),
         auto_resolutions: Vec::new(),
@@ -169,7 +196,8 @@ pub(crate) fn merge_entry(
         tags_changed_from_local,
         icon_conflict: None,
         icon_auto_resolution: None,
-        had_ancestor: ancestor.is_some(),
+        had_ancestor,
+        corruption_signal,
     };
 
     // Standard fields: always present on both sides; comparator is value-only.

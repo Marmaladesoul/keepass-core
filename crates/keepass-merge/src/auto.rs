@@ -33,10 +33,37 @@ use chrono::{DateTime, Utc};
 use keepass_core::model::{CustomDataItem, Entry, EntryId, Group, Vault};
 
 use crate::apply::apply_merge;
-use crate::conflict::AttachmentDeltaKind;
+use crate::conflict::{AttachmentDeltaKind, EntryConflict};
 use crate::field_conflict::{FIELD_CONFLICT_CUSTOM_DATA_KEY, FieldConflictMarker};
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice, Resolution};
 use crate::{MergeError, MergeOutcome};
+
+/// Standard `<String>` field name that always parks on disagreement
+/// per spec §5.1 — silent password reversion is the worst-case
+/// outcome of getting a 3-way merge wrong, so for this field we
+/// deliberately keep BOTH sides for the user to review.
+const PASSWORD_FIELD: &str = "Password";
+
+/// Per-entry parking decision, derived from `(mtime, sensitive-field?)`
+/// before we synthesise the [`Resolution`] for `apply_merge`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParkingDecision {
+    /// Local won by mtime (or tied — tie falls to local pending the
+    /// pubkey tiebreaker). `apply_merge` keeps local's field values;
+    /// remote's pre-merge clone is pushed to history with the marker.
+    WinnerLocal,
+    /// Remote won by mtime. `apply_merge` takes remote's field values;
+    /// local's pre-merge snapshot (which `build_resolved_entry` is
+    /// about to push anyway) is tagged with the marker in place.
+    WinnerRemote,
+    /// One or more conflicting fields is Password or has the
+    /// `Protected="True"` bit set on either side. Neither side wins
+    /// outright — `apply_merge` arbitrarily keeps local (deterministic
+    /// across peers given the same `(local, remote)` pair) and BOTH
+    /// sides are parked into history with markers so the user reviews
+    /// on equal footing per spec §5.1.
+    BothSidesSensitive,
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -100,27 +127,35 @@ pub struct ParkedConflictsReport {
 ///   as-is by the underlying [`apply_merge`] call. These represent
 ///   non-conflicting changes the existing three-way classifier
 ///   auto-resolved.
-/// - **`entry_conflicts`**: PARKED. Local's current state is left
-///   untouched. A clone of `conflict.remote` is pushed into the
-///   matching local entry's `<History>` with a `FieldConflictMarker`
-///   tagged on its `custom_data`. The synthesised [`Resolution`] used
-///   for `apply_merge` picks `ConflictSide::Local` for every
-///   field / attachment / icon choice on these entries — so the
-///   apply step is effectively a no-op for their main state, beyond
-///   the standard local-snapshot push the apply path always does.
+/// - **`entry_conflicts`**: PARKED with the spec §5.2 mtime-based
+///   winner. The side with the more recent `last_modification_time`
+///   takes the merged current state; the loser is pushed into history
+///   tagged with the `FieldConflictMarker`. For the Password field —
+///   and any custom field whose `Protected="True"` bit is set on
+///   either side — spec §5.1 overrides: neither side wins, local is
+///   kept arbitrarily for the current state, and BOTH sides land in
+///   history with markers so the user reviews on equal footing.
+///   The resolver UI surfaces parked entries via the
+///   `FIELD_CONFLICT_CUSTOM_DATA_KEY` badge regardless of which side
+///   currently materialises on disk.
 /// - **`delete_edit_conflicts`**: edit-wins rule —
 ///   `DeleteEditChoice::KeepLocal`. Local entry is preserved.
 ///   Reported in `entries_restored_from_deletion` for downstream UX
 ///   that wants to surface "we kept your edits across a remote
 ///   deletion."
 ///
-/// ## What this does NOT do
+/// ## Tied mtime
 ///
-/// It does **not** auto-resolve content in entries the existing
-/// three-way merge flagged as conflicts. The merge's classification
-/// is preserved bit-for-bit; the rework is purely about how
-/// conflicts are *surfaced* (parked in history vs. blocking on a
-/// modal), not how they're *resolved* (still up to the user).
+/// When both sides share the same sub-second-resolution
+/// `last_modification_time` for a non-sensitive conflict, the spec
+/// calls for a pubkey-based tiebreaker (per the rework spec §6).
+/// **TODO(PR-4):** wire account-identity pubkeys through to here.
+/// Until then, tied mtime falls back to Local — deterministic per
+/// peer, but doesn't fully converge across peers in the rare tied
+/// case. Convergence in that case requires the user to resolve via
+/// the parked-conflict UI (each peer surfaces the conflict
+/// independently); the resolution propagates via the standard
+/// history-tombstone path.
 ///
 /// # Errors
 ///
@@ -132,22 +167,29 @@ pub fn apply_merge_park_conflicts(
     outcome: &MergeOutcome,
     config: &ParkConflictsConfig,
 ) -> Result<ParkedConflictsReport, MergeError> {
-    // Step 1: synthesise a Resolution that picks Local for every
-    // conflict choice. apply_merge then leaves conflicting
-    // entries' main fields unchanged.
-    let resolution = synthesize_keep_local_resolution(outcome);
+    // Decide per-entry winner up front. The same decisions feed both
+    // the Resolution we hand to apply_merge (who wins the current
+    // state) and the post-apply parking step (whose pre-merge snapshot
+    // gets the marker — and whether to park both sides for the
+    // sensitive-field case).
+    let decisions = parking_decisions(outcome);
+
+    // Step 1: synthesise a Resolution that picks the winner per
+    // decision. apply_merge then materialises the winner's field
+    // values onto the merged entry.
+    let resolution = synthesize_mtime_based_resolution(outcome, &decisions);
 
     // Step 2: standard apply with the synthesised Resolution.
     apply_merge(local, remote, outcome, &resolution)?;
 
-    // Step 3: AFTER apply has settled the merged tree, push a
-    // marked clone of each conflict's remote entry into local's
-    // matching entry's history. Parking must happen post-apply
-    // because `apply::resolution::build_resolved_entry`
-    // reconstructs each conflicted entry from the captured
-    // `conflict.local` snapshot — anything we'd injected
-    // pre-apply would be wiped by the `replace_entry` call.
-    park_conflict_snapshots(local, remote, outcome, config);
+    // Step 3: AFTER apply has settled the merged tree, push or in-place
+    // tag the loser-side snapshot(s) with the field-conflict marker.
+    // Parking must happen post-apply because
+    // `apply::resolution::build_resolved_entry` reconstructs each
+    // conflicted entry from the captured `conflict.local` snapshot —
+    // anything we'd injected pre-apply would be wiped by the
+    // `replace_entry` call.
+    park_conflict_snapshots(local, remote, outcome, &decisions, config);
 
     // Step 4: assemble the report.
     Ok(ParkedConflictsReport {
@@ -167,6 +209,86 @@ pub fn apply_merge_park_conflicts(
 }
 
 // ---------------------------------------------------------------------------
+// Parking decisions — mtime-based winner with sensitive-field detection.
+// ---------------------------------------------------------------------------
+
+fn parking_decisions(
+    outcome: &MergeOutcome,
+) -> std::collections::HashMap<EntryId, ParkingDecision> {
+    outcome
+        .entry_conflicts
+        .iter()
+        .map(|c| (c.entry_id, decide_one(c)))
+        .collect()
+}
+
+fn decide_one(conflict: &EntryConflict) -> ParkingDecision {
+    if is_sensitive_conflict(conflict) {
+        return ParkingDecision::BothSidesSensitive;
+    }
+    match mtime_winner(&conflict.local, &conflict.remote) {
+        ConflictSide::Local => ParkingDecision::WinnerLocal,
+        ConflictSide::Remote => ParkingDecision::WinnerRemote,
+    }
+}
+
+/// Spec §5.1: the Password field (and any custom field with
+/// `Protected="True"` on either side) always parks BOTH sides instead
+/// of picking a winner. Silent password reversion is the worst-case
+/// outcome of getting the 3-way merge wrong; the cost of asking the
+/// user to confirm is acceptable.
+fn is_sensitive_conflict(conflict: &EntryConflict) -> bool {
+    for delta in &conflict.field_deltas {
+        if delta.key == PASSWORD_FIELD {
+            return true;
+        }
+        // Custom field: check either side's `protected` bit. Either
+        // side asserting protection is enough — the bit is the user's
+        // signal that the value is sensitive.
+        let protected_either_side = conflict
+            .local
+            .custom_fields
+            .iter()
+            .any(|f| f.key == delta.key && f.protected)
+            || conflict
+                .remote
+                .custom_fields
+                .iter()
+                .any(|f| f.key == delta.key && f.protected);
+        if protected_either_side {
+            return true;
+        }
+    }
+    false
+}
+
+/// Spec §5.2: winner = side with the more recent
+/// `last_modification_time`. On a tie (sub-second equal), the spec
+/// calls for a pubkey-based tiebreaker per the rework spec §6.
+/// **TODO(PR-4):** wire account-identity pubkeys through to here.
+/// Until then, tied-mtime falls back to Local — deterministic from
+/// each peer's own perspective, even though it doesn't converge
+/// across peers in the tied case. Convergence in that case requires
+/// the user to resolve via the parked-conflict UI (which both peers
+/// will surface independently); the resolution then propagates via
+/// the standard history-tombstone path.
+fn mtime_winner(local: &Entry, remote: &Entry) -> ConflictSide {
+    let l = local.times.last_modification_time;
+    let r = remote.times.last_modification_time;
+    match (l, r) {
+        (Some(l), Some(r)) if l > r => ConflictSide::Local,
+        (Some(l), Some(r)) if r > l => ConflictSide::Remote,
+        // Tied (sub-second-equal) → TODO(PR-4) pubkey tiebreaker. Local
+        // falls out as the default. We also fold the
+        // (Some/None) + (None/None) cases into this arm: any concrete
+        // mtime is newer than unknown, so local wins when only local
+        // has one and the both-None fallback also goes to local.
+        (Some(_) | None, None) | (Some(_), Some(_)) => ConflictSide::Local,
+        (None, Some(_)) => ConflictSide::Remote,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Step 1 — park remote-side conflict entries as marked history records.
 // ---------------------------------------------------------------------------
 
@@ -174,41 +296,136 @@ fn park_conflict_snapshots(
     local: &mut Vault,
     _remote: &Vault,
     outcome: &MergeOutcome,
+    decisions: &std::collections::HashMap<EntryId, ParkingDecision>,
     config: &ParkConflictsConfig,
 ) {
     if outcome.entry_conflicts.is_empty() {
         return;
     }
-    // EntryConflict already carries `remote: Entry` in full — no
-    // need to re-walk `_remote` to find it. We just need to find
-    // each conflict's matching local entry and push a clone with
-    // the marker.
+    // EntryConflict already carries both `local` and `remote: Entry`
+    // in full — no need to re-walk `_remote`. The decision per entry
+    // controls *which* snapshot(s) get the marker:
+    //
+    // - `WinnerLocal`: park the remote loser → push a fresh
+    //   remote-clone with marker into local's history.
+    // - `WinnerRemote`: park the local loser → `build_resolved_entry`
+    //   already pushed a local-pre-merge snapshot into history without
+    //   a marker; find it by mtime and tag in place. Avoids a duplicate
+    //   `(mtime, content)` history record that the next round's
+    //   `merge_histories` would dedup (and might lose the marker on).
+    // - `BothSidesSensitive`: park both. `apply_merge` kept local
+    //   arbitrarily; the local-snapshot it pushed gets the marker in
+    //   place; a fresh remote-clone is pushed with marker too.
     let marker_value = FieldConflictMarker { at: config.now }.to_value();
     let marker_now = Some(config.now);
     for conflict in &outcome.entry_conflicts {
         let Some(local_entry) = find_entry_mut(&mut local.root, conflict.entry_id) else {
             continue;
         };
-        let mut parked = conflict.remote.clone();
-        // KDBX history records never nest their own history.
-        parked.history.clear();
-        // Don't double-park if the same `(mtime, content)` snapshot
-        // is already marker-tagged in local's history.
-        if local_entry.history.iter().any(|h| {
-            h.times.last_modification_time == parked.times.last_modification_time
-                && h.custom_data
-                    .iter()
-                    .any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
-        }) {
-            continue;
+        let decision = decisions
+            .get(&conflict.entry_id)
+            .copied()
+            .unwrap_or(ParkingDecision::WinnerLocal);
+        match decision {
+            ParkingDecision::WinnerLocal => {
+                push_marker_clone(local_entry, &conflict.remote, &marker_value, marker_now);
+            }
+            ParkingDecision::WinnerRemote => {
+                // The loser snapshot — local's pre-merge — was pushed
+                // into history by `build_resolved_entry`. Tag it in
+                // place. If the find-by-mtime probe misses (unlikely),
+                // fall through to a fresh push as a defensive belt.
+                if !tag_existing_snapshot_at_mtime(
+                    local_entry,
+                    conflict.local.times.last_modification_time,
+                    &marker_value,
+                    marker_now,
+                ) {
+                    push_marker_clone(local_entry, &conflict.local, &marker_value, marker_now);
+                }
+            }
+            ParkingDecision::BothSidesSensitive => {
+                // Tag the local snapshot pushed by `build_resolved_entry`
+                // (or push a fresh local-clone if the probe misses,
+                // again as a belt). Then push the remote-clone with
+                // marker so both sides have a marked record.
+                if !tag_existing_snapshot_at_mtime(
+                    local_entry,
+                    conflict.local.times.last_modification_time,
+                    &marker_value,
+                    marker_now,
+                ) {
+                    push_marker_clone(local_entry, &conflict.local, &marker_value, marker_now);
+                }
+                push_marker_clone(local_entry, &conflict.remote, &marker_value, marker_now);
+            }
         }
-        parked.custom_data.push(CustomDataItem::new(
-            FIELD_CONFLICT_CUSTOM_DATA_KEY.to_string(),
-            marker_value.clone(),
-            marker_now,
-        ));
-        local_entry.history.push(parked);
     }
+}
+
+/// Push a marker-tagged clone of `source` into `entry.history`,
+/// guarding against double-parking at the same mtime if a marker is
+/// already present.
+fn push_marker_clone(
+    entry: &mut Entry,
+    source: &Entry,
+    marker_value: &str,
+    marker_now: Option<DateTime<Utc>>,
+) {
+    let mtime = source.times.last_modification_time;
+    // Idempotence: if a marker-tagged record already exists at this
+    // mtime, the entry has already been parked this round.
+    if entry.history.iter().any(|h| {
+        h.times.last_modification_time == mtime
+            && h.custom_data
+                .iter()
+                .any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
+    }) {
+        return;
+    }
+    let mut parked = source.clone();
+    // KDBX history records never nest their own history.
+    parked.history.clear();
+    parked.custom_data.push(CustomDataItem::new(
+        FIELD_CONFLICT_CUSTOM_DATA_KEY.to_string(),
+        marker_value.to_string(),
+        marker_now,
+    ));
+    entry.history.push(parked);
+}
+
+/// Find an existing history record at `mtime` that doesn't already
+/// carry the marker, and add the marker to its `custom_data`. Returns
+/// `true` if a record was tagged; `false` if no candidate was found.
+///
+/// We match on mtime alone (no content-hash check) because the only
+/// situation this is called for is the loser-side snapshot the apply
+/// step just pushed: there's no other history record at that mtime in
+/// practice. A future content-hash refinement would harden against the
+/// pathological case of an unrelated history record with a colliding
+/// mtime, but for entry-level conflicts that scenario isn't reachable
+/// from the apply flow.
+fn tag_existing_snapshot_at_mtime(
+    entry: &mut Entry,
+    mtime: Option<DateTime<Utc>>,
+    marker_value: &str,
+    marker_now: Option<DateTime<Utc>>,
+) -> bool {
+    let Some(target) = entry.history.iter_mut().find(|h| {
+        h.times.last_modification_time == mtime
+            && !h
+                .custom_data
+                .iter()
+                .any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
+    }) else {
+        return false;
+    };
+    target.custom_data.push(CustomDataItem::new(
+        FIELD_CONFLICT_CUSTOM_DATA_KEY.to_string(),
+        marker_value.to_string(),
+        marker_now,
+    ));
+    true
 }
 
 fn find_entry_mut(group: &mut Group, id: EntryId) -> Option<&mut Entry> {
@@ -227,19 +444,34 @@ fn find_entry_mut(group: &mut Group, id: EntryId) -> Option<&mut Entry> {
 // Step 2 — synthesize a "keep local everywhere" Resolution.
 // ---------------------------------------------------------------------------
 
-fn synthesize_keep_local_resolution(outcome: &MergeOutcome) -> Resolution {
+fn synthesize_mtime_based_resolution(
+    outcome: &MergeOutcome,
+    decisions: &std::collections::HashMap<EntryId, ParkingDecision>,
+) -> Resolution {
     let mut resolution = Resolution::default();
 
     for conflict in &outcome.entry_conflicts {
-        // Per-field: every delta gets ConflictSide::Local. One-sided
-        // deltas pin to their only meaningful side anyway (a
-        // RemoteOnly field can't be "Local" — there's nothing to
-        // take); apply's `set_field_from` handles those by treating
-        // Local as "field stays absent."
+        let decision = decisions
+            .get(&conflict.entry_id)
+            .copied()
+            .unwrap_or(ParkingDecision::WinnerLocal);
+        // Per-field: pick the winner per the parking decision. For
+        // `BothSidesSensitive` (Password / `Protected="True"`) we
+        // arbitrarily keep local so the current state stays
+        // deterministic across peers given the same `(local, remote)`
+        // pair — the spec doesn't pick a winner here, but the file has
+        // to have *some* value in it, so we pin one and rely on the
+        // both-sides parking to surface the alternative for review.
+        let side_for_fields = match decision {
+            ParkingDecision::WinnerLocal | ParkingDecision::BothSidesSensitive => {
+                ConflictSide::Local
+            }
+            ParkingDecision::WinnerRemote => ConflictSide::Remote,
+        };
         if !conflict.field_deltas.is_empty() {
             let mut field_choices = std::collections::HashMap::new();
             for delta in &conflict.field_deltas {
-                field_choices.insert(delta.key.clone(), ConflictSide::Local);
+                field_choices.insert(delta.key.clone(), side_for_fields);
             }
             resolution
                 .entry_field_choices
@@ -314,8 +546,153 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap()
     }
 
+    fn one_conflict(
+        entry_id: EntryId,
+        local: Entry,
+        remote: Entry,
+        field_key: &str,
+    ) -> MergeOutcome {
+        let mut outcome = MergeOutcome::default();
+        outcome.entry_conflicts.push(EntryConflict {
+            entry_id,
+            local,
+            remote,
+            field_deltas: vec![crate::conflict::FieldDelta {
+                key: field_key.into(),
+                kind: crate::conflict::FieldDeltaKind::BothDiffer,
+            }],
+            attachment_deltas: vec![],
+            icon_delta: None,
+        });
+        outcome
+    }
+
     #[test]
-    fn keep_local_resolution_assigns_local_for_every_choice_bucket() {
+    fn mtime_winner_picks_newer_side() {
+        let l = entry_with_title(1, "L", at(2026, 5));
+        let r = entry_with_title(1, "R", at(2026, 4));
+        assert_eq!(mtime_winner(&l, &r), ConflictSide::Local);
+        assert_eq!(mtime_winner(&r, &l), ConflictSide::Remote);
+    }
+
+    #[test]
+    fn mtime_winner_ties_fall_to_local_until_pubkey_tiebreaker_lands() {
+        // TODO(PR-4): once account pubkeys are wired, replace this with
+        // a pubkey-comparison check.
+        let same = at(2026, 5);
+        let l = entry_with_title(1, "L", same.clone());
+        let r = entry_with_title(1, "R", same);
+        assert_eq!(mtime_winner(&l, &r), ConflictSide::Local);
+    }
+
+    #[test]
+    fn sensitive_detection_fires_on_password_field() {
+        let entry_id = EntryId(Uuid::from_u128(1));
+        let outcome = one_conflict(
+            entry_id,
+            entry_with_title(1, "L", at(2026, 5)),
+            entry_with_title(1, "R", at(2026, 4)),
+            "Password",
+        );
+        assert!(matches!(
+            decide_one(&outcome.entry_conflicts[0]),
+            ParkingDecision::BothSidesSensitive
+        ));
+    }
+
+    #[test]
+    fn sensitive_detection_fires_on_protected_custom_field() {
+        let entry_id = EntryId(Uuid::from_u128(1));
+        let mut local = entry_with_title(1, "L", at(2026, 5));
+        let mut remote = entry_with_title(1, "R", at(2026, 4));
+        // Custom field with Protected=true on local only — either-side
+        // assertion is enough.
+        local
+            .custom_fields
+            .push(keepass_core::model::CustomField::new(
+                "ApiToken",
+                "local-val",
+                true,
+            ));
+        remote
+            .custom_fields
+            .push(keepass_core::model::CustomField::new(
+                "ApiToken",
+                "remote-val",
+                false,
+            ));
+        let outcome = one_conflict(entry_id, local, remote, "ApiToken");
+        assert!(matches!(
+            decide_one(&outcome.entry_conflicts[0]),
+            ParkingDecision::BothSidesSensitive
+        ));
+    }
+
+    #[test]
+    fn non_sensitive_field_decision_follows_mtime_winner() {
+        let entry_id = EntryId(Uuid::from_u128(1));
+        let outcome = one_conflict(
+            entry_id,
+            entry_with_title(1, "L", at(2026, 5)),
+            entry_with_title(1, "R", at(2026, 4)),
+            "Title",
+        );
+        assert!(matches!(
+            decide_one(&outcome.entry_conflicts[0]),
+            ParkingDecision::WinnerLocal
+        ));
+
+        let outcome = one_conflict(
+            entry_id,
+            entry_with_title(1, "L", at(2026, 4)),
+            entry_with_title(1, "R", at(2026, 5)),
+            "Title",
+        );
+        assert!(matches!(
+            decide_one(&outcome.entry_conflicts[0]),
+            ParkingDecision::WinnerRemote
+        ));
+    }
+
+    #[test]
+    fn synthesized_resolution_uses_decided_winner_per_entry() {
+        let entry_id = EntryId(Uuid::from_u128(1));
+        // Remote newer → ConflictSide::Remote.
+        let outcome = one_conflict(
+            entry_id,
+            entry_with_title(1, "L", at(2026, 4)),
+            entry_with_title(1, "R", at(2026, 5)),
+            "Title",
+        );
+        let decisions = parking_decisions(&outcome);
+        let resolution = synthesize_mtime_based_resolution(&outcome, &decisions);
+        assert_eq!(
+            resolution.entry_field_choices[&entry_id]["Title"],
+            ConflictSide::Remote
+        );
+    }
+
+    #[test]
+    fn sensitive_resolution_keeps_local_arbitrarily() {
+        let entry_id = EntryId(Uuid::from_u128(1));
+        // Remote newer, BUT Password field → arbitrary local + both
+        // parked.
+        let outcome = one_conflict(
+            entry_id,
+            entry_with_title(1, "L", at(2026, 4)),
+            entry_with_title(1, "R", at(2026, 5)),
+            "Password",
+        );
+        let decisions = parking_decisions(&outcome);
+        let resolution = synthesize_mtime_based_resolution(&outcome, &decisions);
+        assert_eq!(
+            resolution.entry_field_choices[&entry_id]["Password"],
+            ConflictSide::Local
+        );
+    }
+
+    #[test]
+    fn synthesized_resolution_keeps_local_when_local_newer() {
         let entry_id = EntryId(Uuid::from_u128(1));
         let mut outcome = MergeOutcome::default();
         outcome.entry_conflicts.push(EntryConflict {
@@ -323,7 +700,7 @@ mod tests {
             local: entry_with_title(1, "L", at(2026, 5)),
             remote: entry_with_title(1, "R", at(2026, 4)),
             field_deltas: vec![crate::conflict::FieldDelta {
-                key: "Password".into(),
+                key: "Title".into(),
                 kind: crate::conflict::FieldDeltaKind::BothDiffer,
             }],
             attachment_deltas: vec![AttachmentDelta {
@@ -336,9 +713,10 @@ mod tests {
             }],
             icon_delta: None,
         });
-        let resolution = synthesize_keep_local_resolution(&outcome);
+        let decisions = parking_decisions(&outcome);
+        let resolution = synthesize_mtime_based_resolution(&outcome, &decisions);
         assert_eq!(
-            resolution.entry_field_choices[&entry_id]["Password"],
+            resolution.entry_field_choices[&entry_id]["Title"],
             ConflictSide::Local
         );
         assert!(matches!(
@@ -352,7 +730,8 @@ mod tests {
         let entry_id = EntryId(Uuid::from_u128(7));
         let mut outcome = MergeOutcome::default();
         outcome.delete_edit_conflicts.push(entry_id);
-        let resolution = synthesize_keep_local_resolution(&outcome);
+        let decisions = parking_decisions(&outcome);
+        let resolution = synthesize_mtime_based_resolution(&outcome, &decisions);
         assert_eq!(
             resolution.delete_edit_choices.get(&entry_id).copied(),
             Some(DeleteEditChoice::KeepLocal),
@@ -360,12 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn parking_pushes_remote_with_marker_into_local_history() {
-        // Build a one-entry local + remote vault and a synthetic
-        // outcome with a single entry_conflict pointing at that
-        // entry. After parking, local's entry's history should
-        // contain a remote-equivalent snapshot tagged with the
-        // marker key.
+    fn parking_winner_local_pushes_remote_clone_with_marker() {
         let entry_id = EntryId(Uuid::from_u128(1));
         let local_entry = entry_with_title(1, "local-title", at(2026, 5));
         let remote_entry = entry_with_title(1, "remote-title", at(2026, 4));
@@ -375,30 +749,18 @@ mod tests {
         let mut remote = Vault::empty(keepass_core::model::GroupId(Uuid::nil()));
         remote.root.entries.push(remote_entry.clone());
 
-        let mut outcome = MergeOutcome::default();
-        outcome.entry_conflicts.push(EntryConflict {
-            entry_id,
-            local: local_entry,
-            remote: remote_entry,
-            field_deltas: vec![crate::conflict::FieldDelta {
-                key: "Title".into(),
-                kind: crate::conflict::FieldDeltaKind::BothDiffer,
-            }],
-            attachment_deltas: vec![],
-            icon_delta: None,
-        });
-
+        let outcome = one_conflict(entry_id, local_entry, remote_entry, "Title");
+        let decisions = parking_decisions(&outcome);
         park_conflict_snapshots(
             &mut local,
             &remote,
             &outcome,
+            &decisions,
             &ParkConflictsConfig::with_now(now()),
         );
 
         let entry = &local.root.entries[0];
-        // Current state untouched.
-        assert_eq!(entry.title, "local-title");
-        // Exactly one history record, carrying the marker.
+        assert_eq!(entry.title, "local-title", "current state untouched");
         assert_eq!(entry.history.len(), 1);
         assert_eq!(entry.history[0].title, "remote-title");
         let marker = entry.history[0]
@@ -411,6 +773,98 @@ mod tests {
     }
 
     #[test]
+    fn parking_winner_remote_tags_existing_local_snapshot_in_place() {
+        let entry_id = EntryId(Uuid::from_u128(1));
+        let local_entry = entry_with_title(1, "local-title", at(2026, 4));
+        let remote_entry = entry_with_title(1, "remote-title", at(2026, 5));
+
+        // Simulate the post-apply state where `build_resolved_entry`
+        // has overlaid remote's fields onto local and pushed a local-
+        // pre-merge snapshot into history.
+        let mut local_post_apply = local_entry.clone();
+        local_post_apply.title = remote_entry.title.clone();
+        // local-pre-merge snapshot (no marker yet) at local's mtime.
+        local_post_apply.history.push(local_entry.clone());
+
+        let mut local = Vault::empty(keepass_core::model::GroupId(Uuid::nil()));
+        local.root.entries.push(local_post_apply);
+        let mut remote = Vault::empty(keepass_core::model::GroupId(Uuid::nil()));
+        remote.root.entries.push(remote_entry.clone());
+
+        let outcome = one_conflict(entry_id, local_entry, remote_entry, "Title");
+        let decisions = parking_decisions(&outcome);
+        park_conflict_snapshots(
+            &mut local,
+            &remote,
+            &outcome,
+            &decisions,
+            &ParkConflictsConfig::with_now(now()),
+        );
+
+        let entry = &local.root.entries[0];
+        // Exactly one history record — the one apply pushed, now
+        // tagged in place (no duplicate at the same mtime).
+        assert_eq!(entry.history.len(), 1);
+        assert_eq!(
+            entry.history[0].title, "local-title",
+            "tagged snapshot is local's pre-merge"
+        );
+        assert!(
+            entry.history[0]
+                .custom_data
+                .iter()
+                .any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY),
+            "marker added in place"
+        );
+    }
+
+    #[test]
+    fn parking_sensitive_marks_both_sides() {
+        let entry_id = EntryId(Uuid::from_u128(1));
+        let local_entry = entry_with_title(1, "local-title", at(2026, 4));
+        let remote_entry = entry_with_title(1, "remote-title", at(2026, 5));
+
+        // Sensitive path keeps local arbitrarily, so the post-apply
+        // state is the local entry (no field overlay) but with the
+        // local-pre-merge already in history (build_resolved_entry's
+        // snapshot push). Apply could push it identical to current.
+        let mut local_post_apply = local_entry.clone();
+        local_post_apply.history.push(local_entry.clone());
+
+        let mut local = Vault::empty(keepass_core::model::GroupId(Uuid::nil()));
+        local.root.entries.push(local_post_apply);
+        let mut remote = Vault::empty(keepass_core::model::GroupId(Uuid::nil()));
+        remote.root.entries.push(remote_entry.clone());
+
+        let outcome = one_conflict(entry_id, local_entry, remote_entry, "Password");
+        let decisions = parking_decisions(&outcome);
+        park_conflict_snapshots(
+            &mut local,
+            &remote,
+            &outcome,
+            &decisions,
+            &ParkConflictsConfig::with_now(now()),
+        );
+
+        let entry = &local.root.entries[0];
+        // Local snapshot tagged in place + remote-clone pushed with
+        // marker → two marker-tagged history records.
+        let marker_count = entry
+            .history
+            .iter()
+            .filter(|h| {
+                h.custom_data
+                    .iter()
+                    .any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
+            })
+            .count();
+        assert_eq!(
+            marker_count, 2,
+            "sensitive parking writes a marker on both sides"
+        );
+    }
+
+    #[test]
     fn parking_is_idempotent_on_repeat_call() {
         let entry_id = EntryId(Uuid::from_u128(1));
         let local_entry = entry_with_title(1, "local", at(2026, 5));
@@ -419,18 +873,11 @@ mod tests {
         local.root.entries.push(local_entry.clone());
         let mut remote = Vault::empty(keepass_core::model::GroupId(Uuid::nil()));
         remote.root.entries.push(remote_entry.clone());
-        let mut outcome = MergeOutcome::default();
-        outcome.entry_conflicts.push(EntryConflict {
-            entry_id,
-            local: local_entry,
-            remote: remote_entry,
-            field_deltas: vec![],
-            attachment_deltas: vec![],
-            icon_delta: None,
-        });
+        let outcome = one_conflict(entry_id, local_entry, remote_entry, "Title");
+        let decisions = parking_decisions(&outcome);
         let config = ParkConflictsConfig::with_now(now());
-        park_conflict_snapshots(&mut local, &remote, &outcome, &config);
-        park_conflict_snapshots(&mut local, &remote, &outcome, &config);
+        park_conflict_snapshots(&mut local, &remote, &outcome, &decisions, &config);
+        park_conflict_snapshots(&mut local, &remote, &outcome, &decisions, &config);
         // Second call must not duplicate the marker — same
         // `(mtime, marker-key)` already present.
         assert_eq!(local.root.entries[0].history.len(), 1);

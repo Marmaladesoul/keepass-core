@@ -455,31 +455,65 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_union_dedupes_by_exact_tuple() {
-        let when = Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap();
+    fn tombstone_union_dedupes_by_uuid_and_takes_earliest_deleted_at() {
+        // Spec §2.8: `<DeletedObjects>` is a grow-only set keyed by
+        // UUID; on duplicate UUID, take min `DeletionTime` (earliest
+        // deletion wins as provenance).
+        let earlier = Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap();
+        let later = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
         let id = Uuid::from_u128(1);
+
         let mut local = Vault::empty(GroupId(Uuid::nil()));
+        // Local saw the deletion at `later` (its clock or write order).
         local
             .deleted_objects
-            .push(DeletedObject::new(id, Some(when)));
+            .push(DeletedObject::new(id, Some(later)));
+
         let mut remote = Vault::empty(GroupId(Uuid::nil()));
-        // Same uuid+deleted_at — dedup.
+        // Remote saw the deletion at `earlier` — earliest known
+        // provenance.
         remote
             .deleted_objects
-            .push(DeletedObject::new(id, Some(when)));
-        // Same uuid, different deleted_at — both preserved.
-        let other_when = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
-        remote
-            .deleted_objects
-            .push(DeletedObject::new(id, Some(other_when)));
+            .push(DeletedObject::new(id, Some(earlier)));
 
         let outcome = merge(&local, &remote).expect("merge");
         apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
 
         assert_eq!(
             local.deleted_objects.len(),
-            2,
-            "exact-tuple dedup must preserve same-uuid different-time"
+            1,
+            "duplicate UUID must dedup to a single tombstone"
+        );
+        assert_eq!(
+            local.deleted_objects[0].deleted_at,
+            Some(earlier),
+            "earliest deleted_at wins on duplicate UUID per spec §2.8"
+        );
+    }
+
+    #[test]
+    fn tombstone_union_treats_none_deleted_at_as_later_than_known() {
+        // An `Option<DateTime>` of `None` means "unknown deletion time".
+        // Concrete provenance should win over unknown.
+        let when = Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap();
+        let id = Uuid::from_u128(1);
+
+        let mut local = Vault::empty(GroupId(Uuid::nil()));
+        local.deleted_objects.push(DeletedObject::new(id, None));
+
+        let mut remote = Vault::empty(GroupId(Uuid::nil()));
+        remote
+            .deleted_objects
+            .push(DeletedObject::new(id, Some(when)));
+
+        let outcome = merge(&local, &remote).expect("merge");
+        apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+
+        assert_eq!(local.deleted_objects.len(), 1);
+        assert_eq!(
+            local.deleted_objects[0].deleted_at,
+            Some(when),
+            "concrete deleted_at must win over None"
         );
     }
 

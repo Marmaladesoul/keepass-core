@@ -367,12 +367,17 @@ fn union_tombstones_recursive(group: &mut Group, remote_entries: &HashMap<EntryI
 // tombstones above)
 // ---------------------------------------------------------------------------
 
+/// Union the two sides' `<DeletedObjects>` tombstone lists, keyed by
+/// `UUID` only. On duplicate UUID, prefer the earliest `deleted_at`
+/// timestamp — earliest deletion provenance wins per spec §2.8. An
+/// absent (`None`) `deleted_at` is treated as later than any present
+/// timestamp so concrete provenance is preferred over unknown.
 pub(super) fn union_tombstones(
     local: &mut Vec<DeletedObject>,
     remote: &[DeletedObject],
     skip: &HashSet<Uuid>,
 ) {
-    let existing: HashSet<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+    let mut by_uuid: HashMap<Uuid, Option<chrono::DateTime<chrono::Utc>>> =
         local.iter().map(|t| (t.uuid, t.deleted_at)).collect();
     for t in remote {
         if skip.contains(&t.uuid) {
@@ -381,10 +386,39 @@ pub(super) fn union_tombstones(
             // re-deleted by the format's own merge semantics.
             continue;
         }
-        let key = (t.uuid, t.deleted_at);
-        if !existing.contains(&key) {
-            local.push(DeletedObject::new(t.uuid, t.deleted_at));
+        by_uuid
+            .entry(t.uuid)
+            .and_modify(|existing| *existing = earliest(*existing, t.deleted_at))
+            .or_insert(t.deleted_at);
+    }
+    // Walk local first so we update in place where the UUID already
+    // existed; append any UUIDs that arrived purely from remote.
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    for t in local.iter_mut() {
+        if let Some(merged_at) = by_uuid.get(&t.uuid).copied() {
+            t.deleted_at = merged_at;
+            seen.insert(t.uuid);
         }
+    }
+    for (uuid, deleted_at) in by_uuid {
+        if seen.insert(uuid) {
+            local.push(DeletedObject::new(uuid, deleted_at));
+        }
+    }
+}
+
+/// Pick the earlier of two optional timestamps. `None` is treated as
+/// later than any concrete time so provenance with a known
+/// `DeletionTime` is preferred over an unknown one — matches the
+/// history-tombstone union behaviour in `tombstone::union_history_tombstones`.
+fn earliest(
+    a: Option<chrono::DateTime<chrono::Utc>>,
+    b: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
     }
 }
 
