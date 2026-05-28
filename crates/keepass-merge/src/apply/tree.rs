@@ -45,10 +45,174 @@ pub(super) fn apply_group_tree(local: &mut Vault, remote: &Vault) {
     // locally-edited group).
     drop_remotely_tombstoned_groups(&mut local.root, &remote_tombstones);
 
-    // Pass 3: add any remote group not present locally and not in
+    // Pass 3: reparent groups whose parent differs between sides and
+    // whose remote `location_changed` is strictly newer. Spec §2.2
+    // arbitrates concurrent group-moves via LWW on `location_changed`
+    // — the kdbx-native "when was this last reparented" signal.
+    // Must run BEFORE `add_remote_only_groups` so the move target
+    // exists locally (or fails the safety check) before any new
+    // remote-side group is inserted.
+    apply_concurrent_group_moves(local, remote);
+
+    // Pass 4: add any remote group not present locally and not in
     // local's tombstones. Insert under the resolved parent (matches
     // remote's path) or under local's root as fallback.
     add_remote_only_groups(local, remote, &local_tombstones);
+}
+
+/// Reparent locally-existing groups whose remote-side parent differs
+/// from local's and whose `location_changed` advanced on remote.
+///
+/// For each group present on both sides with `remote_parent !=
+/// local_parent` and `remote.location_changed > local.location_changed`,
+/// detach the group from its local parent and re-attach it under the
+/// remote-side parent — provided the move is structurally safe (the
+/// new parent isn't the group itself or a descendant of it; otherwise
+/// the relocation would create a cycle and the move is skipped, with
+/// the locally-recorded position retained).
+///
+/// Spec §6 prose templates the activity-log entry; emission is audit
+/// item 10 / future slice.
+pub(super) fn apply_concurrent_group_moves(local: &mut Vault, remote: &Vault) {
+    let remote_parents = collect_parents(&remote.root);
+    let local_parents = collect_parents(&local.root);
+    let remote_loc = collect_location_changed(&remote.root);
+    let local_loc = collect_location_changed(&local.root);
+
+    // Build the move list before mutating; mutating local mid-iteration
+    // would invalidate the parent map.
+    let mut moves: Vec<(GroupId, GroupId)> = Vec::new();
+    for (id, remote_parent) in &remote_parents {
+        let Some(local_parent) = local_parents.get(id) else {
+            // Group not on local at all — handled by
+            // `add_remote_only_groups` in the next pass.
+            continue;
+        };
+        if remote_parent == local_parent {
+            continue;
+        }
+        let r_loc = remote_loc.get(id).copied().flatten();
+        let l_loc = local_loc.get(id).copied().flatten();
+        let remote_wins = match (l_loc, r_loc) {
+            (Some(l), Some(r)) => r > l,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if remote_wins {
+            moves.push((*id, *remote_parent));
+        }
+    }
+
+    for (id, new_parent_id) in moves {
+        if !is_safe_reparent(&local.root, id, new_parent_id) {
+            continue;
+        }
+        let Some(detached) = detach_group(&mut local.root, id) else {
+            continue;
+        };
+        // Find new parent and insert. If the new parent isn't present
+        // locally either (e.g. concurrent restructure on both sides),
+        // restore at the root so the group isn't lost.
+        match find_group_mut(&mut local.root, new_parent_id) {
+            Some(parent) => parent.groups.push(detached),
+            None => local.root.groups.push(detached),
+        }
+    }
+}
+
+/// Build a `child_id -> parent_id` map for every group below `root`
+/// (root excluded — it has no parent).
+fn collect_parents(root: &Group) -> HashMap<GroupId, GroupId> {
+    let mut out = HashMap::new();
+    walk_parents(root, &mut out);
+    out
+}
+
+fn walk_parents(group: &Group, out: &mut HashMap<GroupId, GroupId>) {
+    for child in &group.groups {
+        out.insert(child.id, group.id);
+        walk_parents(child, out);
+    }
+}
+
+fn collect_location_changed(
+    root: &Group,
+) -> HashMap<GroupId, Option<chrono::DateTime<chrono::Utc>>> {
+    let mut out = HashMap::new();
+    walk_location_changed(root, &mut out);
+    out
+}
+
+fn walk_location_changed(
+    group: &Group,
+    out: &mut HashMap<GroupId, Option<chrono::DateTime<chrono::Utc>>>,
+) {
+    out.insert(group.id, group.times.location_changed);
+    for child in &group.groups {
+        walk_location_changed(child, out);
+    }
+}
+
+/// `true` iff moving `subject` under `new_parent` preserves a tree
+/// (no cycle): the new parent is neither the subject itself nor any
+/// descendant of it.
+fn is_safe_reparent(root: &Group, subject: GroupId, new_parent: GroupId) -> bool {
+    if subject == new_parent {
+        return false;
+    }
+    let Some(subject_group) = find_group_ref(root, subject) else {
+        // Subject isn't even present — bail; the caller's detach will
+        // also bail.
+        return false;
+    };
+    !is_descendant(subject_group, new_parent)
+}
+
+fn find_group_ref(root: &Group, id: GroupId) -> Option<&Group> {
+    if root.id == id {
+        return Some(root);
+    }
+    for sub in &root.groups {
+        if let Some(found) = find_group_ref(sub, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn is_descendant(group: &Group, candidate: GroupId) -> bool {
+    for child in &group.groups {
+        if child.id == candidate {
+            return true;
+        }
+        if is_descendant(child, candidate) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Detach the group identified by `id` from `root`'s subtree by
+/// removing it from its parent's `groups` vector. Returns the removed
+/// `Group` (with its subtree intact) when found, `None` otherwise.
+/// Never removes the root itself.
+fn detach_group(root: &mut Group, id: GroupId) -> Option<Group> {
+    if root.id == id {
+        return None;
+    }
+    detach_recursive(root, id)
+}
+
+fn detach_recursive(group: &mut Group, id: GroupId) -> Option<Group> {
+    if let Some(idx) = group.groups.iter().position(|g| g.id == id) {
+        return Some(group.groups.remove(idx));
+    }
+    for sub in &mut group.groups {
+        if let Some(detached) = detach_recursive(sub, id) {
+            return Some(detached);
+        }
+    }
+    None
 }
 
 pub(super) fn take_later_group_metadata(local: &mut Group, remote: &Group) {

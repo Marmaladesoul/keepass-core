@@ -862,6 +862,159 @@ mod tests {
         );
     }
 
+    fn group_with_location(id: u128, name: &str, loc_changed_day: u32) -> Group {
+        let mut g = Group::empty(GroupId(Uuid::from_u128(id)));
+        g.name = name.into();
+        g.times.location_changed = Some(
+            Utc.with_ymd_and_hms(2026, 1, loc_changed_day, 0, 0, 0)
+                .unwrap(),
+        );
+        g
+    }
+
+    fn build_vault_with_groups(root_subgroups: Vec<Group>) -> Vault {
+        let mut v = Vault::empty(GroupId(Uuid::nil()));
+        v.root.groups = root_subgroups;
+        v
+    }
+
+    #[test]
+    fn concurrent_move_remote_newer_relocates_local_group() {
+        // Spec §2.2 / §6: A moves Streaming under Entertainment;
+        // B moves Streaming under Banking — LWW on location_changed.
+        // Here remote's location_changed is the later one, so the
+        // merged tree reparents to remote's choice.
+        let streaming_id = GroupId(Uuid::from_u128(0x57));
+
+        // Local: Entertainment > Streaming (older move).
+        let mut streaming_local = group_with_location(0x57, "Streaming", 5);
+        streaming_local.times.location_changed =
+            Some(Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap());
+        let mut ent_local = Group::empty(GroupId(Uuid::from_u128(0x10)));
+        ent_local.name = "Entertainment".into();
+        ent_local.groups.push(streaming_local);
+        let banking_local = {
+            let mut g = Group::empty(GroupId(Uuid::from_u128(0x20)));
+            g.name = "Banking".into();
+            g
+        };
+        let mut local = build_vault_with_groups(vec![ent_local, banking_local]);
+
+        // Remote: Banking > Streaming (newer move).
+        let mut streaming_remote = group_with_location(0x57, "Streaming", 10);
+        streaming_remote.times.location_changed =
+            Some(Utc.with_ymd_and_hms(2026, 1, 10, 0, 0, 0).unwrap());
+        let ent_remote = {
+            let mut g = Group::empty(GroupId(Uuid::from_u128(0x10)));
+            g.name = "Entertainment".into();
+            g
+        };
+        let mut banking_remote = Group::empty(GroupId(Uuid::from_u128(0x20)));
+        banking_remote.name = "Banking".into();
+        banking_remote.groups.push(streaming_remote);
+        let remote = build_vault_with_groups(vec![ent_remote, banking_remote]);
+
+        let outcome = merge(&local, &remote).expect("merge");
+        apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+
+        // Entertainment should no longer hold Streaming.
+        let ent = local
+            .root
+            .groups
+            .iter()
+            .find(|g| g.id.0 == Uuid::from_u128(0x10))
+            .expect("entertainment");
+        assert!(ent.groups.iter().all(|g| g.id != streaming_id));
+
+        // Banking should hold Streaming.
+        let banking = local
+            .root
+            .groups
+            .iter()
+            .find(|g| g.id.0 == Uuid::from_u128(0x20))
+            .expect("banking");
+        assert!(banking.groups.iter().any(|g| g.id == streaming_id));
+    }
+
+    #[test]
+    fn concurrent_move_local_newer_keeps_local_location() {
+        // Same shape but local's location_changed is the later one.
+        let streaming_id = GroupId(Uuid::from_u128(0x57));
+
+        let mut streaming_local = group_with_location(0x57, "Streaming", 10);
+        streaming_local.times.location_changed =
+            Some(Utc.with_ymd_and_hms(2026, 1, 10, 0, 0, 0).unwrap());
+        let mut ent_local = Group::empty(GroupId(Uuid::from_u128(0x10)));
+        ent_local.name = "Entertainment".into();
+        ent_local.groups.push(streaming_local);
+        let banking_local = {
+            let mut g = Group::empty(GroupId(Uuid::from_u128(0x20)));
+            g.name = "Banking".into();
+            g
+        };
+        let mut local = build_vault_with_groups(vec![ent_local, banking_local]);
+
+        let mut streaming_remote = group_with_location(0x57, "Streaming", 5);
+        streaming_remote.times.location_changed =
+            Some(Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap());
+        let ent_remote = {
+            let mut g = Group::empty(GroupId(Uuid::from_u128(0x10)));
+            g.name = "Entertainment".into();
+            g
+        };
+        let mut banking_remote = Group::empty(GroupId(Uuid::from_u128(0x20)));
+        banking_remote.name = "Banking".into();
+        banking_remote.groups.push(streaming_remote);
+        let remote = build_vault_with_groups(vec![ent_remote, banking_remote]);
+
+        let outcome = merge(&local, &remote).expect("merge");
+        apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+
+        let ent = local
+            .root
+            .groups
+            .iter()
+            .find(|g| g.id.0 == Uuid::from_u128(0x10))
+            .expect("entertainment");
+        assert!(
+            ent.groups.iter().any(|g| g.id == streaming_id),
+            "older remote move must not overwrite the local position"
+        );
+    }
+
+    #[test]
+    fn concurrent_move_skips_cycle_inducing_reparent() {
+        // Pathological: remote claims to move group A under one of A's
+        // own descendants — would create a cycle. The pass must skip
+        // the move; local's tree stays valid.
+        let a_id = GroupId(Uuid::from_u128(0xa));
+        let b_id = GroupId(Uuid::from_u128(0xb));
+
+        // Local: A > B at root.
+        let mut b_local = Group::empty(b_id);
+        b_local.name = "B".into();
+        let mut a_local = Group::empty(a_id);
+        a_local.name = "A".into();
+        a_local.groups.push(b_local);
+        a_local.times.location_changed = Some(Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap());
+        let mut local = build_vault_with_groups(vec![a_local]);
+
+        // Remote: claims A's new parent is B (a descendant of A).
+        let mut a_remote = Group::empty(a_id);
+        a_remote.name = "A".into();
+        a_remote.times.location_changed = Some(Utc.with_ymd_and_hms(2026, 1, 10, 0, 0, 0).unwrap());
+        let mut b_remote_root = Group::empty(b_id);
+        b_remote_root.name = "B".into();
+        b_remote_root.groups.push(a_remote);
+        let remote = build_vault_with_groups(vec![b_remote_root]);
+
+        let outcome = merge(&local, &remote).expect("merge");
+        apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+
+        // A should still be at root; cycle-inducing move skipped.
+        assert!(local.root.groups.iter().any(|g| g.id == a_id));
+    }
+
     #[test]
     fn reconcile_timestamps_takes_later_per_entry() {
         let mut local_entry = entry(1, "A", at(2026, 1));
