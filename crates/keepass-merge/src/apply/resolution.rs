@@ -241,22 +241,94 @@ pub(super) fn apply_entry_conflict_resolutions(
             icon_choice,
             remap,
         );
-        apply_merged_tags(&mut merged, outcome, conflict.entry_id);
+        apply_merged_tags(
+            &mut merged,
+            outcome,
+            conflict.entry_id,
+            &conflict.local,
+            &conflict.remote,
+        );
         replace_entry(local_root, conflict.entry_id, merged);
     }
 }
 
 /// Overwrite `merged.tags` with the per-entry merged tag set the
-/// classifier stashed during `merge`. The merged set is the auto-
-/// resolved union/honour-deletion outcome (see
-/// `_localdocs/MERGE_TAGS_DESIGN.md`); when nothing changed for tags,
-/// it's just `local.tags` re-sorted. Apply runs only when the entry
-/// landed in some bucket, so the no-stash branch is the omitted-
-/// entry case and we leave `merged.tags` alone.
-pub(super) fn apply_merged_tags(merged: &mut Entry, outcome: &MergeOutcome, id: EntryId) {
-    if let Some(set) = outcome.merged_tags_per_entry.get(&id) {
-        merged.tags = set.iter().cloned().collect();
+/// classifier stashed during `merge`, then run the
+/// `keys.tag_state.v1` tombstone filter pass and persist the unioned
+/// tag-state back onto `merged.custom_data`.
+///
+/// The classifier's merged set is the LCA-3-way outcome (see
+/// `_localdocs/MERGE_TAGS_DESIGN.md`); the tombstone pass on top is
+/// the kdbx-invisible "this tag was explicitly removed, do not
+/// resurrect it" signal documented in sync-merge-strategies.md §4.
+/// For each tag in the merged set we look up its tombstone (if any)
+/// and ask: is the most recent side that holds this tag carrying an
+/// mtime newer than the tombstone's `at`? If yes, the tag was re-added
+/// after the tombstone — keep it. If no (or only the tombstoned side
+/// has it), drop. KDBX has no per-tag add-time so the holding entry's
+/// `last_modification_time` is the spec-proxy add-time.
+///
+/// Apply runs only when the entry landed in some bucket, so the
+/// no-stash branch is the omitted-entry case and we leave
+/// `merged.tags` (and the persisted tag-state) alone.
+pub(super) fn apply_merged_tags(
+    merged: &mut Entry,
+    outcome: &MergeOutcome,
+    id: EntryId,
+    local_entry: &Entry,
+    remote_entry: &Entry,
+) {
+    let Some(set) = outcome.merged_tags_per_entry.get(&id) else {
+        return;
+    };
+
+    // Parse + union both sides' tag-state tombstones. Parse failures
+    // degrade silently to empty — a corrupt value mustn't crash the
+    // merge; the unioned-and-reserialised list overwrites it below.
+    let local_state =
+        crate::tombstone::parse_tag_state(&local_entry.custom_data).unwrap_or_default();
+    let remote_state =
+        crate::tombstone::parse_tag_state(&remote_entry.custom_data).unwrap_or_default();
+    let unioned = crate::tombstone::union_tag_states(&local_state, &remote_state);
+
+    let local_set: std::collections::BTreeSet<&str> =
+        local_entry.tags.iter().map(String::as_str).collect();
+    let remote_set: std::collections::BTreeSet<&str> =
+        remote_entry.tags.iter().map(String::as_str).collect();
+    let local_mtime = local_entry.times.last_modification_time;
+    let remote_mtime = remote_entry.times.last_modification_time;
+
+    let mut filtered: Vec<String> = Vec::with_capacity(set.len());
+    for tag in set {
+        let kept = match unioned.remove.get(tag) {
+            None => true,
+            Some(rm) => {
+                let local_add_time = local_set.contains(tag.as_str()).then_some(local_mtime);
+                let remote_add_time = remote_set.contains(tag.as_str()).then_some(remote_mtime);
+                let latest_add: Option<chrono::DateTime<chrono::Utc>> =
+                    [local_add_time, remote_add_time]
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .max();
+                // Re-add wins iff a concrete add-time is strictly newer
+                // than the tombstone's `at`. An absent mtime on the
+                // holding side can't beat a concrete tombstone time —
+                // conservative: don't resurrect a tombstoned tag on
+                // unknown provenance.
+                latest_add.is_some_and(|t| t > rm.at)
+            }
+        };
+        if kept {
+            filtered.push(tag.clone());
+        }
     }
+    merged.tags = filtered;
+
+    // Persist the unioned tag-state so the tombstones propagate to
+    // peers on the next sync round. `None` for last_modified — apply
+    // is pure.
+    crate::tombstone::write_tag_state_to_custom_data(&mut merged.custom_data, &unioned, None);
 }
 
 /// Build the post-resolution entry: clone the local side, apply each

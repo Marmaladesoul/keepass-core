@@ -18,7 +18,7 @@
 //! See `_project-management/history-tombstones.md` in the Keys repo
 //! for the broader design rationale and use cases.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use keepass_core::model::{Binary, CustomDataItem, Entry};
@@ -240,6 +240,166 @@ pub fn add_history_tombstone(
 }
 
 // ---------------------------------------------------------------------------
+// Tag remove-tombstones (`keys.tag_state.v1`).
+//
+// Per the sync-merge strategies spec §4, tag deletions need a
+// kdbx-native-invisible tombstone surface so a `subtract` operation
+// survives sync round-trips. Stored on the parent entry's
+// `<CustomData>` as `keys.tag_state.v1` with a single `remove` map
+// keyed by tag string.
+//
+// The same union semantics as history tombstones apply: set union
+// across both sides, earliest `at` wins on collision. The apply step
+// runs a filter pass over the merged tag set: for each tag the
+// classifier produced, drop it if it's tombstoned and the latest
+// add-time on either side is older than the tombstone's `at`. The
+// add-time proxy is the holding entry's `last_modification_time` —
+// kdbx doesn't track per-tag add-times, so a tag bumps the entry
+// mtime on add (per spec). Re-adding a tombstoned tag with a fresh
+// mtime overrides the tombstone for that round; future merges
+// re-evaluate.
+// ---------------------------------------------------------------------------
+
+/// `<CustomData>` key under which the tag-state object lives on each entry.
+/// Suffix `.v1` reserves room for schema migration.
+pub const TAG_STATE_CUSTOM_DATA_KEY: &str = "keys.tag_state.v1";
+
+/// One tag-removal record. The map key on [`TagState::remove`] is the
+/// tag string; this struct carries the deletion provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TagRemoval {
+    /// When the removal was issued. Used as the union tiebreaker:
+    /// earlier `at` wins when the same tag is tombstoned independently
+    /// on two peers (matches the history-tombstone semantics).
+    pub at: DateTime<Utc>,
+
+    /// Optional originating user/device public key, hex-encoded on
+    /// the wire. `None` is permitted for pre-P2P single-user contexts.
+    #[serde(default, with = "hex_array_32_opt")]
+    pub by: Option<[u8; 32]>,
+
+    /// What kind of deletion this represents. Tags only ever carry
+    /// `UserDelete` or `Other` in practice — quota trim and conflict
+    /// cleanup don't apply — but the variant is shared with the
+    /// history-tombstone reason for cross-surface consistency.
+    #[serde(default = "default_tag_reason")]
+    pub reason: TombstoneReason,
+}
+
+fn default_tag_reason() -> TombstoneReason {
+    TombstoneReason::UserDelete
+}
+
+impl TagRemoval {
+    /// Construct a [`TagRemoval`] with the given deletion timestamp.
+    /// Optional fields default to absent / `UserDelete` so adding
+    /// future fields is non-breaking.
+    #[must_use]
+    pub fn new(at: DateTime<Utc>) -> Self {
+        Self {
+            at,
+            by: None,
+            reason: TombstoneReason::UserDelete,
+        }
+    }
+
+    /// Stamp the originating pubkey on the record. Chainable.
+    #[must_use]
+    pub fn with_by(mut self, by: [u8; 32]) -> Self {
+        self.by = Some(by);
+        self
+    }
+
+    /// Override the deletion reason. Chainable.
+    #[must_use]
+    pub fn with_reason(mut self, reason: TombstoneReason) -> Self {
+        self.reason = reason;
+        self
+    }
+}
+
+/// Wire shape of `keys.tag_state.v1` — currently a single `remove`
+/// map keyed by tag string. The wrapper is intentional: a future
+/// schema revision may add `add: {…}` for explicit per-tag add-times
+/// without breaking the v1 deserialiser.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TagState {
+    /// Tags that have been explicitly removed, keyed by tag string.
+    /// Present tags are implicit (in `entry.tags`); absence here is
+    /// the no-tombstone default.
+    #[serde(default)]
+    pub remove: BTreeMap<String, TagRemoval>,
+}
+
+impl TagState {
+    /// `true` when no removals are recorded — used to short-circuit
+    /// the persistence step and keep the kdbx `<CustomData>` free of
+    /// the key for entries that have never had a tag tombstoned.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.remove.is_empty()
+    }
+}
+
+/// Read the tag-state object from an entry's `custom_data`. Returns
+/// an empty `TagState` when the key is absent (the common case).
+///
+/// # Errors
+///
+/// Returns [`TombstoneError::Parse`] when the value exists but is not
+/// well-formed JSON / doesn't match the schema.
+pub fn parse_tag_state(custom_data: &[CustomDataItem]) -> Result<TagState, TombstoneError> {
+    let Some(item) = custom_data
+        .iter()
+        .find(|i| i.key == TAG_STATE_CUSTOM_DATA_KEY)
+    else {
+        return Ok(TagState::default());
+    };
+    Ok(serde_json::from_str(&item.value)?)
+}
+
+/// Replace (or, when `state` is empty, remove) the tag-state object
+/// on an entry's `custom_data`. `last_modified` is stamped onto the
+/// underlying [`CustomDataItem::last_modified`] when `Some`; pass
+/// `None` from the pure merge apply path.
+pub(crate) fn write_tag_state_to_custom_data(
+    custom_data: &mut Vec<CustomDataItem>,
+    state: &TagState,
+    last_modified: Option<DateTime<Utc>>,
+) {
+    custom_data.retain(|item| item.key != TAG_STATE_CUSTOM_DATA_KEY);
+    if state.is_empty() {
+        return;
+    }
+    let json = serde_json::to_string(state).expect("TagState serialization is infallible");
+    custom_data.push(CustomDataItem::new(
+        TAG_STATE_CUSTOM_DATA_KEY.to_string(),
+        json,
+        last_modified,
+    ));
+}
+
+/// Union two tag-state objects: set union over `remove`, earliest
+/// `at` wins on per-key collision (lex-smallest `by` as the
+/// last-resort tiebreaker — mirrors [`union_history_tombstones`]).
+#[must_use]
+pub(crate) fn union_tag_states(a: &TagState, b: &TagState) -> TagState {
+    let mut out: BTreeMap<String, TagRemoval> = BTreeMap::new();
+    for (tag, rm) in a.remove.iter().chain(b.remove.iter()) {
+        out.entry(tag.clone())
+            .and_modify(|existing| {
+                if rm.at < existing.at || (rm.at == existing.at && rm.by < existing.by) {
+                    *existing = rm.clone();
+                }
+            })
+            .or_insert_with(|| rm.clone());
+    }
+    TagState { remove: out }
+}
+
+// ---------------------------------------------------------------------------
 // Hex serde helpers for the [u8; 32] fields.
 // ---------------------------------------------------------------------------
 
@@ -406,6 +566,76 @@ mod tests {
         assert_eq!(unioned.len(), 2);
         assert_eq!(unioned[0].mtime, Some(ts(2026, 1, 1)));
         assert_eq!(unioned[1].mtime, Some(ts(2026, 1, 2)));
+    }
+
+    fn tag_rm(at: DateTime<Utc>) -> TagRemoval {
+        TagRemoval {
+            at,
+            by: None,
+            reason: TombstoneReason::UserDelete,
+        }
+    }
+
+    #[test]
+    fn tag_state_roundtrip_json_through_custom_data() {
+        let mut state = TagState::default();
+        state
+            .remove
+            .insert("archive".to_string(), tag_rm(ts(2026, 4, 1)));
+        let mut cd: Vec<CustomDataItem> = Vec::new();
+        write_tag_state_to_custom_data(&mut cd, &state, Some(ts(2026, 5, 24)));
+        assert_eq!(cd.len(), 1);
+        let parsed = parse_tag_state(&cd).unwrap();
+        assert_eq!(parsed, state);
+    }
+
+    #[test]
+    fn tag_state_empty_removes_the_key() {
+        let mut cd = vec![CustomDataItem::new(
+            TAG_STATE_CUSTOM_DATA_KEY.to_string(),
+            "{\"remove\":{}}".to_string(),
+            None,
+        )];
+        write_tag_state_to_custom_data(&mut cd, &TagState::default(), None);
+        assert!(
+            cd.is_empty(),
+            "empty TagState must remove the custom_data key"
+        );
+    }
+
+    #[test]
+    fn tag_state_missing_key_parses_as_empty() {
+        let cd: Vec<CustomDataItem> = vec![CustomDataItem::new(
+            "some.other.key".to_string(),
+            "irrelevant".to_string(),
+            None,
+        )];
+        assert!(parse_tag_state(&cd).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tag_state_union_prefers_earlier_at_on_collision() {
+        let mut early = TagState::default();
+        early
+            .remove
+            .insert("archive".to_string(), tag_rm(ts(2026, 2, 1)));
+        let mut late = TagState::default();
+        late.remove
+            .insert("archive".to_string(), tag_rm(ts(2026, 3, 1)));
+        let unioned = union_tag_states(&late, &early);
+        assert_eq!(unioned.remove["archive"].at, ts(2026, 2, 1));
+    }
+
+    #[test]
+    fn tag_state_union_keeps_disjoint_tags_from_both_sides() {
+        let mut a = TagState::default();
+        a.remove
+            .insert("archive".to_string(), tag_rm(ts(2026, 2, 1)));
+        let mut b = TagState::default();
+        b.remove.insert("old".to_string(), tag_rm(ts(2026, 3, 1)));
+        let unioned = union_tag_states(&a, &b);
+        assert!(unioned.remove.contains_key("archive"));
+        assert!(unioned.remove.contains_key("old"));
     }
 
     #[test]

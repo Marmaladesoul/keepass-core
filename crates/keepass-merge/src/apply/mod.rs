@@ -102,6 +102,10 @@ pub fn apply_merge(
     // tombstone list would otherwise hit no bucket and never get
     // unioned.
     union_history_tombstones_across_entries(&mut local.root, remote);
+    // Same shape, different surface: tag remove-tombstones
+    // (`keys.tag_state.v1`). The classifier excludes `<CustomData>`,
+    // so this pre-pass covers the entries that route to no bucket.
+    tree::union_tag_states_across_entries(&mut local.root, remote);
 
     // Split-borrow Vault fields so `BinaryPoolRemap` can hold
     // `&mut local.binaries` while the entry-mutation steps work on
@@ -153,7 +157,7 @@ pub fn apply_merge(
             icon,
             &mut remap,
         );
-        apply_merged_tags(&mut merged, outcome, *id);
+        apply_merged_tags(&mut merged, outcome, *id, local_entry, remote_entry);
         replace_entry(local_root, *id, merged);
     }
 
@@ -185,7 +189,7 @@ pub fn apply_merge(
             icon,
             &mut remap,
         );
-        apply_merged_tags(&mut merged, outcome, *id);
+        apply_merged_tags(&mut merged, outcome, *id, local_entry, remote_entry);
         replace_entry(local_root, *id, merged);
     }
 

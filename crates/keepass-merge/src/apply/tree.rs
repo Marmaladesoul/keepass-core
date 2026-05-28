@@ -362,6 +362,55 @@ fn union_tombstones_recursive(group: &mut Group, remote_entries: &HashMap<EntryI
     }
 }
 
+/// Walk every entry present on both sides; union their tag-state
+/// tombstones into local in-place, and filter local's `tags` against
+/// the result.
+///
+/// Same rationale as [`union_history_tombstones_across_entries`]:
+/// the entry-merge classifier excludes `<CustomData>` from its
+/// comparator, so an entry that differs *only* in its tag-state would
+/// route to no bucket and the tombstone surface would never propagate.
+/// This pass touches every both-sides-present entry regardless of
+/// bucket. Idempotent with the downstream bucket logic — the apply
+/// step re-reads tag-state on the entries it rebuilds.
+///
+/// Filter rule (sync-merge-strategies.md §4): a tag is dropped when
+/// tombstoned and the holding side's `last_modification_time` is at
+/// or before the tombstone's `at`. An absent mtime can't beat a
+/// concrete tombstone — same conservative posture as the per-bucket
+/// filter in `apply::resolution::apply_merged_tags`.
+pub(super) fn union_tag_states_across_entries(local_root: &mut Group, remote: &Vault) {
+    let mut remote_entries: HashMap<EntryId, &Entry> = HashMap::new();
+    super::collect_entries(&remote.root, &mut remote_entries);
+    union_tag_states_recursive(local_root, &remote_entries);
+}
+
+fn union_tag_states_recursive(group: &mut Group, remote_entries: &HashMap<EntryId, &Entry>) {
+    for entry in &mut group.entries {
+        let Some(&remote_entry) = remote_entries.get(&entry.id) else {
+            continue;
+        };
+        let local_state = crate::tombstone::parse_tag_state(&entry.custom_data).unwrap_or_default();
+        let remote_state =
+            crate::tombstone::parse_tag_state(&remote_entry.custom_data).unwrap_or_default();
+        // Skip the rewrite when neither side has tag-state — the
+        // common case. Bare scan cost.
+        if local_state.is_empty() && remote_state.is_empty() {
+            continue;
+        }
+        let unioned = crate::tombstone::union_tag_states(&local_state, &remote_state);
+        let local_mtime = entry.times.last_modification_time;
+        entry.tags.retain(|tag| match unioned.remove.get(tag) {
+            None => true,
+            Some(rm) => local_mtime.is_some_and(|t| t > rm.at),
+        });
+        crate::tombstone::write_tag_state_to_custom_data(&mut entry.custom_data, &unioned, None);
+    }
+    for sub in &mut group.groups {
+        union_tag_states_recursive(sub, remote_entries);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tombstone union (vault-level DeletedObjects — distinct from history
 // tombstones above)
