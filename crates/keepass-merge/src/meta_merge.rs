@@ -318,7 +318,10 @@ mod tests {
         r.recycle_bin_changed = Some(at(2026, 5, 1));
         merge_meta(&mut l, &r);
         assert!(l.recycle_bin_enabled);
-        assert_eq!(l.recycle_bin_uuid, Some(GroupId(Uuid::from_u128(0x00c0_ffee))));
+        assert_eq!(
+            l.recycle_bin_uuid,
+            Some(GroupId(Uuid::from_u128(0x00c0_ffee)))
+        );
         assert_eq!(l.recycle_bin_changed, Some(at(2026, 5, 1)));
     }
 
