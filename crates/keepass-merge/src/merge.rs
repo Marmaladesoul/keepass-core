@@ -105,6 +105,17 @@ fn route_both_present(
 ) {
     let merge_out = merge_entry(local, remote, local_binaries, remote_binaries);
 
+    // Surface the LCA-mechanics signals. The merge keeps proceeding
+    // (conservative parking already covers the data-safety side); these
+    // lists exist so the FFI layer can emit the spec §6 warn / error
+    // logs and surface the "no shared history" banner.
+    if !merge_out.had_ancestor {
+        outcome.lca_missing_entries.push(id);
+    }
+    if merge_out.corruption_signal {
+        outcome.corruption_signals.push(id);
+    }
+
     // Stash the attachment auto-resolutions for apply to consume.
     if !merge_out.attachment_auto_resolutions.is_empty() {
         outcome
@@ -445,6 +456,49 @@ mod tests {
         let out = merge(&local, &remote).expect("merge");
         assert_eq!(out.delete_edit_conflicts, vec![EntryId(Uuid::from_u128(1))]);
         assert!(out.deleted_on_disk.is_empty());
+    }
+
+    #[test]
+    fn lca_missing_surfaces_when_both_histories_empty() {
+        // Two same-UUID entries with disjoint state and no history on
+        // either side trip the spec §3 corruption signal AND
+        // necessarily route through the no-LCA path.
+        let local = entry(1, "L", at(2026, 5));
+        let remote = entry(1, "R", at(2026, 4));
+        let out = merge(&vault_with(vec![local]), &vault_with(vec![remote])).expect("merge");
+        let id = EntryId(Uuid::from_u128(1));
+        assert!(
+            out.lca_missing_entries.contains(&id),
+            "no-LCA entry must appear in lca_missing_entries"
+        );
+        assert!(
+            out.corruption_signals.contains(&id),
+            "same-UUID + no LCA + empty histories on both sides is a corruption signal"
+        );
+    }
+
+    #[test]
+    fn lca_missing_does_not_imply_corruption_when_history_exists() {
+        // Long-divergence case (spec §3 case 1): both sides hold the
+        // entry, neither side has the LCA in their history (truncated),
+        // but at least one side carries *some* history. That's a
+        // truncation, not a corruption — surfaces in
+        // `lca_missing_entries` only.
+        let mut local = entry(1, "L", at(2026, 5));
+        let mut local_hist = entry(1, "H-local", at(2026, 1));
+        local_hist.history.clear();
+        local.history.push(local_hist);
+        let mut remote = entry(1, "R", at(2026, 4));
+        let mut remote_hist = entry(1, "H-remote", at(2026, 2));
+        remote_hist.history.clear();
+        remote.history.push(remote_hist);
+        let out = merge(&vault_with(vec![local]), &vault_with(vec![remote])).expect("merge");
+        let id = EntryId(Uuid::from_u128(1));
+        assert!(out.lca_missing_entries.contains(&id));
+        assert!(
+            !out.corruption_signals.contains(&id),
+            "long-divergence is not a corruption signal — both sides have history"
+        );
     }
 
     #[test]

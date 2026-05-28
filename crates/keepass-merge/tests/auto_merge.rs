@@ -169,10 +169,15 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Parked entries' main state is unchanged. This is the core
-// behavioural promise of the rework: we don't silently overwrite a
-// user's edit with the other side's edit just because the merge
-// classifier saw a conflict.
+// 3. Parked entries' main state matches the mtime-based winner (spec §5.2):
+// the side with the newer `last_modification_time` becomes the live entry's
+// state; the loser is pushed into history with the field-conflict marker.
+// Sensitive-field conflicts (Password / `Protected="True"`) deterministically
+// keep local arbitrarily — spec §5.1.
+//
+// Both branches preserve the rework's "no silent data loss" promise: the
+// loser-side state is always retained in history under the marker, so a
+// user can recover it via the resolver UI.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -183,33 +188,71 @@ proptest! {
     })]
 
     #[test]
-    fn parked_entry_main_state_unchanged(
+    fn parked_entry_main_state_matches_mtime_winner(
         a in vault_strategy(), b in vault_strategy(),
     ) {
         let outcome = merge(&a, &b).expect("merge");
         prop_assume!(!outcome.entry_conflicts.is_empty());
 
-        // Capture pre-merge titles for the conflict entries.
-        let pre_titles: std::collections::HashMap<EntryId, String> = outcome
+        // For each conflict, predict the post-merge title:
+        // - `Title` not among the conflicting `field_deltas` (only the
+        //   non-Title fields collided) → merged starts as a clone of
+        //   `conflict.local`, so post.title == local.title regardless
+        //   of mtime.
+        // - `Title` is in `field_deltas` and the conflict is sensitive
+        //   (any delta key is Password or has `Protected="True"` on
+        //   either side) → spec §5.1 keeps local arbitrarily.
+        // - `Title` is in `field_deltas` and the conflict is not
+        //   sensitive → spec §5.2 mtime winner picks the title.
+        let expected: std::collections::HashMap<EntryId, String> = outcome
             .entry_conflicts
             .iter()
-            .filter_map(|c| {
-                find_entry(&a.root, c.entry_id)
-                    .map(|e| (c.entry_id, e.title.clone()))
+            .map(|c| {
+                let title_in_deltas = c.field_deltas.iter().any(|d| d.key == "Title");
+                if !title_in_deltas {
+                    return (c.entry_id, c.local.title.clone());
+                }
+                let sensitive = c.field_deltas.iter().any(|d| {
+                    d.key == "Password"
+                        || c.local
+                            .custom_fields
+                            .iter()
+                            .any(|f| f.key == d.key && f.protected)
+                        || c.remote
+                            .custom_fields
+                            .iter()
+                            .any(|f| f.key == d.key && f.protected)
+                });
+                let title = if sensitive {
+                    c.local.title.clone()
+                } else {
+                    let l_mt = c.local.times.last_modification_time;
+                    let r_mt = c.remote.times.last_modification_time;
+                    let local_wins = match (l_mt, r_mt) {
+                        (Some(l), Some(r)) => l >= r, // tie → local per pubkey-TODO fallback
+                        (Some(_) | None, None) => true,
+                        (None, Some(_)) => false,
+                    };
+                    if local_wins {
+                        c.local.title.clone()
+                    } else {
+                        c.remote.title.clone()
+                    }
+                };
+                (c.entry_id, title)
             })
             .collect();
 
         let mut local = a.clone();
         apply_merge_park_conflicts(&mut local, &b, &outcome, &config()).expect("apply");
 
-        for (entry_id, pre_title) in &pre_titles {
+        for (entry_id, expected_title) in &expected {
             let post = find_entry(&local.root, *entry_id).expect("entry survives");
             prop_assert_eq!(
                 &post.title,
-                pre_title,
-                "parked entry {:?}'s current title changed from {:?} to {:?} — \
-                 the rework promises NOT to mutate parked entries' main state",
-                entry_id, pre_title, post.title,
+                expected_title,
+                "parked entry {:?}'s current title was {:?} but spec winner is {:?}",
+                entry_id, post.title, expected_title,
             );
         }
     }
