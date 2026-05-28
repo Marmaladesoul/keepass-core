@@ -90,6 +90,15 @@ pub fn apply_merge(
     // occurred when this returns Err; caller can fix and retry.
     validate_resolution(outcome, resolution)?;
 
+    // Vault-meta merge: spec §2.1 per-field LWW / min / grow-only-set
+    // rules. Runs before the structural passes because none of the
+    // downstream steps read from `local.meta`, but several of the
+    // settings (`HistoryMaxItems`, `RecycleBinUUID`, the custom-icon
+    // pool) are vault-wide invariants future passes may want to
+    // observe. Master-key disagreement is rejected upstream in
+    // `crate::merge::merge`; everything else converges deterministically.
+    crate::meta_merge::merge_meta(&mut local.meta, &remote.meta);
+
     // Group-tree LWW first so any newly-added remote groups are in
     // place before `added_on_disk` looks for parent-group paths.
     apply_group_tree(local, remote);
