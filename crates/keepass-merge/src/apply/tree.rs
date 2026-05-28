@@ -58,6 +58,118 @@ pub(super) fn apply_group_tree(local: &mut Vault, remote: &Vault) {
     // local's tombstones. Insert under the resolved parent (matches
     // remote's path) or under local's root as fallback.
     add_remote_only_groups(local, remote, &local_tombstones);
+
+    // Pass 5: reparent entries whose owning group differs between
+    // sides. Spec §2.3 arbitrates concurrent entry moves by LWW; we
+    // follow the group-move pass's posture and key on `location_changed`
+    // — the more precise "when was this last reparented" signal —
+    // rather than `last_modification_time`, which advances on every
+    // field edit and would over-trigger.
+    //
+    // Must run AFTER `add_remote_only_groups` so the move target group
+    // exists locally when the entry lands.
+    apply_concurrent_entry_moves(local, remote);
+}
+
+/// Reparent locally-existing entries whose remote-side owning group
+/// differs from local's and whose `location_changed` advanced on
+/// remote.
+///
+/// Same shape as `apply_concurrent_group_moves`: snapshot parents +
+/// `location_changed` before mutating, then for each entry on both
+/// sides under different parents with `remote.location_changed >
+/// local.location_changed`, detach from the current parent and
+/// re-attach under the remote-side parent. Falls back to root when
+/// the new parent isn't present locally (defensive — shouldn't be
+/// reachable because `add_remote_only_groups` has already run).
+///
+/// No cycle check is needed for entries: entries can't contain other
+/// entries, so a move can't induce a tree-shape cycle.
+pub(super) fn apply_concurrent_entry_moves(local: &mut Vault, remote: &Vault) {
+    let remote_parents = collect_entry_parents(&remote.root);
+    let local_parents = collect_entry_parents(&local.root);
+    let remote_loc = collect_entry_location_changed(&remote.root);
+    let local_loc = collect_entry_location_changed(&local.root);
+
+    let mut moves: Vec<(EntryId, GroupId)> = Vec::new();
+    for (id, remote_parent) in &remote_parents {
+        let Some(local_parent) = local_parents.get(id) else {
+            continue;
+        };
+        if remote_parent == local_parent {
+            continue;
+        }
+        let r_loc = remote_loc.get(id).copied().flatten();
+        let l_loc = local_loc.get(id).copied().flatten();
+        let remote_wins = match (l_loc, r_loc) {
+            (Some(l), Some(r)) => r > l,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if remote_wins {
+            moves.push((*id, *remote_parent));
+        }
+    }
+
+    for (id, new_parent_id) in moves {
+        let Some(detached) = detach_entry(&mut local.root, id) else {
+            continue;
+        };
+        match find_group_mut(&mut local.root, new_parent_id) {
+            Some(parent) => parent.entries.push(detached),
+            None => local.root.entries.push(detached),
+        }
+    }
+}
+
+fn collect_entry_parents(root: &Group) -> HashMap<EntryId, GroupId> {
+    let mut out = HashMap::new();
+    walk_entry_parents(root, &mut out);
+    out
+}
+
+fn walk_entry_parents(group: &Group, out: &mut HashMap<EntryId, GroupId>) {
+    for entry in &group.entries {
+        out.insert(entry.id, group.id);
+    }
+    for sub in &group.groups {
+        walk_entry_parents(sub, out);
+    }
+}
+
+fn collect_entry_location_changed(
+    root: &Group,
+) -> HashMap<EntryId, Option<chrono::DateTime<chrono::Utc>>> {
+    let mut out = HashMap::new();
+    walk_entry_location_changed(root, &mut out);
+    out
+}
+
+fn walk_entry_location_changed(
+    group: &Group,
+    out: &mut HashMap<EntryId, Option<chrono::DateTime<chrono::Utc>>>,
+) {
+    for entry in &group.entries {
+        out.insert(entry.id, entry.times.location_changed);
+    }
+    for sub in &group.groups {
+        walk_entry_location_changed(sub, out);
+    }
+}
+
+/// Detach an entry from `root`'s subtree by removing it from its
+/// owning group's `entries` vector. Returns the removed `Entry`
+/// (intact) when found.
+fn detach_entry(root: &mut Group, id: EntryId) -> Option<Entry> {
+    if let Some(idx) = root.entries.iter().position(|e| e.id == id) {
+        return Some(root.entries.remove(idx));
+    }
+    for sub in &mut root.groups {
+        if let Some(e) = detach_entry(sub, id) {
+            return Some(e);
+        }
+    }
+    None
 }
 
 /// Reparent locally-existing groups whose remote-side parent differs
