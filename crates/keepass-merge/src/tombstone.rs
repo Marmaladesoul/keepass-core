@@ -400,6 +400,185 @@ pub(crate) fn union_tag_states(a: &TagState, b: &TagState) -> TagState {
 }
 
 // ---------------------------------------------------------------------------
+// Attachment detach-tombstones (`keys.attachment_tombstones.v1`).
+//
+// Per the sync-merge strategies spec §4 + history-tombstones.md, an
+// attachment detach is tombstoned on `(filename, content_hash)` so a
+// stale peer that still holds the bytes can't silently reattach them
+// on the next sync round. The hash component distinguishes a re-attach
+// of *different* content under the same filename (which the tombstone
+// must NOT block) from a stale-peer reintroduction of the same bytes
+// (which it must block).
+//
+// Storage shape mirrors `keys.history_tombstones.v1` — a JSON array
+// of self-describing records. Union semantics: dedup by
+// `(filename, sha256)`, earliest `at` wins on collision. The filter
+// pass at apply time walks the merged entry's attachments and drops
+// any whose `(filename, sha256)` is tombstoned, unless the holding
+// side's `last_modification_time` is strictly newer than the
+// tombstone's `at` — the re-attach-after-delete escape hatch matches
+// the tag-state semantics.
+// ---------------------------------------------------------------------------
+
+/// `<CustomData>` key under which attachment detach-tombstones live
+/// on each entry. Suffix `.v1` reserves room for schema migration.
+pub const ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY: &str = "keys.attachment_tombstones.v1";
+
+/// One detached-attachment tombstone, keyed by `(filename, hash)`.
+///
+/// The composite key is deliberate: tombstoning by filename alone
+/// would block a legitimate re-attach of *different* content under
+/// the same name; tombstoning by hash alone would block a legitimate
+/// re-attach of identical bytes under a *different* name (e.g. a
+/// user-driven rename). The merge crate filters by the full pair so
+/// only a stale peer's reintroduction of the exact `(filename, hash)`
+/// fires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AttachmentTombstone {
+    /// Original filename of the detached attachment.
+    pub filename: String,
+
+    /// SHA-256 of the attachment payload, hex-encoded on the wire.
+    /// Matches the hash the merge crate computes during attachment
+    /// classification (`entry_merge::AttachmentSnap::sha256`).
+    #[serde(with = "hex_array_32")]
+    pub hash: [u8; 32],
+
+    /// When the detach was issued. Used as the union tiebreaker:
+    /// earlier `at` wins per spec §4.
+    pub at: DateTime<Utc>,
+
+    /// Optional originating user/device public key, hex-encoded.
+    #[serde(default, with = "hex_array_32_opt")]
+    pub by: Option<[u8; 32]>,
+
+    /// What kind of removal this represents. `UserDelete` is the
+    /// common case (the user removed the attachment); `ConflictCleanup`
+    /// can fire when the resolver picks a delete; `QuotaTrim` is not
+    /// currently emitted for attachments but the shared enum keeps the
+    /// surface uniform.
+    #[serde(default = "default_attachment_reason")]
+    pub reason: TombstoneReason,
+}
+
+fn default_attachment_reason() -> TombstoneReason {
+    TombstoneReason::UserDelete
+}
+
+impl AttachmentTombstone {
+    /// Construct an [`AttachmentTombstone`] with the required keys.
+    /// Optional fields default to absent / `UserDelete` so adding
+    /// future fields is non-breaking.
+    #[must_use]
+    pub fn new(filename: impl Into<String>, hash: [u8; 32], at: DateTime<Utc>) -> Self {
+        Self {
+            filename: filename.into(),
+            hash,
+            at,
+            by: None,
+            reason: TombstoneReason::UserDelete,
+        }
+    }
+
+    /// Stamp the originating pubkey on the record. Chainable.
+    #[must_use]
+    pub fn with_by(mut self, by: [u8; 32]) -> Self {
+        self.by = Some(by);
+        self
+    }
+
+    /// Override the deletion reason. Chainable.
+    #[must_use]
+    pub fn with_reason(mut self, reason: TombstoneReason) -> Self {
+        self.reason = reason;
+        self
+    }
+}
+
+/// Read the attachment-tombstone list from an entry's `custom_data`.
+/// Returns an empty `Vec` when the key is absent (the common case).
+///
+/// # Errors
+///
+/// Returns [`TombstoneError::Parse`] when the value exists but isn't
+/// well-formed JSON / doesn't match the schema.
+pub fn parse_attachment_tombstones(
+    custom_data: &[CustomDataItem],
+) -> Result<Vec<AttachmentTombstone>, TombstoneError> {
+    let Some(item) = custom_data
+        .iter()
+        .find(|i| i.key == ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY)
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(serde_json::from_str(&item.value)?)
+}
+
+/// Replace (or, when `tombstones` is empty, remove) the attachment-
+/// tombstone list on an entry's `custom_data`.
+pub(crate) fn write_attachment_tombstones_to_custom_data(
+    custom_data: &mut Vec<CustomDataItem>,
+    tombstones: &[AttachmentTombstone],
+    last_modified: Option<DateTime<Utc>>,
+) {
+    custom_data.retain(|item| item.key != ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY);
+    if tombstones.is_empty() {
+        return;
+    }
+    let json =
+        serde_json::to_string(tombstones).expect("AttachmentTombstone serialization is infallible");
+    custom_data.push(CustomDataItem::new(
+        ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY.to_string(),
+        json,
+        last_modified,
+    ));
+}
+
+/// Union two attachment-tombstone lists by `(filename, hash)`. When
+/// the same pair is present on both sides we keep the one with the
+/// earlier `at`, then the lex-smaller `by` as the deterministic
+/// last-resort tiebreaker (mirrors [`union_history_tombstones`]).
+///
+/// Output is sorted by `(filename, hash)` so the JSON representation
+/// is stable for property tests and visual diffing.
+#[must_use]
+pub(crate) fn union_attachment_tombstones(
+    a: &[AttachmentTombstone],
+    b: &[AttachmentTombstone],
+) -> Vec<AttachmentTombstone> {
+    let mut by_key: HashMap<(String, [u8; 32]), AttachmentTombstone> = HashMap::new();
+    for t in a.iter().chain(b.iter()) {
+        let key = (t.filename.clone(), t.hash);
+        by_key
+            .entry(key)
+            .and_modify(|existing| {
+                if t.at < existing.at || (t.at == existing.at && t.by < existing.by) {
+                    *existing = t.clone();
+                }
+            })
+            .or_insert_with(|| t.clone());
+    }
+    let mut out: Vec<_> = by_key.into_values().collect();
+    out.sort_by(|x, y| (x.filename.as_str(), &x.hash).cmp(&(y.filename.as_str(), &y.hash)));
+    out
+}
+
+/// Compact an attachment-tombstone list into a `(filename, hash)`
+/// lookup set for the apply-time filter pass.
+pub(crate) type AttachmentTombstoneSet = HashSet<(String, [u8; 32])>;
+
+#[must_use]
+pub(crate) fn attachment_tombstone_set(
+    tombstones: &[AttachmentTombstone],
+) -> AttachmentTombstoneSet {
+    tombstones
+        .iter()
+        .map(|t| (t.filename.clone(), t.hash))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Hex serde helpers for the [u8; 32] fields.
 // ---------------------------------------------------------------------------
 
@@ -636,6 +815,59 @@ mod tests {
         let unioned = union_tag_states(&a, &b);
         assert!(unioned.remove.contains_key("archive"));
         assert!(unioned.remove.contains_key("old"));
+    }
+
+    fn att_tomb(filename: &str, hash_byte: u8, at: DateTime<Utc>) -> AttachmentTombstone {
+        AttachmentTombstone {
+            filename: filename.to_string(),
+            hash: fixed_hash(hash_byte),
+            at,
+            by: None,
+            reason: TombstoneReason::UserDelete,
+        }
+    }
+
+    #[test]
+    fn attachment_tombstone_roundtrip_json_through_custom_data() {
+        let tombstones = vec![att_tomb("scan.pdf", 0xab, ts(2026, 5, 24))];
+        let mut cd: Vec<CustomDataItem> = Vec::new();
+        write_attachment_tombstones_to_custom_data(&mut cd, &tombstones, Some(ts(2026, 5, 24)));
+        assert_eq!(cd.len(), 1);
+        let parsed = parse_attachment_tombstones(&cd).unwrap();
+        assert_eq!(parsed, tombstones);
+    }
+
+    #[test]
+    fn attachment_tombstones_empty_list_removes_the_key() {
+        let mut cd = vec![CustomDataItem::new(
+            ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY.to_string(),
+            "[]".to_string(),
+            None,
+        )];
+        write_attachment_tombstones_to_custom_data(&mut cd, &[], None);
+        assert!(cd.is_empty());
+    }
+
+    #[test]
+    fn attachment_tombstone_union_prefers_earlier_at_on_filename_hash_collision() {
+        let early = att_tomb("scan.pdf", 0xab, ts(2026, 2, 1));
+        let later = att_tomb("scan.pdf", 0xab, ts(2026, 3, 1));
+        let unioned =
+            union_attachment_tombstones(std::slice::from_ref(&later), std::slice::from_ref(&early));
+        assert_eq!(unioned.len(), 1);
+        assert_eq!(unioned[0].at, ts(2026, 2, 1));
+    }
+
+    #[test]
+    fn attachment_tombstone_union_keeps_distinct_by_name_or_hash() {
+        // Same filename, different hash → two records.
+        let a = att_tomb("scan.pdf", 0xab, ts(2026, 2, 1));
+        let b = att_tomb("scan.pdf", 0xcd, ts(2026, 3, 1));
+        // Different filename, same hash → two records.
+        let c = att_tomb("scan2.pdf", 0xab, ts(2026, 4, 1));
+        let unioned =
+            union_attachment_tombstones(&[a.clone(), c.clone()], std::slice::from_ref(&b));
+        assert_eq!(unioned.len(), 3);
     }
 
     #[test]

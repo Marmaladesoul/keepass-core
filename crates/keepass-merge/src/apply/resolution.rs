@@ -248,6 +248,12 @@ pub(super) fn apply_entry_conflict_resolutions(
             &conflict.local,
             &conflict.remote,
         );
+        apply_attachment_tombstones(
+            &mut merged,
+            &conflict.local,
+            &conflict.remote,
+            remap.local_binaries(),
+        );
         replace_entry(local_root, conflict.entry_id, merged);
     }
 }
@@ -329,6 +335,100 @@ pub(super) fn apply_merged_tags(
     // peers on the next sync round. `None` for last_modified — apply
     // is pure.
     crate::tombstone::write_tag_state_to_custom_data(&mut merged.custom_data, &unioned, None);
+}
+
+/// Run the `keys.attachment_tombstones.v1` filter pass on top of the
+/// merged entry's final attachment list, and persist the unioned
+/// tombstones back onto `merged.custom_data`.
+///
+/// Mirrors `apply_merged_tags` in shape: parse both sides, union by
+/// `(filename, hash)` with earliest `at` winning, then drop any
+/// attachment whose `(filename, hash)` is tombstoned unless the
+/// holding side's mtime is strictly newer than the tombstone's `at`
+/// (the spec §4 re-add escape hatch). `binaries` is the local pool —
+/// `remap` has already rebound any remote-sourced refs by the time
+/// this runs, so every attachment on `merged` indexes into the local
+/// pool.
+pub(super) fn apply_attachment_tombstones(
+    merged: &mut Entry,
+    local_entry: &Entry,
+    remote_entry: &Entry,
+    binaries: &[Binary],
+) {
+    let local_ts =
+        crate::tombstone::parse_attachment_tombstones(&local_entry.custom_data).unwrap_or_default();
+    let remote_ts = crate::tombstone::parse_attachment_tombstones(&remote_entry.custom_data)
+        .unwrap_or_default();
+    if local_ts.is_empty() && remote_ts.is_empty() {
+        return;
+    }
+    let unioned = crate::tombstone::union_attachment_tombstones(&local_ts, &remote_ts);
+    let lookup: std::collections::HashMap<
+        (String, [u8; 32]),
+        &crate::tombstone::AttachmentTombstone,
+    > = unioned
+        .iter()
+        .map(|t| ((t.filename.clone(), t.hash), t))
+        .collect();
+
+    let local_set: std::collections::HashMap<&str, [u8; 32]> = local_entry
+        .attachments
+        .iter()
+        .filter_map(|a| {
+            let bin = binaries.get(a.ref_id as usize)?;
+            Some((a.name.as_str(), sha256_bytes(&bin.data)))
+        })
+        .collect();
+    let remote_set: std::collections::HashMap<&str, [u8; 32]> = remote_entry
+        .attachments
+        .iter()
+        .filter_map(|a| {
+            let bin = binaries.get(a.ref_id as usize)?;
+            Some((a.name.as_str(), sha256_bytes(&bin.data)))
+        })
+        .collect();
+    let local_mtime = local_entry.times.last_modification_time;
+    let remote_mtime = remote_entry.times.last_modification_time;
+
+    merged.attachments.retain(|att| {
+        let Some(bin) = binaries.get(att.ref_id as usize) else {
+            // Corrupt ref — preserve, matches the conservative posture
+            // elsewhere in the crate.
+            return true;
+        };
+        let hash = sha256_bytes(&bin.data);
+        let key = (att.name.clone(), hash);
+        let Some(rm) = lookup.get(&key) else {
+            return true;
+        };
+        // Re-attach wins iff a holding side carries this same
+        // (filename, hash) with mtime strictly newer than the
+        // tombstone's `at`. Unknown mtime conservatively loses to a
+        // concrete tombstone — same posture as tag-state filtering.
+        let local_add = local_set
+            .get(att.name.as_str())
+            .filter(|h| **h == hash)
+            .and(local_mtime);
+        let remote_add = remote_set
+            .get(att.name.as_str())
+            .filter(|h| **h == hash)
+            .and(remote_mtime);
+        let latest_add = [local_add, remote_add].into_iter().flatten().max();
+        latest_add.is_some_and(|t| t > rm.at)
+    });
+
+    crate::tombstone::write_attachment_tombstones_to_custom_data(
+        &mut merged.custom_data,
+        &unioned,
+        None,
+    );
+}
+
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().into()
 }
 
 /// Build the post-resolution entry: clone the local side, apply each
