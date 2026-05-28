@@ -1015,6 +1015,115 @@ mod tests {
         assert!(local.root.groups.iter().any(|g| g.id == a_id));
     }
 
+    fn entry_at_loc(id: u128, title: &str, loc_day: u32) -> Entry {
+        let mut e = entry(id, title, at(2026, 1));
+        e.times.location_changed = Some(Utc.with_ymd_and_hms(2026, 1, loc_day, 0, 0, 0).unwrap());
+        e
+    }
+
+    #[test]
+    fn concurrent_entry_move_remote_newer_relocates_local_entry() {
+        // Same shape as the group test, but for entries: A holds an
+        // entry on local; B holds it on remote with a newer
+        // `location_changed`. After merge the entry lives under B.
+        let entry_id = EntryId(Uuid::from_u128(0x77));
+
+        // Local: A > entry
+        let entry_local = {
+            let mut e = entry_at_loc(0x77, "x", 5);
+            e.id = entry_id;
+            e
+        };
+        let mut a_local = Group::empty(GroupId(Uuid::from_u128(0x10)));
+        a_local.name = "A".into();
+        a_local.entries.push(entry_local);
+        let b_local = {
+            let mut g = Group::empty(GroupId(Uuid::from_u128(0x20)));
+            g.name = "B".into();
+            g
+        };
+        let mut local = build_vault_with_groups(vec![a_local, b_local]);
+
+        // Remote: B > entry (newer location_changed)
+        let entry_remote = {
+            let mut e = entry_at_loc(0x77, "x", 10);
+            e.id = entry_id;
+            e
+        };
+        let a_remote = {
+            let mut g = Group::empty(GroupId(Uuid::from_u128(0x10)));
+            g.name = "A".into();
+            g
+        };
+        let mut b_remote = Group::empty(GroupId(Uuid::from_u128(0x20)));
+        b_remote.name = "B".into();
+        b_remote.entries.push(entry_remote);
+        let remote = build_vault_with_groups(vec![a_remote, b_remote]);
+
+        let outcome = merge(&local, &remote).expect("merge");
+        apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+
+        let a = local
+            .root
+            .groups
+            .iter()
+            .find(|g| g.id.0 == Uuid::from_u128(0x10))
+            .expect("A");
+        assert!(a.entries.iter().all(|e| e.id != entry_id));
+        let b = local
+            .root
+            .groups
+            .iter()
+            .find(|g| g.id.0 == Uuid::from_u128(0x20))
+            .expect("B");
+        assert!(b.entries.iter().any(|e| e.id == entry_id));
+    }
+
+    #[test]
+    fn concurrent_entry_move_local_newer_keeps_local_parent() {
+        let entry_id = EntryId(Uuid::from_u128(0x77));
+        let entry_local = {
+            let mut e = entry_at_loc(0x77, "x", 10);
+            e.id = entry_id;
+            e
+        };
+        let mut a_local = Group::empty(GroupId(Uuid::from_u128(0x10)));
+        a_local.name = "A".into();
+        a_local.entries.push(entry_local);
+        let b_local = {
+            let mut g = Group::empty(GroupId(Uuid::from_u128(0x20)));
+            g.name = "B".into();
+            g
+        };
+        let mut local = build_vault_with_groups(vec![a_local, b_local]);
+
+        let entry_remote = {
+            let mut e = entry_at_loc(0x77, "x", 5);
+            e.id = entry_id;
+            e
+        };
+        let a_remote = {
+            let mut g = Group::empty(GroupId(Uuid::from_u128(0x10)));
+            g.name = "A".into();
+            g
+        };
+        let mut b_remote = Group::empty(GroupId(Uuid::from_u128(0x20)));
+        b_remote.name = "B".into();
+        b_remote.entries.push(entry_remote);
+        let remote = build_vault_with_groups(vec![a_remote, b_remote]);
+
+        let outcome = merge(&local, &remote).expect("merge");
+        apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+
+        let a = local
+            .root
+            .groups
+            .iter()
+            .find(|g| g.id.0 == Uuid::from_u128(0x10))
+            .expect("A");
+        assert!(a.entries.iter().any(|e| e.id == entry_id));
+    }
+
     #[test]
     fn reconcile_timestamps_takes_later_per_entry() {
         let mut local_entry = entry(1, "A", at(2026, 1));
