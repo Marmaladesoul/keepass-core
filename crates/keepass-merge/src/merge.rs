@@ -54,6 +54,28 @@ use crate::{MergeError, MergeOutcome};
 ///        deleted it; remote needs the tombstone propagated).
 ///      - not tombstoned → `added_on_disk`.
 pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> {
+    // Pre-flight: refuse the merge outright on a master-key rotation
+    // disagreement (sync-merge spec §6). Two replicas that both record
+    // a concrete `<Meta><MasterKeyChanged>` and those timestamps
+    // differ have rotated the master key independently — silently
+    // picking one side's `Meta` would drop the other's password
+    // rotation. The engine layer surfaces the variant as the spec's
+    // hard-fault banner. We check before any entry-walking work
+    // because there is nothing safe to compute on a divergent-key
+    // vault: an entry-level merge would still write a single Meta
+    // back, smuggling one side's master-key state through.
+    if let (Some(local_at), Some(remote_at)) = (
+        local.meta.master_key_changed,
+        remote.meta.master_key_changed,
+    ) {
+        if local_at != remote_at {
+            return Err(MergeError::MasterKeyDisagreement {
+                local_changed_at: local_at,
+                remote_changed_at: remote_at,
+            });
+        }
+    }
+
     let local_entries = collect_entries_by_id(&local.root);
     let remote_entries = collect_entries_by_id(&remote.root);
 
@@ -271,7 +293,7 @@ fn walk_group<'a>(group: &'a Group, out: &mut HashMap<EntryId, &'a Entry>) {
 
 #[cfg(test)]
 mod tests {
-    use super::merge;
+    use super::{MergeError, merge};
     use chrono::{TimeZone, Utc};
     use keepass_core::model::{DeletedObject, Entry, EntryId, GroupId, Timestamps, Vault};
     use uuid::Uuid;
@@ -499,6 +521,53 @@ mod tests {
             !out.corruption_signals.contains(&id),
             "long-divergence is not a corruption signal — both sides have history"
         );
+    }
+
+    #[test]
+    fn master_key_disagreement_aborts_merge_when_both_timestamps_differ() {
+        let local = vault_with(vec![entry(1, "L", at(2026, 5))]);
+        let mut remote = vault_with(vec![entry(1, "R", at(2026, 4))]);
+        let local_at = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
+        let remote_at = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+        let mut local = local;
+        local.meta.master_key_changed = Some(local_at);
+        remote.meta.master_key_changed = Some(remote_at);
+        let err = merge(&local, &remote).expect_err("hard fault expected");
+        match err {
+            MergeError::MasterKeyDisagreement {
+                local_changed_at,
+                remote_changed_at,
+            } => {
+                assert_eq!(local_changed_at, local_at);
+                assert_eq!(remote_changed_at, remote_at);
+            }
+            other => panic!("expected MasterKeyDisagreement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn master_key_disagreement_does_not_fire_when_only_one_side_rotated() {
+        // One side rotated, the other never has — that's a normal
+        // unsynced rotation, not a disagreement. The vault-meta merge
+        // path (PR-3.2 item 5) will LWW the timestamp through; for now
+        // the merge proceeds.
+        let mut local = vault_with(vec![entry(1, "L", at(2026, 5))]);
+        let remote = vault_with(vec![entry(1, "R", at(2026, 4))]);
+        local.meta.master_key_changed = Some(Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap());
+        // remote.meta.master_key_changed stays None.
+        let _ = merge(&local, &remote).expect("single-side rotation must not fault");
+    }
+
+    #[test]
+    fn master_key_disagreement_does_not_fire_when_both_match() {
+        // Both sides record the same rotation timestamp — by far the
+        // common case, where rotation propagated cleanly.
+        let when = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
+        let mut local = vault_with(vec![entry(1, "L", at(2026, 5))]);
+        let mut remote = vault_with(vec![entry(1, "R", at(2026, 4))]);
+        local.meta.master_key_changed = Some(when);
+        remote.meta.master_key_changed = Some(when);
+        let _ = merge(&local, &remote).expect("matching rotation timestamps must not fault");
     }
 
     #[test]
