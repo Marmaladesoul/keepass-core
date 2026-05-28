@@ -1,0 +1,74 @@
+//! Integration coverage for the vault-meta merge introduced in
+//! PR-3.2d. Exercises the public `merge` / `apply_merge` pair so the
+//! spec §2.1 rules are observable end-to-end.
+
+use chrono::{TimeZone, Utc};
+use keepass_core::model::{CustomIcon, GroupId, Vault};
+use keepass_merge::{Resolution, apply_merge, merge};
+use uuid::Uuid;
+
+fn at(y: i32, m: u32, d: u32) -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap()
+}
+
+fn fresh_vault() -> Vault {
+    Vault::empty(GroupId(Uuid::nil()))
+}
+
+#[test]
+fn meta_merge_runs_via_apply_merge_for_disjoint_changes() {
+    // Local picked a name on 2026-04-01; remote later picked a
+    // description on 2026-05-01. Both changes must survive on local
+    // after apply.
+    let mut local = fresh_vault();
+    local.meta.database_name = "Family".into();
+    local.meta.database_name_changed = Some(at(2026, 4, 1));
+
+    let mut remote = fresh_vault();
+    remote.meta.database_description = "Shared vault".into();
+    remote.meta.database_description_changed = Some(at(2026, 5, 1));
+
+    let outcome = merge(&local, &remote).expect("merge");
+    apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+
+    assert_eq!(local.meta.database_name, "Family");
+    assert_eq!(local.meta.database_description, "Shared vault");
+}
+
+#[test]
+fn meta_merge_prefers_shorter_history_retention() {
+    let mut local = fresh_vault();
+    local.meta.history_max_items = 7;
+    let mut remote = fresh_vault();
+    remote.meta.history_max_items = 30;
+
+    let outcome = merge(&local, &remote).expect("merge");
+    apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+    assert_eq!(local.meta.history_max_items, 7);
+}
+
+#[test]
+fn meta_merge_unions_custom_icon_pool_via_apply_merge() {
+    let mut local = fresh_vault();
+    local.meta.custom_icons.push(CustomIcon::new(
+        Uuid::from_u128(1),
+        b"A".to_vec(),
+        "A".into(),
+        None,
+    ));
+    let mut remote = fresh_vault();
+    remote.meta.custom_icons.push(CustomIcon::new(
+        Uuid::from_u128(2),
+        b"B".to_vec(),
+        "B".into(),
+        None,
+    ));
+
+    let outcome = merge(&local, &remote).expect("merge");
+    apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
+
+    let uuids: std::collections::HashSet<Uuid> =
+        local.meta.custom_icons.iter().map(|i| i.uuid).collect();
+    assert!(uuids.contains(&Uuid::from_u128(1)));
+    assert!(uuids.contains(&Uuid::from_u128(2)));
+}
