@@ -19,6 +19,22 @@
 // Each integration test compiles this module independently, so some
 // `pub` items appear unused from any one test's perspective.
 #![allow(unreachable_pub)]
+// Pedantic lints are inherited from the workspace. For this kind of
+// scaffolding (random op generation, reproduction-friendly cloning,
+// chained pattern matches) the pedantic suggestions don't pay back
+// the readability cost. Production code keeps the warnings on.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::format_push_string,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_borrow,
+    clippy::result_large_err,
+    clippy::similar_names,
+    clippy::too_many_lines
+)]
 
 use std::collections::BTreeSet;
 
@@ -389,7 +405,7 @@ impl Sim {
                 changed_at: now,
             },
             OpKind::SetHistoryMaxItems => Op::SetHistoryMaxItems {
-                value: 1 + (self.rng.random::<u8>() as i32 % 30),
+                value: 1 + (i32::from(self.rng.random::<u8>()) % 30),
                 settings_changed: now,
             },
         }

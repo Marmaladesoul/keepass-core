@@ -1,3 +1,11 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::format_push_string,
+    clippy::needless_pass_by_value,
+    clippy::result_large_err
+)]
+
 //! Long-running chaos runner. Default-ignored so `cargo test` stays
 //! cheap; run explicitly with:
 //!
@@ -86,7 +94,7 @@ fn run_chaos_round(
 }
 
 #[test]
-#[ignore]
+#[ignore = "long-running chaos sweep; opt in with --ignored"]
 fn chaos_two_peer() {
     let base_seed = env_u64("CHAOS_SEED", 0x00C0_FFEE);
     let scenarios = env_u64(
@@ -110,7 +118,8 @@ fn chaos_two_peer() {
         }
     }
 
-    if failures > 0 {
-        panic!("{failures}/{scenarios} chaos scenarios failed; see stderr for replays");
-    }
+    assert!(
+        failures == 0,
+        "{failures}/{scenarios} chaos scenarios failed; see stderr for replays"
+    );
 }
