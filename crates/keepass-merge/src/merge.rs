@@ -117,6 +117,7 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
                 r,
                 remote_parents.get(&id).copied().unwrap_or(remote.root.id),
                 &local_tombstones,
+                &remote_tombstones,
                 &mut outcome,
             ),
             (None, None) => unreachable!("id collected from union of local + remote"),
@@ -314,6 +315,7 @@ fn route_remote_only(
     remote: &Entry,
     remote_parent: GroupId,
     local_tombstones: &HashMap<Uuid, Option<chrono::DateTime<chrono::Utc>>>,
+    remote_tombstones: &HashMap<Uuid, Option<chrono::DateTime<chrono::Utc>>>,
     outcome: &mut MergeOutcome,
 ) {
     let Some(local_deleted_at) = local_tombstones.get(&id.0) else {
@@ -323,6 +325,22 @@ fn route_remote_only(
     };
     // Symmetric edit-vs-delete: remote's mtime strictly newer than
     // local's deletion → "edit wins" per spec §4.
+    //
+    // Guard against the pathological "entry alive on remote AND
+    // tombstone for it in remote's `<DeletedObjects>`" state. That
+    // configuration is remote's own self-contradiction (a clean kdbx
+    // pipeline either holds the entry alive XOR carries the
+    // tombstone — see `keepass-core::kdbx::import_entry_with_uuid`'s
+    // tombstone scrub on restore). When it arises here — most
+    // commonly from a pathological proptest fixture but in principle
+    // from a corrupt-but-readable file — punting it to
+    // `local_deletions_pending_sync` matches the "remote will eventually
+    // reconcile itself" intuition and preserves the auto-apply
+    // fixed-point property the proptest exercises.
+    if remote_tombstones.contains_key(&id.0) {
+        outcome.local_deletions_pending_sync.push(id);
+        return;
+    }
     if remote_edited_after(remote, *local_deleted_at) {
         outcome.delete_edit_conflicts.push(id);
         outcome

@@ -41,9 +41,9 @@ pub struct MergeOutcome {
     /// * **Symmetric**: remote edited the entry; local tombstoned it
     ///   with `deleted_at < remote.mtime`. In this case local doesn't
     ///   actually hold the entry — the merge crate stashes remote's
-    ///   pre-merge entry content in
-    ///   [`Self::delete_edit_restore_from_remote`] so the apply step
-    ///   can restore it under remote's parent group.
+    ///   pre-merge entry content in a crate-private sidecar
+    ///   (`delete_edit_restore_from_remote`) so the apply step can
+    ///   restore it under remote's parent group.
     ///
     /// The auto-park flow synthesises `DeleteEditChoice::KeepLocal`
     /// for both directions per spec §4 "edit wins"; the apply step
