@@ -55,6 +55,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 #[test]
+#[allow(clippy::similar_names)] // g_a_local / g_b_local etc. are clearer than aliases here
 fn tag_tombstone_survives_concurrent_entry_reparent() {
     // Local: entry-1 under G_A, tag "archive" tombstoned at 2026-03-15.
     // Remote: entry-1 under G_B (concurrent move, newer
@@ -129,6 +130,7 @@ fn tag_tombstone_survives_concurrent_entry_reparent() {
 }
 
 #[test]
+#[allow(clippy::similar_names)]
 fn attachment_tombstone_survives_concurrent_entry_reparent() {
     // Same shape as the tag test but for `keys.attachment_tombstones.v1`.
     // Local: entry-1 under G_A, holds "scan.pdf" with tombstone for
