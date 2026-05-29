@@ -24,23 +24,36 @@
 //! a merge-algebra concern.
 
 use chrono::{TimeZone, Utc};
-use keepass_core::model::{DeletedObject, Entry, EntryId, GroupId, Timestamps, Vault};
-use keepass_merge::{MergeOutcome, Resolution, apply_merge, merge};
+use keepass_core::model::{
+    Attachment, Binary, DeletedObject, Entry, EntryId, GroupId, Timestamps, Vault,
+};
+use keepass_merge::{
+    MergeOutcome, ParkConflictsConfig, Resolution, apply_merge, apply_merge_park_conflicts, merge,
+};
 use proptest::prelude::*;
 use uuid::Uuid;
 
 // Same strategy shape as `properties.rs`: small UUID domain to force
-// frequent overlap, bounded entry/history/tombstone counts.
+// frequent overlap, bounded entry/history/tombstone counts. Tier 1
+// expansion: small attachment set (1-2 names × 1-3 distinct byte
+// patterns) per entry to exercise the attachment classifier — that
+// surface is where the chaos runner's KeepBoth rename asymmetry
+// lives, and the per-feature integration tests can't construct it.
 
-fn entry_strategy() -> impl Strategy<Value = Entry> {
+fn entry_strategy() -> impl Strategy<Value = (Entry, Vec<Binary>)> {
     (
         0u8..6,
         ".{0,8}",
         0u32..40,
         prop::collection::vec((".{0,4}", ".{0,4}", any::<bool>()), 0..2),
         0u8..3,
+        // Up to two attachments per entry. Filename domain {f0, f1}
+        // and bytes pattern in 0..4 forces concurrent "same name,
+        // different content" cases — exactly the BothDiffer →
+        // KeepBoth path we want to exercise.
+        prop::collection::vec((0u8..2, 0u8..4), 0..3),
     )
-        .prop_map(|(id, title, mtime_day, customs, history_count)| {
+        .prop_map(|(id, title, mtime_day, customs, history_count, atts)| {
             let mut e = Entry::empty(EntryId(Uuid::from_u128(u128::from(id))));
             e.title = title;
             let mut t = Timestamps::default();
@@ -65,7 +78,24 @@ fn entry_strategy() -> impl Strategy<Value = Entry> {
                 snap.title = format!("hist-{i}");
                 e.history.push(snap);
             }
-            e
+            // Build per-entry binaries + attachments. Dedup by name
+            // (KDBX disallows two attachments with the same name on
+            // the same entry; the model permits but the merge
+            // crate's attachment classifier keys by name).
+            let mut binaries: Vec<Binary> = Vec::new();
+            let mut seen_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for (name_idx, byte_idx) in atts {
+                let name = format!("f{name_idx}.bin");
+                if !seen_names.insert(name.clone()) {
+                    continue;
+                }
+                let bytes = vec![byte_idx; 8];
+                let ref_id = u32::try_from(binaries.len()).expect("ref_id fits in u32");
+                binaries.push(Binary::new(bytes, false));
+                e.attachments.push(Attachment::new(name, ref_id));
+            }
+            (e, binaries)
         })
 }
 
@@ -83,14 +113,28 @@ fn vault_strategy() -> impl Strategy<Value = Vault> {
         prop::collection::vec(entry_strategy(), 0..5),
         prop::collection::vec(tombstone_strategy(), 0..3),
     )
-        .prop_map(|(entries, tombstones)| {
+        .prop_map(|(entries_with_bins, tombstones)| {
             let mut v = Vault::empty(GroupId(Uuid::nil()));
-            let mut by_id: std::collections::HashMap<EntryId, Entry> =
+            // Dedup entries by id (last-write-wins) AND rebind
+            // attachment ref_ids onto the vault's combined binary pool.
+            let mut by_id: std::collections::HashMap<EntryId, (Entry, Vec<Binary>)> =
                 std::collections::HashMap::new();
-            for e in entries {
-                by_id.insert(e.id, e);
+            for (e, bins) in entries_with_bins {
+                by_id.insert(e.id, (e, bins));
             }
-            v.root.entries = by_id.into_values().collect();
+            for (mut entry, entry_bins) in by_id.into_values() {
+                let mut new_atts = Vec::new();
+                for att in &entry.attachments {
+                    let Some(bin) = entry_bins.get(att.ref_id as usize).cloned() else {
+                        continue;
+                    };
+                    let ref_id = u32::try_from(v.binaries.len()).expect("vault ref_id fits");
+                    v.binaries.push(bin);
+                    new_atts.push(Attachment::new(att.name.clone(), ref_id));
+                }
+                entry.attachments = new_atts;
+                v.root.entries.push(entry);
+            }
             v.deleted_objects = tombstones;
             v
         })
@@ -168,6 +212,56 @@ proptest! {
     /// b+c (e.g. via a relay peer that fetched both before A came
     /// online). Sync would diverge if these produced different
     /// vaults.
+    /// Two peers converging via the **production parking path**
+    /// (`apply_merge_park_conflicts`). The plain `two_peers_converge`
+    /// above filters out caller-driven conflicts via `prop_assume`;
+    /// this one exercises them, since the parking path handles every
+    /// outcome bucket deterministically (the auto-synthesised
+    /// `Resolution` is built by spec §5.2 mtime arbitration).
+    ///
+    /// **Currently `#[ignore]`d** because it finds several known-open
+    /// engine bugs that the per-feature unit tests miss:
+    ///
+    /// 1. `KeepBoth` attachment rename is direction-asymmetric.
+    ///    Concurrent attach of different bytes under the same name
+    ///    produces `(file.bin=H_a, file (remote).bin=H_b)` on peer-0
+    ///    and the inverse on peer-1.
+    /// 2. Title-field parking under certain shapes leaves a residual
+    ///    auto-resolution after both peers apply (one side ends with
+    ///    `Title=Local`, the other with `Title=Remote`).
+    ///
+    /// Both surfaced by the Tier 2 chaos runner; this property is the
+    /// proptest-shrinkable reproduction. Re-enable once the engine
+    /// produces direction-independent resolutions for the parking
+    /// flow.
+    #[test]
+    #[ignore = "known-failing: KeepBoth + Title direction asymmetry in the parking path"]
+    fn two_peers_converge_via_parking(a in vault_strategy(), b in vault_strategy()) {
+        let cfg = ParkConflictsConfig::with_now(
+            Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap(),
+        );
+
+        let outcome_ab = merge(&a, &b).expect("merge a<-b");
+        let outcome_ba = merge(&b, &a).expect("merge b<-a");
+
+        let mut a_prime = a.clone();
+        apply_merge_park_conflicts(&mut a_prime, &b, &outcome_ab, &cfg)
+            .expect("apply park on A");
+
+        let mut b_prime = b.clone();
+        apply_merge_park_conflicts(&mut b_prime, &a, &outcome_ba, &cfg)
+            .expect("apply park on B");
+
+        // After both peers independently absorb the other's view,
+        // re-merging the two results must show nothing left to do.
+        let convergence = merge(&a_prime, &b_prime).expect("convergence merge");
+        prop_assert!(
+            is_converged(&convergence),
+            "parking-path two-peer convergence failed: a' and b' disagree; \
+             convergence outcome = {convergence:?}"
+        );
+    }
+
     #[test]
     fn three_peer_merge_is_order_independent(
         a in vault_strategy(),
