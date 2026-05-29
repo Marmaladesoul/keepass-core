@@ -11,6 +11,8 @@
 
 #![allow(dead_code)] // used selectively across multiple integration test crates
 
+pub mod sim;
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, TimeZone, Utc};
