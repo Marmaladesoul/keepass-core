@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use keepass_core::model::{Entry, EntryId, Group, Vault};
+use keepass_core::model::{Entry, EntryId, Group, GroupId, Vault};
 use uuid::Uuid;
 
 use crate::conflict::EntryConflict;
@@ -102,18 +102,46 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
         .copied()
         .collect();
 
+    // Parent-map for remote-only entries so the symmetric edit-vs-
+    // delete restore can target the right group on apply.
+    let remote_parents = collect_entry_parents(&remote.root);
+
     for id in all_ids {
         match (local_entries.get(&id), remote_entries.get(&id)) {
             (Some(l), Some(r)) => {
                 route_both_present(id, l, r, &local.binaries, &remote.binaries, &mut outcome);
             }
             (Some(l), None) => route_local_only(id, l, &remote_tombstones, &mut outcome),
-            (None, Some(r)) => route_remote_only(id, r, &local_tombstones, &mut outcome),
+            (None, Some(r)) => route_remote_only(
+                id,
+                r,
+                remote_parents.get(&id).copied().unwrap_or(remote.root.id),
+                &local_tombstones,
+                &mut outcome,
+            ),
             (None, None) => unreachable!("id collected from union of local + remote"),
         }
     }
 
     Ok(outcome)
+}
+
+/// Build a `entry_id → owning_group_id` map for every entry in
+/// `root`'s subtree. Used by `merge` to know where to restore a
+/// symmetric edit-vs-delete entry.
+fn collect_entry_parents(root: &Group) -> HashMap<EntryId, GroupId> {
+    let mut out = HashMap::new();
+    walk_entry_parents(root, &mut out);
+    out
+}
+
+fn walk_entry_parents(group: &Group, out: &mut HashMap<EntryId, GroupId>) {
+    for entry in &group.entries {
+        out.insert(entry.id, group.id);
+    }
+    for sub in &group.groups {
+        walk_entry_parents(sub, out);
+    }
 }
 
 /// Per-entry classification when both sides have the entry. Runs the
@@ -269,16 +297,57 @@ fn route_local_only(
 }
 
 /// Per-entry classification when only the remote side has the entry.
+///
+/// Two-way edit-vs-delete check: if local has a tombstone for the
+/// uuid AND remote's `last_modification_time` is strictly newer than
+/// local's `deleted_at`, this is the symmetric edit-vs-delete case
+/// (remote edited after local deleted). The entry id lands in
+/// `delete_edit_conflicts`; the apply step uses the
+/// `delete_edit_restore_from_remote` sidecar to restore the entry
+/// under `remote_parent` per spec §4 "edit wins". Without that
+/// symmetric check, the remote edit would silently fall into
+/// `local_deletions_pending_sync` (a no-op bucket on apply) and the
+/// two peers would diverge — a real bug the Tier 2 chaos runner
+/// surfaced.
 fn route_remote_only(
     id: EntryId,
     remote: &Entry,
+    remote_parent: GroupId,
     local_tombstones: &HashMap<Uuid, Option<chrono::DateTime<chrono::Utc>>>,
     outcome: &mut MergeOutcome,
 ) {
-    if local_tombstones.contains_key(&id.0) {
-        outcome.local_deletions_pending_sync.push(id);
-    } else {
+    let Some(local_deleted_at) = local_tombstones.get(&id.0) else {
+        // Not tombstoned locally — fresh remote-added entry.
         outcome.added_on_disk.push(remote.clone());
+        return;
+    };
+    // Symmetric edit-vs-delete: remote's mtime strictly newer than
+    // local's deletion → "edit wins" per spec §4.
+    if remote_edited_after(remote, *local_deleted_at) {
+        outcome.delete_edit_conflicts.push(id);
+        outcome
+            .delete_edit_restore_from_remote
+            .insert(id, (remote.clone(), remote_parent));
+        return;
+    }
+    // Local's tombstone postdates remote's edit (or either is
+    // missing) — local's deletion wins, but it hasn't been
+    // propagated to remote yet.
+    outcome.local_deletions_pending_sync.push(id);
+}
+
+/// Mirror of `local_edited_after`: remote's `last_modification_time`
+/// strictly newer than local's `deleted_at`. Both `None` collapses
+/// to "edit wins" (conservative: avoid silently dropping a
+/// remote-side change on absent provenance).
+fn remote_edited_after(
+    remote: &Entry,
+    local_deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    match (remote.times.last_modification_time, local_deleted_at) {
+        (Some(rt), Some(dt)) => rt > dt,
+        (Some(_) | None, None) => true,
+        (None, Some(_)) => false,
     }
 }
 

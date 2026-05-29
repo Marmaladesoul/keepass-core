@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use keepass_core::model::{Entry, EntryId};
+use keepass_core::model::{Entry, EntryId, GroupId};
 
 use crate::conflict::{EntryConflict, GroupConflict};
 use crate::entry_merge::{AttachmentAutoResolution, Side};
@@ -34,7 +34,24 @@ pub struct MergeOutcome {
     /// Entries we tombstoned that are still alive on the remote side; the
     /// caller should write back to propagate our deletions.
     pub local_deletions_pending_sync: Vec<EntryId>,
-    /// Entries the remote side tombstoned that we had locally edited.
+    /// Entries that surfaced an edit-vs-delete conflict in either
+    /// direction:
+    /// * **Asymmetric (legacy)**: local edited the entry; remote
+    ///   tombstoned it with `deleted_at < local.mtime`.
+    /// * **Symmetric**: remote edited the entry; local tombstoned it
+    ///   with `deleted_at < remote.mtime`. In this case local doesn't
+    ///   actually hold the entry — the merge crate stashes remote's
+    ///   pre-merge entry content in
+    ///   [`Self::delete_edit_restore_from_remote`] so the apply step
+    ///   can restore it under remote's parent group.
+    ///
+    /// The auto-park flow synthesises `DeleteEditChoice::KeepLocal`
+    /// for both directions per spec §4 "edit wins"; the apply step
+    /// detects which side the entry is on and restores accordingly.
+    /// Tombstone retention is intentionally NOT preserved (see
+    /// `apply::resolution::apply_delete_edit_resolutions` for the
+    /// cross-client safety rationale) — the historical signal lives
+    /// in `MergeEvent::EntryRestoredFromDeletion` instead.
     pub delete_edit_conflicts: Vec<EntryId>,
     /// Group structural conflicts. Always empty in v0.1; reserved for v0.2.
     pub group_conflicts: Vec<GroupConflict>,
@@ -86,6 +103,15 @@ pub struct MergeOutcome {
     /// Icon *conflicts* (where the classifier can't auto-decide) will
     /// surface on [`EntryConflict::icon_delta`] in PR I3.
     pub(crate) icon_auto_resolutions_per_entry: HashMap<EntryId, Side>,
+    /// Crate-private sidecar: for symmetric edit-vs-delete entries
+    /// (local deleted, remote edited), holds the remote-side entry
+    /// content and remote's parent-group id. Apply consumes both
+    /// when restoring the entry under the spec §4 "edit wins" rule:
+    /// the entry content lands at the parent (or root if the parent
+    /// isn't present locally). Asymmetric delete-vs-edit (the legacy
+    /// case where local was the editor) leaves this sidecar empty —
+    /// the entry already exists on local.
+    pub(crate) delete_edit_restore_from_remote: HashMap<EntryId, (Entry, GroupId)>,
     /// Crate-private sidecar: per-entry merged tag set produced by
     /// the tag classifier in [`crate::entry_merge::merge_entry`]. Tags
     /// merge as a pure set (per `_localdocs/MERGE_TAGS_DESIGN.md`)
