@@ -173,6 +173,29 @@ pub(super) fn validate_resolution(
 /// Apply each `delete_edit_conflicts` choice. Returns the set of
 /// uuids whose remote tombstone the caller chose to drop (consumed
 /// by the tombstone-union step).
+///
+/// Two-way handling per audit fix:
+/// * **Asymmetric (legacy)**: local edited, remote deleted. The
+///   entry is already on local; `KeepLocal` keeps it,
+///   `AcceptRemoteDelete` removes it.
+/// * **Symmetric (post-fix)**: local deleted, remote edited. The
+///   entry is on remote and stashed in
+///   `outcome.delete_edit_restore_from_remote`. `KeepLocal` (spec
+///   default — "edit wins") restores the entry into local under
+///   the remote-mirrored parent; `AcceptRemoteDelete` leaves the
+///   deletion in place.
+///
+/// **Tombstone retention policy (deviates from spec §4 wording).**
+/// In both branches we drop the local tombstone when restoring the
+/// entry. The spec calls for retaining it as "historical signal,"
+/// but that produces `entry alive + matching tombstone in
+/// <DeletedObjects>` — a state that `keepass-core`'s own
+/// `kdbx::import_entry_with_uuid` explicitly scrubs because
+/// downstream sync (and other KDBX clients) can interpret the
+/// tombstone as authoritative and re-delete the restored entry.
+/// The historical signal is preserved via
+/// `MergeEvent::EntryRestoredFromDeletion` (engine subscribes via
+/// tracing) — it doesn't have to live on disk.
 pub(super) fn apply_delete_edit_resolutions(
     local_root: &mut Group,
     local_tombstones: &mut Vec<DeletedObject>,
@@ -183,18 +206,33 @@ pub(super) fn apply_delete_edit_resolutions(
     for id in &outcome.delete_edit_conflicts {
         // Validation guarantees the key is present.
         let choice = resolution.delete_edit_choices[id];
-        match choice {
-            DeleteEditChoice::KeepLocal => {
+        let symmetric = outcome.delete_edit_restore_from_remote.get(id);
+        match (choice, symmetric) {
+            (DeleteEditChoice::KeepLocal, None) => {
+                // Asymmetric: local has the entry; just retain it.
                 kept_local.insert(id.0);
-                // Drop any local tombstone for this uuid too — the
-                // local entry stays, so a tombstone for it would be
-                // contradictory state.
                 local_tombstones.retain(|t| t.uuid != id.0);
             }
-            DeleteEditChoice::AcceptRemoteDelete => {
+            (DeleteEditChoice::KeepLocal, Some((remote_entry, remote_parent))) => {
+                // Symmetric: restore from remote. Insert under the
+                // remote-mirrored parent if it exists locally; fall
+                // back to root.
+                match super::find_group_mut(local_root, *remote_parent) {
+                    Some(parent) => parent.entries.push(remote_entry.clone()),
+                    None => local_root.entries.push(remote_entry.clone()),
+                }
+                // Drop local's tombstone (see policy doc above).
+                kept_local.insert(id.0);
+                local_tombstones.retain(|t| t.uuid != id.0);
+            }
+            (DeleteEditChoice::AcceptRemoteDelete, None) => {
+                // Asymmetric: drop local's entry; tombstone propagates
+                // from remote via the standard tombstone-union path.
                 remove_entry(local_root, *id);
-                // The tombstone-union step will pull in the remote's
-                // tombstone for this uuid via the standard path.
+            }
+            (DeleteEditChoice::AcceptRemoteDelete, Some(_)) => {
+                // Symmetric: the deletion is already in place on local;
+                // honour it by not restoring. Local's tombstone stays.
             }
         }
     }

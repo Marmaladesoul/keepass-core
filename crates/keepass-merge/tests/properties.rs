@@ -102,7 +102,16 @@ fn vault_strategy() -> impl Strategy<Value = Vault> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(32))]
+    // After the symmetric edit-vs-delete fix, more generator outputs
+    // legitimately produce `delete_edit_conflicts` in the initial
+    // outcome. The `auto_apply_is_fixed_point` test prop_assumes those
+    // away (it only exercises the auto path), so a higher rejection
+    // budget is needed to still hit 32 successes.
+    #![proptest_config(ProptestConfig {
+        cases: 32,
+        max_global_rejects: 20_000,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn merge_is_deterministic(local in vault_strategy(), remote in vault_strategy()) {

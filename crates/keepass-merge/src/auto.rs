@@ -193,9 +193,18 @@ pub fn apply_merge_park_conflicts(
             sensitive,
         });
     }
-    // Edit-wins on delete-vs-edit fires as its own event.
+    // Edit-wins on delete-vs-edit fires as its own event. Title for
+    // the prose comes from whichever side actually carries the edit —
+    // local (asymmetric: local edited, remote deleted) or remote
+    // (symmetric: local deleted, remote edited).
     for entry_id in &outcome.delete_edit_conflicts {
-        let title = find_entry_title(&local.root, *entry_id).unwrap_or_default();
+        let title = if let Some((remote_entry, _)) =
+            outcome.delete_edit_restore_from_remote.get(entry_id)
+        {
+            remote_entry.title.clone()
+        } else {
+            find_entry_title(&local.root, *entry_id).unwrap_or_default()
+        };
         crate::events::emit(&crate::MergeEvent::EntryRestoredFromDeletion {
             entry: *entry_id,
             title,
