@@ -166,22 +166,36 @@ fn icon_conflict_missing_resolution_returns_error() {
 }
 
 #[test]
-fn one_sided_custom_icon_no_lca_is_conflict_with_icon_delta() {
-    // No LCA, one side has a custom icon, the other doesn't → conflict.
-    // Verifies the spec rule that "one side has, other doesn't" is
-    // conflict-eligible when no LCA can decide.
+fn one_sided_custom_icon_no_lca_auto_resolves_to_present_icon() {
+    // No LCA, one side has a custom icon, the other doesn't. Absence is
+    // the implicit base state, so the present icon wins (additive)
+    // rather than parking a conflict — this is the transient
+    // favicon-fetch race (one device fetched + assigned, the other
+    // hasn't yet). The present icon must survive the merge.
     let icon1 = Uuid::from_u128(0x01);
 
     let mut local = entry(5, at(2026, 1, 1));
     local.custom_icon_uuid = Some(icon1);
     let remote = entry(5, at(2026, 1, 1));
 
-    let outcome = merge(&vault(vec![local]), &vault(vec![remote])).expect("merge");
-    assert_eq!(outcome.entry_conflicts.len(), 1);
-    let delta = outcome.entry_conflicts[0]
-        .icon_delta
-        .as_ref()
-        .expect("icon_delta populated");
-    assert_eq!(delta.local_custom_icon_uuid, Some(icon1));
-    assert_eq!(delta.remote_custom_icon_uuid, None);
+    let mut merged_vault = vault(vec![local]);
+    let remote_vault = vault(vec![remote]);
+    let outcome = merge(&merged_vault, &remote_vault).expect("merge");
+    assert!(
+        outcome.entry_conflicts.is_empty(),
+        "absence-vs-present must auto-resolve, not park a conflict",
+    );
+
+    apply_merge(
+        &mut merged_vault,
+        &remote_vault,
+        &outcome,
+        &Resolution::default(),
+    )
+    .expect("apply");
+    assert_eq!(
+        merged_vault.root.entries[0].custom_icon_uuid,
+        Some(icon1),
+        "the present icon survives the merge",
+    );
 }
