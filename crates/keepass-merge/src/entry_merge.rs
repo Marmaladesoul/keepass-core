@@ -96,11 +96,13 @@ pub(crate) struct EntryMergeOutput {
     /// a set — i.e. local has tag-work to do after the merge.
     /// Contributes to the routing decision in `merge.rs`.
     pub tags_changed_from_local: bool,
-    /// Icon-divergence delta when the classifier sees a visible
-    /// conflict (different `custom_icon_uuid`, or one side has one and
-    /// the other doesn't, with no LCA-driven auto-winner). `None` when
-    /// icons match or the classifier auto-resolved. Routed onto
-    /// [`EntryConflict::icon_delta`] by `route_both_present`.
+    /// Icon-divergence delta when the classifier sees a genuine
+    /// conflict: two *different* present `custom_icon_uuid`s that can't
+    /// be 3-way auto-resolved. `None` when icons match or the classifier
+    /// auto-resolved — including the no-LCA absence-vs-present case,
+    /// where the present icon wins (absence is the implicit base; see
+    /// `classify_icon`). Routed onto [`EntryConflict::icon_delta`] by
+    /// `route_both_present`.
     pub icon_conflict: Option<crate::conflict::IconDelta>,
     /// Icon auto-resolution when the classifier had a clear answer
     /// (LCA matches one side; take the other). Mutually exclusive with
@@ -286,13 +288,24 @@ fn classify_icon(
     if l == r {
         return;
     }
-    let resolution = ancestor.map(|a| {
-        let av = a.custom_icon_uuid;
-        classify_three_way(l.as_ref(), r.as_ref(), av.as_ref())
-    });
+    let resolution = match ancestor {
+        Some(a) => classify_three_way(l.as_ref(), r.as_ref(), a.custom_icon_uuid.as_ref()),
+        // No shared-history ancestor: treat "no custom icon" as the
+        // implicit base state. A present icon is an additive change that
+        // wins over absence, so a transient favicon-fetch race — one
+        // side has fetched and assigned the icon, the other hasn't yet —
+        // auto-resolves to the present icon instead of parking a
+        // spurious conflict that never clears once the sides converge.
+        // Two *different* present icons stay a genuine conflict
+        // (`classify_three_way` returns `Conflict` when neither side
+        // equals the `None` base). This mirrors the with-LCA case where
+        // the ancestor had no icon (see
+        // `icon_classifier_auto_*_when_lca_had_none_*`).
+        None => classify_three_way(l.as_ref(), r.as_ref(), None),
+    };
     match resolution {
-        Some(Resolution::Auto(side)) => out.icon_auto_resolution = Some(side),
-        _ => {
+        Resolution::Auto(side) => out.icon_auto_resolution = Some(side),
+        Resolution::Conflict => {
             out.icon_conflict = Some(crate::conflict::IconDelta {
                 local_custom_icon_uuid: l,
                 remote_custom_icon_uuid: r,
@@ -1087,15 +1100,57 @@ mod tests {
     }
 
     #[test]
-    fn icon_classifier_conflict_when_one_side_has_custom_other_doesnt_no_lca() {
+    fn icon_classifier_auto_present_when_one_side_has_custom_other_doesnt_no_lca() {
+        // No shared ancestor; local has a custom icon, remote has none.
+        // Absence is the implicit base, so the present icon wins
+        // (additive) instead of parking a conflict — this is the
+        // transient favicon-fetch race: one device fetched + assigned
+        // the favicon, the other hasn't yet.
         let mut local = entry();
         local.custom_icon_uuid = Some(icon(1));
         let remote = entry(); // None
 
         let out = merge_entry(&local, &remote, &[], &[]);
-        let delta = out.icon_conflict.expect("conflict expected");
-        assert_eq!(delta.local_custom_icon_uuid, Some(icon(1)));
-        assert_eq!(delta.remote_custom_icon_uuid, None);
+        assert!(
+            out.icon_conflict.is_none(),
+            "absence-vs-present must not conflict with no LCA"
+        );
+        assert_eq!(out.icon_auto_resolution, Some(Side::Local));
+    }
+
+    #[test]
+    fn icon_classifier_auto_present_remote_side_no_lca() {
+        // Mirror of the above: remote has the icon, local has none.
+        let local = entry(); // None
+        let mut remote = entry();
+        remote.custom_icon_uuid = Some(icon(1));
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.icon_conflict.is_none());
+        assert_eq!(out.icon_auto_resolution, Some(Side::Remote));
+    }
+
+    #[test]
+    fn favicon_race_same_url_one_side_fetched_auto_resolves_no_lca() {
+        // The real transient sync race: a fresh entry (no shared
+        // history) where both sides have the same URL, but only one has
+        // fetched + assigned the favicon yet. Must auto-resolve to the
+        // fetched icon, not park a conflict that sticks after both
+        // converge.
+        let mut local = entry();
+        local.url = "https://apple.com".into();
+        local.custom_icon_uuid = Some(icon(42));
+        let mut remote = entry();
+        remote.url = "https://apple.com".into();
+        // remote.custom_icon_uuid stays None (favicon not fetched yet)
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.conflicts.is_empty(), "url matches → no field conflict");
+        assert!(
+            out.icon_conflict.is_none(),
+            "icon must auto-resolve, not conflict"
+        );
+        assert_eq!(out.icon_auto_resolution, Some(Side::Local));
     }
 
     #[test]
