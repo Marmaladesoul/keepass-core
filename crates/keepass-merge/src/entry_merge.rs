@@ -44,9 +44,19 @@
 //!
 //! When [`find_common_ancestor`] returns `None` (truncated histories
 //! diverged on both sides and neither current state matches the
-//! other side's history), every field that differs between the two
-//! sides is classified as a conflict — never as an auto-resolution.
-//! Conservative: never overwrites a user edit silently.
+//! other side's history), [`resolve_no_lca`] applies:
+//! - a slot present on **one side only** is taken (additive — present
+//!   beats absent), so a transient sync-race add (a new custom field, a
+//!   freshly-fetched favicon) auto-resolves instead of parking a
+//!   spurious conflict;
+//! - a slot present on **both sides with differing values** is a
+//!   `Conflict` (parked for the resolver UI) — we never silently pick a
+//!   winner by mtime, so a genuine concurrent value edit (e.g. a
+//!   password) is surfaced, not dropped.
+//!
+//! Standard fields are always present on both sides, so they only ever
+//! hit the both-present branch → still conflict (unchanged). Attachments
+//! deliberately stay conflict-only on no-LCA (see `classify_attachments`).
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -189,6 +199,7 @@ pub(crate) fn merge_entry(
         && remote.history.is_empty()
         && local.times.last_modification_time.is_some()
         && remote.times.last_modification_time.is_some();
+
     let mut out = EntryMergeOutput {
         conflicts: Vec::new(),
         auto_resolutions: Vec::new(),
@@ -213,10 +224,13 @@ pub(crate) fn merge_entry(
             let av = standard_value(a, name);
             classify_three_way(Some(&l), Some(&r), Some(&av))
         });
-        match resolution {
-            Some(Resolution::Auto(side)) => out.auto_resolutions.push((name.into(), side)),
-            // Standard fields always exist on both sides → BothDiffer.
-            _ => out.conflicts.push(FieldDelta {
+        // No LCA → standard fields are always present on both sides, so
+        // `resolve_no_lca(true, true)` is `Conflict` (park) — same as the
+        // pre-existing behaviour.
+        let res = resolution.unwrap_or_else(|| resolve_no_lca(true, true));
+        match res {
+            Resolution::Auto(side) => out.auto_resolutions.push((name.into(), side)),
+            Resolution::Conflict => out.conflicts.push(FieldDelta {
                 key: name.into(),
                 kind: FieldDeltaKind::BothDiffer,
             }),
@@ -248,9 +262,12 @@ pub(crate) fn merge_entry(
             (false, true) => FieldDeltaKind::RemoteOnly,
             (false, false) => unreachable!("key collected from union of local + remote"),
         };
-        match resolution {
-            Some(Resolution::Auto(side)) => out.auto_resolutions.push((key.into(), side)),
-            _ => out.conflicts.push(FieldDelta {
+        // No LCA → present-wins for a key on one side only; both-present
+        // differing → Conflict (park).
+        let res = resolution.unwrap_or_else(|| resolve_no_lca(l.is_some(), r.is_some()));
+        match res {
+            Resolution::Auto(side) => out.auto_resolutions.push((key.into(), side)),
+            Resolution::Conflict => out.conflicts.push(FieldDelta {
                 key: key.into(),
                 kind,
             }),
@@ -269,6 +286,22 @@ pub(crate) fn merge_entry(
     classify_icon(local, remote, ancestor, &mut out);
 
     out
+}
+
+/// Resolution for a single divergent slot when there is no shared
+/// ancestor (see `merge_entry`'s no-LCA policy):
+/// - present on one side only → take the present side (additive);
+/// - present on both with differing values → `Conflict` (park it for
+///   the resolver UI; we deliberately do NOT silently pick by mtime —
+///   a genuine two-value clash is exactly what the conflict UI is for).
+///
+/// Both-absent can't reach here — equal slots are skipped by the caller.
+fn resolve_no_lca(local_present: bool, remote_present: bool) -> Resolution {
+    match (local_present, remote_present) {
+        (true, false) => Resolution::Auto(Side::Local),
+        (false, true) => Resolution::Auto(Side::Remote),
+        _ => Resolution::Conflict,
+    }
 }
 
 /// Classify `custom_icon_uuid` divergence between local and remote
@@ -300,8 +333,10 @@ fn classify_icon(
         // (`classify_three_way` returns `Conflict` when neither side
         // equals the `None` base). This mirrors the with-LCA case where
         // the ancestor had no icon (see
-        // `icon_classifier_auto_*_when_lca_had_none_*`).
-        None => classify_three_way(l.as_ref(), r.as_ref(), None),
+        // `icon_classifier_auto_*_when_lca_had_none_*`). One side having
+        // an icon and the other not → take the present one; two
+        // *different* present icons → Conflict (park).
+        None => resolve_no_lca(l.is_some(), r.is_some()),
     };
     match resolution {
         Resolution::Auto(side) => out.icon_auto_resolution = Some(side),
@@ -375,6 +410,12 @@ fn classify_attachments(
             let av = a.get(name).copied().unwrap_or_else(AttachmentSnap::absent);
             classify_three_way(l.sha256.as_ref(), r.sha256.as_ref(), av.sha256.as_ref())
         });
+        // Attachments deliberately stay on the conservative no-LCA →
+        // conflict path (unlike custom fields / icon): they have a
+        // dedicated keep-local / keep-remote / keep-both resolver flow,
+        // and a pre-existing cross-pool LCA-matching limitation means a
+        // genuine delete-vs-edit often presents as no-LCA — present-wins
+        // there would silently undo deletions and bypass that UI.
         if let Some(Resolution::Auto(side)) = resolution {
             out.attachment_auto_resolutions
                 .push(AttachmentAutoResolution {
@@ -740,14 +781,50 @@ mod tests {
     }
 
     #[test]
-    fn local_only_custom_field_classified_as_local_only() {
+    fn local_only_custom_field_no_lca_takes_present() {
+        // No LCA; a custom field present on one side only is additive →
+        // take the present (local) side, not a conflict.
         let mut local = entry();
         local.custom_fields = vec![CustomField::new("x", "v", false)];
         let remote = entry();
 
         let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.conflicts.is_empty());
+        assert_eq!(out.auto_resolutions.len(), 1);
+        assert_eq!(out.auto_resolutions[0].0, "x");
+        assert_eq!(out.auto_resolutions[0].1, Side::Local);
+    }
+
+    #[test]
+    fn remote_only_custom_field_no_lca_takes_present() {
+        // Symmetric: present on remote only → take Remote.
+        let local = entry();
+        let mut remote = entry();
+        remote.custom_fields = vec![CustomField::new("x", "v", false)];
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.conflicts.is_empty());
+        assert_eq!(out.auto_resolutions.len(), 1);
+        assert_eq!(out.auto_resolutions[0].0, "x");
+        assert_eq!(out.auto_resolutions[0].1, Side::Remote);
+    }
+
+    #[test]
+    fn custom_field_both_present_differ_no_lca_parks_conflict() {
+        // No LCA, same key on both sides with DIFFERENT values → park a
+        // conflict; never silently pick one. This is the safety
+        // guarantee for concurrent value edits (e.g. a password) — we
+        // surface them in the resolver rather than LWW-dropping the loser.
+        let mut local = entry();
+        local.custom_fields = vec![CustomField::new("pw", "local-secret", true)];
+        let mut remote = entry();
+        remote.custom_fields = vec![CustomField::new("pw", "remote-secret", true)];
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(out.auto_resolutions.is_empty());
         assert_eq!(out.conflicts.len(), 1);
-        assert_eq!(out.conflicts[0].kind, FieldDeltaKind::LocalOnly);
+        assert_eq!(out.conflicts[0].key, "pw");
+        assert_eq!(out.conflicts[0].kind, FieldDeltaKind::BothDiffer);
     }
 
     #[test]
