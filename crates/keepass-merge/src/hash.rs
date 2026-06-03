@@ -25,16 +25,28 @@
 //!   convention). Out-of-bounds `ref_id` values are skipped (also
 //!   matching the classifier's posture — corrupt refs don't fail the
 //!   hash, they just don't contribute).
-//! - **Icon**: `(icon_id, custom_icon_uuid)` contributes a single
-//!   tuple to the hash. The custom-icon UUID is the user-visible
-//!   discriminator; the base icon ID rides for round-trip fidelity.
 //! - **Tags**: alphabetised list contributes as one length-prefixed
 //!   block. KDBX writers don't normalise tag order on disk; sorting
 //!   makes the hash invariant under writer order.
 //!
-//! Still excluded — pure ride-along, not surfaced in any conflict UI:
-//! `auto_type`, `unknown_xml`, and timestamps (the `mtime` half of
-//! the LCA key is matched separately).
+//! Still excluded:
+//!
+//! - **Icon** (`icon_id`, `custom_icon_uuid`) — deliberately *not*
+//!   part of content identity. An entry's icon is routinely set
+//!   *without* a history snapshot: favicon assignment is a bare
+//!   field write (no `<History>` push), and that's the ecosystem
+//!   norm — other KDBX clients set the icon the same way, outside
+//!   the editor's history-creating update bracket. Including the
+//!   icon here meant an icon-bearing *current* entry could never
+//!   match its own icon-less history ancestor, breaking LCA
+//!   discovery and parking spurious whole-entry conflicts after a
+//!   favicon landed. The icon is still merged — `classify_icon`
+//!   reads `custom_icon_uuid` directly and 3-ways it against the
+//!   (now-discoverable) ancestor, so genuine icon divergence still
+//!   surfaces — it just isn't a *version-identity* component.
+//! - Pure ride-along, not surfaced in any conflict UI: `auto_type`,
+//!   `unknown_xml`, and timestamps (the `mtime` half of the LCA key
+//!   is matched separately).
 
 use keepass_core::model::{Binary, Entry};
 use sha2::{Digest, Sha256};
@@ -51,7 +63,8 @@ const STANDARD_FIELDS: &[&str] = &["Title", "UserName", "Password", "URL", "Note
 /// only a handful of sections.
 const SECTION_FIELDS: u8 = 0x01;
 const SECTION_ATTACHMENTS: u8 = 0x02;
-const SECTION_ICON: u8 = 0x03;
+// 0x03 was the icon section; icon is no longer part of content
+// identity (see module docs), so the marker is retired.
 const SECTION_TAGS: u8 = 0x04;
 
 /// Hash an entry's content for LCA matching. See module docs for scope.
@@ -115,17 +128,8 @@ pub(crate) fn entry_content_hash(entry: &Entry, binaries: &[Binary]) -> [u8; 32]
         hasher.update([u8::from(protected)]);
     }
 
-    // Section 3: icon. Custom-icon UUID is the user-visible
-    // discriminator; base icon ID rides for round-trip fidelity.
-    hasher.update([SECTION_ICON]);
-    hasher.update(entry.icon_id.to_le_bytes());
-    match entry.custom_icon_uuid {
-        Some(uuid) => {
-            hasher.update([1u8]); // present marker
-            hasher.update(uuid.as_bytes());
-        }
-        None => hasher.update([0u8]),
-    }
+    // (Icon is intentionally absent — it is a merged property, not a
+    // content-identity component; see module docs and `classify_icon`.)
 
     // Section 4: tags, alphabetised so writer order doesn't change
     // the hash.
@@ -316,21 +320,29 @@ mod tests {
     }
 
     #[test]
-    fn icon_id_change_changes_hash() {
+    fn icon_id_change_does_not_affect_hash() {
+        // Icon is a merged property, not content identity: an icon-less
+        // history ancestor must still match its icon-bearing current
+        // entry so the LCA walker can find it. `classify_icon` handles
+        // icon divergence separately.
         let a = entry();
         let mut b = entry();
         b.icon_id = 42;
         let bins = no_binaries();
-        assert_ne!(entry_content_hash(&a, &bins), entry_content_hash(&b, &bins),);
+        assert_eq!(entry_content_hash(&a, &bins), entry_content_hash(&b, &bins),);
     }
 
     #[test]
-    fn custom_icon_uuid_change_changes_hash() {
+    fn custom_icon_uuid_change_does_not_affect_hash() {
+        // A freshly-assigned favicon (custom_icon_uuid set on current,
+        // absent on the history ancestor) must not break content-hash
+        // equality — that was the spurious-conflict cascade this fix
+        // closes. See module docs.
         let a = entry();
         let mut b = entry();
         b.custom_icon_uuid = Some(Uuid::from_u128(0xabcd_ef01));
         let bins = no_binaries();
-        assert_ne!(entry_content_hash(&a, &bins), entry_content_hash(&b, &bins),);
+        assert_eq!(entry_content_hash(&a, &bins), entry_content_hash(&b, &bins),);
     }
 
     #[test]
