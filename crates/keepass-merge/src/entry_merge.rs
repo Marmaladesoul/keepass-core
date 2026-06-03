@@ -305,11 +305,28 @@ fn resolve_no_lca(local_present: bool, remote_present: bool) -> Resolution {
 }
 
 /// Classify `custom_icon_uuid` divergence between local and remote
-/// against the (optional) LCA. Mirrors the field/attachment 3-way
-/// pattern: identical → no row; LCA matches one side → auto to the
-/// other; both differ from LCA or no LCA → conflict. Base icon ID is
-/// not modelled here — per spec rule 4 it rides along silently with
-/// the chosen icon side. See `_localdocs/MERGE_ICON_CLASSIFIER.md`.
+/// against the (optional) LCA. See `_localdocs/MERGE_ICON_CLASSIFIER.md`.
+///
+/// Absence is the implicit base for icons: a present custom icon is an
+/// *additive* change that wins over absence. This holds **uniformly**,
+/// whether or not a content-LCA was found:
+/// - exactly one side has an icon → take the present one (the absent
+///   side is treated as never having had it, not as a deliberate
+///   removal). The icon is no longer part of content identity (it's
+///   excluded from `entry_content_hash`), so the content-LCA is matched
+///   *ignoring* the icon — its icon value is therefore not a
+///   trustworthy base against which to honour a "removal". The product
+///   rule is that a fetched/assigned favicon must survive a merge
+///   rather than be silently dropped, and present-wins is convergent
+///   (the mirror side takes the present icon too);
+/// - both sides carry a *differing* icon → 3-way against the ancestor's
+///   icon when an LCA exists (LCA matches one side → auto to the other;
+///   both differ → conflict); with no LCA it's a genuine two-value
+///   clash → conflict (parked);
+/// - identical icons → no row.
+///
+/// Base icon ID is not modelled here — per spec rule 4 it rides along
+/// silently with the chosen icon side.
 fn classify_icon(
     local: &Entry,
     remote: &Entry,
@@ -321,22 +338,18 @@ fn classify_icon(
     if l == r {
         return;
     }
-    let resolution = match ancestor {
-        Some(a) => classify_three_way(l.as_ref(), r.as_ref(), a.custom_icon_uuid.as_ref()),
-        // No shared-history ancestor: treat "no custom icon" as the
-        // implicit base state. A present icon is an additive change that
-        // wins over absence, so a transient favicon-fetch race — one
-        // side has fetched and assigned the icon, the other hasn't yet —
-        // auto-resolves to the present icon instead of parking a
-        // spurious conflict that never clears once the sides converge.
-        // Two *different* present icons stay a genuine conflict
-        // (`classify_three_way` returns `Conflict` when neither side
-        // equals the `None` base). This mirrors the with-LCA case where
-        // the ancestor had no icon (see
-        // `icon_classifier_auto_*_when_lca_had_none_*`). One side having
-        // an icon and the other not → take the present one; two
-        // *different* present icons → Conflict (park).
-        None => resolve_no_lca(l.is_some(), r.is_some()),
+    let resolution = match (l, r) {
+        // Exactly one side present → additive present-wins (see docs).
+        (Some(_), None) => Resolution::Auto(Side::Local),
+        (None, Some(_)) => Resolution::Auto(Side::Remote),
+        // Both present and differing → 3-way against the ancestor's
+        // icon if we have one; otherwise a base-less two-value clash.
+        (Some(_), Some(_)) => match ancestor {
+            Some(a) => classify_three_way(l.as_ref(), r.as_ref(), a.custom_icon_uuid.as_ref()),
+            None => Resolution::Conflict,
+        },
+        // `l == r` already returned above; (None, None) is unreachable.
+        (None, None) => return,
     };
     match resolution {
         Resolution::Auto(side) => out.icon_auto_resolution = Some(side),
@@ -1228,6 +1241,51 @@ mod tests {
             "icon must auto-resolve, not conflict"
         );
         assert_eq!(out.icon_auto_resolution, Some(Side::Local));
+    }
+
+    #[test]
+    fn title_edit_auto_resolves_when_icon_diverges_without_history() {
+        // Regression for the favicon→spurious-conflict cascade. A
+        // favicon was written into the entry (current *and* the
+        // pre-edit history snapshot) without the remote side ever
+        // fetching it. Then the title was edited locally. With the
+        // icon excluded from the content hash, the icon-bearing local
+        // history snapshot still matches the remote's icon-less current
+        // by content — so the LCA is found and the title edit
+        // auto-resolves. Before the fix the icon mismatch blocked LCA
+        // discovery and the title parked as a whole-entry conflict.
+        let mut ancestor = snapshot("old title", at(2026, 1));
+        ancestor.custom_icon_uuid = Some(icon(7));
+
+        let mut local = entry();
+        local.title = "new title".into();
+        local.times = at(2026, 2);
+        local.custom_icon_uuid = Some(icon(7));
+        local.history = vec![ancestor];
+
+        // Remote never fetched the favicon and didn't touch the title.
+        let mut remote = entry();
+        remote.title = "old title".into();
+        remote.times = at(2026, 1);
+
+        assert!(
+            find_common_ancestor(&local, &remote, &[], &[]).is_some(),
+            "icon-only divergence must not block LCA discovery"
+        );
+
+        let out = merge_entry(&local, &remote, &[], &[]);
+        assert!(
+            out.conflicts.is_empty(),
+            "title edit must auto-resolve, not park a conflict"
+        );
+        assert_eq!(
+            out.auto_resolutions
+                .iter()
+                .find(|(k, _)| k == "Title")
+                .map(|(_, side)| *side),
+            Some(Side::Local),
+            "local's new title wins (remote unchanged from the ancestor)"
+        );
     }
 
     #[test]
