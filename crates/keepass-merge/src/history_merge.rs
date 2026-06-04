@@ -10,7 +10,14 @@
 //! ## Dedup contract
 //!
 //! Records are grouped by [`Timestamps::last_modification_time`]
-//! (mtime). Within a group:
+//! (mtime), **truncated to whole-second resolution**
+//! ([`crate::time::second_resolution`]). The engine stamps mtimes in
+//! milliseconds but the KDBX on-disk format is whole-second, so the
+//! same snapshot can carry a sub-second mtime on one side and a
+//! truncated one on the other after a sync round-trip; coarsening the
+//! key collapses those twins (see `sync-soak-bugs.md` Bug A). Records
+//! at genuinely different seconds stay in distinct groups. Within a
+//! group:
 //!
 //! - All hash-identical → keep one (the first encountered, with
 //!   local before remote per the local-first invariant).
@@ -50,6 +57,7 @@ use chrono::{DateTime, Utc};
 use keepass_core::model::{Binary, Entry};
 
 use crate::hash::{ct_eq, entry_content_hash};
+use crate::time::second_resolution;
 
 type Mtime = Option<DateTime<Utc>>;
 type Bucket<'a> = Vec<([u8; 32], &'a Entry)>;
@@ -85,10 +93,22 @@ pub(crate) fn merge_histories(
     // collision" invariant. Tombstoned `(mtime, hash)` pairs are
     // filtered at the point of grouping so they never enter the
     // output.
+    //
+    // The grouping key is the mtime truncated to whole-second
+    // resolution (`second_resolution`): the engine stamps mtimes in
+    // milliseconds but the KDBX round-trip truncates to seconds, so the
+    // same snapshot can arrive with a sub-second mtime on one side and
+    // a truncated one on the other. Keying at second resolution
+    // collapses those ms-vs-second twins into one bucket so the
+    // content-hash dedup below recognises them as the same record —
+    // the "history bloat" fix for Bug A. The bucket still stores the
+    // original `&Entry`, so the output record keeps its full-precision
+    // mtime; only the dedup *key* is coarsened. The tombstone lookup
+    // uses the same coarsened key (`tombstone_set` truncates to match).
     let mut by_mtime: HashMap<Mtime, Bucket<'_>> = HashMap::new();
     for snap in local.iter().chain(remote.iter()) {
         let hash = entry_content_hash(snap, binaries);
-        let mtime = snap.times.last_modification_time;
+        let mtime = second_resolution(snap.times.last_modification_time);
         if tombstones.contains(&(mtime, hash)) {
             continue;
         }
@@ -115,13 +135,23 @@ pub(crate) fn merge_histories(
 mod tests {
     use super::merge_histories;
     use crate::tombstone::TombstoneSet;
-    use chrono::{TimeZone, Utc};
+    use chrono::{TimeZone, Timelike, Utc};
     use keepass_core::model::{CustomField, Entry, EntryId, Timestamps};
     use uuid::Uuid;
 
     fn at(year: i32, day: u32) -> Timestamps {
         let mut t = Timestamps::default();
         t.last_modification_time = Some(Utc.with_ymd_and_hms(year, 1, day, 0, 0, 0).unwrap());
+        t
+    }
+
+    /// Timestamps at a fixed second, optionally carrying sub-second
+    /// nanoseconds — used to model the engine's millisecond mtime vs the
+    /// KDBX whole-second truncation of the same logical instant.
+    fn at_secs(sec: u32, nanos: u32) -> Timestamps {
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, sec).unwrap();
+        let mut t = Timestamps::default();
+        t.last_modification_time = Some(base.with_nanosecond(nanos).unwrap());
         t
     }
 
@@ -234,6 +264,66 @@ mod tests {
         let out = merge_histories(&[a], &[b], &[], &tombstones);
         let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["keep"]);
+    }
+
+    #[test]
+    fn ms_vs_second_mtime_twins_dedup_to_one() {
+        // Bug A (history bloat): the engine stamps mtimes in
+        // milliseconds; the KDBX round-trip truncates to whole seconds.
+        // So the *same* snapshot arrives with a sub-second mtime on the
+        // editing side and a truncated one on the side that re-read it
+        // from disk. Second-resolution dedup must collapse the twins.
+        let local = vec![snapshot("Five", at_secs(30, 123_000_000))];
+        let remote = vec![snapshot("Five", at_secs(30, 0))];
+        let out = merge_histories(&local, &remote, &[], &no_tombstones());
+        assert_eq!(
+            out.len(),
+            1,
+            "ms-vs-second twins of the same record must collapse to one"
+        );
+    }
+
+    #[test]
+    fn same_content_distinct_seconds_are_kept() {
+        // Truncation is to the *second*, not content-only: a genuine
+        // same-content record a full second apart (e.g. an edit-then-
+        // revert) stays a distinct history record.
+        let local = vec![snapshot("Five", at_secs(30, 0))];
+        let remote = vec![snapshot("Five", at_secs(31, 0))];
+        let out = merge_histories(&local, &remote, &[], &no_tombstones());
+        assert_eq!(
+            out.len(),
+            2,
+            "records a full second apart must not collapse"
+        );
+    }
+
+    #[test]
+    fn tombstone_fires_across_ms_vs_second_divergence() {
+        // A tombstone issued against the ms-precise record must still
+        // filter its whole-second twin (and vice-versa) — the
+        // `tombstone_set` keys and the lookup both truncate to seconds.
+        use crate::tombstone::{HistoryTombstone, TombstoneReason, tombstone_set};
+        let ms = snapshot("Five", at_secs(30, 123_000_000));
+        let truncated = snapshot("Five", at_secs(30, 0));
+        // Tombstone the ms-precise record; expect the truncated twin gone.
+        let tombstones = vec![HistoryTombstone {
+            mtime: ms.times.last_modification_time,
+            hash: crate::hash::entry_content_hash(&ms, &[]),
+            at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
+            by: None,
+            reason: TombstoneReason::UserDelete,
+        }];
+        let out = merge_histories(
+            std::slice::from_ref(&truncated),
+            &[],
+            &[],
+            &tombstone_set(&tombstones),
+        );
+        assert!(
+            out.is_empty(),
+            "tombstone on the ms-precise record must filter its second-truncated twin"
+        );
     }
 
     #[test]

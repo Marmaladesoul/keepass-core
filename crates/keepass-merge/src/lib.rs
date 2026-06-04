@@ -32,6 +32,7 @@ mod hash;
 mod history_merge;
 mod merge;
 mod meta_merge;
+mod time;
 
 pub use crate::apply::{apply_merge, reconcile_timestamps};
 pub use crate::auto::{ParkConflictsConfig, ParkedConflictsReport, apply_merge_park_conflicts};

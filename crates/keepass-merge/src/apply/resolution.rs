@@ -20,6 +20,7 @@ use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice};
+use crate::time::second_resolution;
 use crate::tombstone::{
     parse_tombstones, tombstone_set, union_history_tombstones, write_tombstones_to_custom_data,
 };
@@ -574,11 +575,17 @@ pub(super) fn build_resolved_entry(
     );
     let mut snapshot = conflict.local.clone();
     snapshot.history.clear();
+    // Second-resolution mtime comparison, matching `build_merged_entry`
+    // and `merge_histories`: ms-stamped engine mtimes vs second-
+    // truncated KDBX round-trips would otherwise push the loser's
+    // pre-merge snapshot alongside its already-merged twin (Bug A
+    // history bloat — see `sync-soak-bugs.md`). `ts_set` is likewise
+    // truncated by `tombstone_set`.
     let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
-    let snapshot_mtime = snapshot.times.last_modification_time;
+    let snapshot_mtime = second_resolution(snapshot.times.last_modification_time);
     let snapshot_is_tombstoned = ts_set.contains(&(snapshot_mtime, snapshot_hash));
     let already_present = combined.iter().any(|h| {
-        h.times.last_modification_time == snapshot_mtime
+        second_resolution(h.times.last_modification_time) == snapshot_mtime
             && entry_content_hash(h, local_binaries) == snapshot_hash
     });
     if !already_present && !snapshot_is_tombstoned {
