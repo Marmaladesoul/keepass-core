@@ -12,6 +12,7 @@ use crate::binary_pool::BinaryPoolRemap;
 use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
+use crate::time::second_resolution;
 use crate::tombstone::{
     parse_tombstones, tombstone_set, union_history_tombstones, write_tombstones_to_custom_data,
 };
@@ -522,11 +523,22 @@ pub(super) fn build_merged_entry(
     // already present (avoids spurious duplication on a no-op merge).
     // Tightened in slice 5b per #R21 to use the slice-2 content hash
     // alongside the mtime, matching the slice-4 dedup discipline.
+    //
+    // The mtime comparison is at whole-second resolution
+    // (`second_resolution`), matching `merge_histories`: the engine
+    // stamps mtimes in milliseconds and the KDBX round-trip truncates
+    // to seconds, so the loser's pre-merge snapshot can carry a
+    // sub-second mtime while its already-merged twin in `combined`
+    // carries the truncated one (or vice-versa). Exact-mtime comparison
+    // missed that and pushed the snapshot alongside its twin — the
+    // "history bloat" half of Bug A (see `sync-soak-bugs.md`). The
+    // tombstone lookup uses the same resolution (`ts_set` is truncated
+    // by `tombstone_set`).
     let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
-    let snapshot_mtime = snapshot.times.last_modification_time;
+    let snapshot_mtime = second_resolution(snapshot.times.last_modification_time);
     let snapshot_is_tombstoned = ts_set.contains(&(snapshot_mtime, snapshot_hash));
     let already_present = combined.iter().any(|h| {
-        h.times.last_modification_time == snapshot_mtime
+        second_resolution(h.times.last_modification_time) == snapshot_mtime
             && entry_content_hash(h, local_binaries) == snapshot_hash
     });
     // Don't push a snapshot that the user has already tombstoned: it
@@ -646,7 +658,10 @@ fn union_tombstones_recursive(group: &mut Group, remote_entries: &HashMap<EntryI
         // attachment refs, no-op for the entries we hold here).
         entry.history.retain(|h| {
             let hash = crate::hash::entry_content_hash(h, &[]);
-            !ts_set.contains(&(h.times.last_modification_time, hash))
+            // Second-resolution mtime to match the (truncated) keys in
+            // `ts_set` — see `build_merged_entry` and `merge_histories`.
+            let mtime = crate::time::second_resolution(h.times.last_modification_time);
+            !ts_set.contains(&(mtime, hash))
         });
         // Write unioned tombstones back so downstream bucket logic
         // and future syncs see the merged set on local. `None` for

@@ -177,9 +177,19 @@ pub(crate) fn union_history_tombstones(
 
 /// Compact a tombstone list into the `(mtime, hash)` lookup set used
 /// by [`crate::history_merge::merge_histories`] to filter records.
+///
+/// The `mtime` component is truncated to whole-second resolution
+/// ([`crate::time::second_resolution`]) so it matches the coarsened
+/// dedup key the history paths look up with: a tombstone issued against
+/// a millisecond-precise mtime must still fire against the same record
+/// once the KDBX round-trip has truncated it to a whole second (and
+/// vice-versa). See `sync-soak-bugs.md` Bug A.
 #[must_use]
 pub(crate) fn tombstone_set(tombstones: &[HistoryTombstone]) -> TombstoneSet {
-    tombstones.iter().map(|t| (t.mtime, t.hash)).collect()
+    tombstones
+        .iter()
+        .map(|t| (crate::time::second_resolution(t.mtime), t.hash))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
