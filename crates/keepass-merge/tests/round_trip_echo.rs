@@ -13,7 +13,7 @@
 //! editing side ends up with a spurious `keys.field_conflict.v1` marker
 //! and redundant history. These tests pin where that originates.
 
-use chrono::{TimeZone, Utc};
+use chrono::{TimeZone, Timelike, Utc};
 use keepass_core::model::{Entry, EntryId, GroupId, Timestamps, Vault};
 use keepass_merge::{
     FIELD_CONFLICT_CUSTOM_DATA_KEY, ParkConflictsConfig, apply_merge_park_conflicts, merge,
@@ -23,6 +23,16 @@ use uuid::Uuid;
 fn at(s: u32) -> Timestamps {
     let mut t = Timestamps::default();
     t.last_modification_time = Some(Utc.with_ymd_and_hms(2026, 6, 4, 0, 0, s).unwrap());
+    t
+}
+
+/// Like [`at`] but with sub-second precision, modelling the engine's
+/// millisecond mtimes (`keys-engine::now_ms`) before a KDBX round-trip
+/// truncates them to the whole second [`at`] produces.
+fn at_ms(s: u32, millis: u32) -> Timestamps {
+    let base = Utc.with_ymd_and_hms(2026, 6, 4, 0, 0, s).unwrap();
+    let mut t = Timestamps::default();
+    t.last_modification_time = Some(base.with_nanosecond(millis * 1_000_000).unwrap());
     t
 }
 
@@ -110,6 +120,68 @@ fn faithful_round_trip_of_one_sided_edit_is_a_noop() {
         marker_count(a_e),
         0,
         "A parked a spurious conflict on the echo-back of its OWN edit"
+    );
+}
+
+/// Bug A (history bloat): the engine stamps mtimes in **milliseconds**
+/// but a KDBX round-trip truncates them to **whole seconds**, so the
+/// editing side's own history record (ms-precise) and the peer's
+/// truncated copy of that *same* record are byte-identical yet carry
+/// different mtimes. The history-dedup paths must collapse them — both
+/// `merge_histories`' grouping and `build_merged_entry`'s loser-snapshot
+/// guard run at second resolution, so the echo-back must NOT pile up
+/// duplicate history records. (Pre-fix this produced the observed
+/// `Five`×2 / `Five edited`×2 bloat on the editing Mac.)
+#[test]
+fn truncated_echo_back_does_not_bloat_history() {
+    // A: renamed current "Five edited" @ t1 (ms-precise), with the
+    // pre-edit snapshot "Five" @ t0 (ms-precise) archived in history.
+    let mut a = entry(1);
+    a.title = "Five edited".into();
+    a.times = at_ms(5, 500);
+    let mut a_pre = entry(1);
+    a_pre.title = "Five".into();
+    a_pre.times = at_ms(0, 250);
+    a.history = vec![a_pre];
+    let vault_a = vault_of(a);
+
+    // B: still holds the stale "Five", and its mtimes have been
+    // truncated to whole seconds by a KDBX save/reload. Both B's current
+    // and its lone history record are second-truncated twins of A's
+    // archived "Five" snapshot — so they exercise the loser-snapshot
+    // guard AND `merge_histories`' grouping.
+    let mut b = entry(1);
+    b.title = "Five".into();
+    b.times = at(0);
+    let mut b_pre = entry(1);
+    b_pre.title = "Five".into();
+    b_pre.times = at(0);
+    b.history = vec![b_pre];
+    let vault_b = vault_of(b);
+
+    let out = merge(&vault_a, &vault_b).expect("merge a<-b");
+    let mut a_prime = vault_a.clone();
+    apply_merge_park_conflicts(&mut a_prime, &vault_b, &out, &cfg(20)).expect("apply A");
+    let e = find(&a_prime, 1);
+
+    assert_eq!(
+        e.title, "Five edited",
+        "A's edit must win over the stale peer value"
+    );
+    assert_eq!(
+        marker_count(e),
+        0,
+        "stale-vs-current must not park a conflict"
+    );
+    let five_count = e.history.iter().filter(|h| h.title == "Five").count();
+    assert_eq!(
+        five_count, 1,
+        "ms-vs-second twins of the pre-edit snapshot must collapse to ONE history record"
+    );
+    assert_eq!(
+        e.history.len(),
+        1,
+        "history should hold exactly the single pre-edit snapshot — no bloat on the truncated echo-back"
     );
 }
 
