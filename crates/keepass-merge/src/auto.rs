@@ -325,6 +325,38 @@ fn mtime_winner(local: &Entry, remote: &Entry) -> ConflictSide {
     }
 }
 
+/// Pick the current icon for a parked icon conflict by a deterministic,
+/// **peer-symmetric** tiebreak: the side whose `custom_icon_uuid` is
+/// lexicographically smaller wins the current state; the loser is parked
+/// in history alongside the entry's field-conflict snapshot.
+///
+/// Unlike the per-field winner ([`mtime_winner`]), this does **not** key
+/// on `last_modification_time`. Two reasons: (1) the entry's mtime tracks
+/// the last edit to any *content* field, but the icon is excluded from
+/// content identity (see `hash`), so mtime is not a reliable signal of
+/// which icon is newer; (2) mtime ties (routine at KDBX-3.1 second
+/// resolution) would fall to `Local` on each peer — and "each peer keeps
+/// its own icon" is exactly the non-convergent ping-pong this fixes
+/// (Bug C in `sync-soak-bugs.md`). Comparing the two icon UUIDs is
+/// symmetric in `(local, remote)`: both peers see the same pair and pick
+/// the same winner, so the vaults converge in one round.
+///
+/// Both sides carry a present `custom_icon_uuid` here — `classify_icon`
+/// only raises an `IconDelta` when both are `Some` and differ (the
+/// one-side-present case auto-resolves additively before parking). The
+/// `Option` compare is defensive: `None` sorts first, so a stray
+/// absent-vs-present that reached this path would deterministically take
+/// the absent side, still convergent.
+fn deterministic_icon_winner(conflict: &EntryConflict) -> ConflictSide {
+    let local = conflict.local.custom_icon_uuid;
+    let remote = conflict.remote.custom_icon_uuid;
+    if local <= remote {
+        ConflictSide::Local
+    } else {
+        ConflictSide::Remote
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Step 1 — park remote-side conflict entries as marked history records.
 // ---------------------------------------------------------------------------
@@ -552,11 +584,12 @@ fn synthesize_mtime_based_resolution(
                 .insert(conflict.entry_id, attachment_choices);
         }
 
-        // Icon: pick Local.
+        // Icon: pick a deterministic, peer-symmetric winner so the two
+        // vaults byte-converge. See `deterministic_icon_winner`.
         if conflict.icon_delta.is_some() {
             resolution
                 .entry_icon_choices
-                .insert(conflict.entry_id, ConflictSide::Local);
+                .insert(conflict.entry_id, deterministic_icon_winner(conflict));
         }
     }
 
