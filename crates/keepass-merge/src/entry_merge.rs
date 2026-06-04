@@ -283,7 +283,7 @@ pub(crate) fn merge_entry(
         &mut out,
     );
 
-    classify_icon(local, remote, ancestor, &mut out);
+    classify_icon(local, remote, &mut out);
 
     out
 }
@@ -319,20 +319,21 @@ fn resolve_no_lca(local_present: bool, remote_present: bool) -> Resolution {
 ///   rule is that a fetched/assigned favicon must survive a merge
 ///   rather than be silently dropped, and present-wins is convergent
 ///   (the mirror side takes the present icon too);
-/// - both sides carry a *differing* icon → 3-way against the ancestor's
-///   icon when an LCA exists (LCA matches one side → auto to the other;
-///   both differ → conflict); with no LCA it's a genuine two-value
-///   clash → conflict (parked);
+/// - both sides carry a *differing* icon → resolve by **cross-side
+///   history membership**, NOT the content-LCA. The icon is excluded
+///   from `entry_content_hash`, so the matched content-LCA's icon is not
+///   a reliable base (it can be one side's own current). Instead: if one
+///   side's current icon is a value the *other* side has already moved
+///   past (present in its prior versions), that side is behind → take the
+///   side that advanced; two genuinely-new values (neither in the other's
+///   history) → conflict. This is symmetric in `(local, remote)`, so both
+///   peers reach the same result — convergent, unlike a direction-
+///   dependent 3-way against a one-sided ancestor;
 /// - identical icons → no row.
 ///
 /// Base icon ID is not modelled here — per spec rule 4 it rides along
 /// silently with the chosen icon side.
-fn classify_icon(
-    local: &Entry,
-    remote: &Entry,
-    ancestor: Option<&Entry>,
-    out: &mut EntryMergeOutput,
-) {
+fn classify_icon(local: &Entry, remote: &Entry, out: &mut EntryMergeOutput) {
     let l = local.custom_icon_uuid;
     let r = remote.custom_icon_uuid;
     if l == r {
@@ -342,12 +343,21 @@ fn classify_icon(
         // Exactly one side present → additive present-wins (see docs).
         (Some(_), None) => Resolution::Auto(Side::Local),
         (None, Some(_)) => Resolution::Auto(Side::Remote),
-        // Both present and differing → 3-way against the ancestor's
-        // icon if we have one; otherwise a base-less two-value clash.
-        (Some(_), Some(_)) => match ancestor {
-            Some(a) => classify_three_way(l.as_ref(), r.as_ref(), a.custom_icon_uuid.as_ref()),
-            None => Resolution::Conflict,
-        },
+        // Both present and differing → resolve by cross-side history
+        // membership (the content-LCA's icon is unreliable; see fn docs).
+        // If one side's current icon is a value the OTHER has already
+        // moved past, that side is behind → take the side that advanced.
+        // Two genuinely-new values → clash → park. Symmetric in
+        // (local, remote) ⇒ both peers converge on the same result.
+        (Some(_), Some(_)) => {
+            let remote_behind = side_has_icon(local, r); // r is a prior local value
+            let local_behind = side_has_icon(remote, l); // l is a prior remote value
+            match (local_behind, remote_behind) {
+                (false, true) => Resolution::Auto(Side::Local),
+                (true, false) => Resolution::Auto(Side::Remote),
+                _ => Resolution::Conflict,
+            }
+        }
         // `l == r` already returned above; (None, None) is unreachable.
         (None, None) => return,
     };
@@ -360,6 +370,17 @@ fn classify_icon(
             });
         }
     }
+}
+
+/// True when `icon` is present (as a `custom_icon_uuid`) on the entry's
+/// current state or any of its history snapshots. Used by `classify_icon`
+/// for cross-side staleness: an icon found in the *other* side's versions
+/// means that side has already seen (and moved past) this value.
+fn side_has_icon(entry: &Entry, icon: Option<uuid::Uuid>) -> bool {
+    icon.is_some()
+        && std::iter::once(entry)
+            .chain(entry.history.iter())
+            .any(|e| e.custom_icon_uuid == icon)
 }
 
 /// Bundle of one side's attachment metadata at a single name, used by
@@ -562,10 +583,24 @@ pub(crate) fn local_edited_after(
 
 /// Find the most-recent entry-history record present on both sides.
 ///
-/// Match key is `last_modification_time` (primary). Records with no
-/// timestamp are excluded — KDBX writers fill this and untimed records
-/// carry no meaningful ancestry. On a timestamp collision the
-/// content-hash decides.
+/// **Match key is `content_hash` — NOT `last_modification_time`.** Any two
+/// records with the same content hash have identical field values (that's
+/// what the hash covers), so they yield the *identical* per-field 3-way
+/// outcome regardless of which is chosen as the ancestor. mtime is used
+/// only to order the local candidates newest-first, so the first content
+/// match is the *most-recent* shared version (the tightest ancestor —
+/// fewest false "both changed"). It is **not** a match gate.
+///
+/// This matters because `last_modification_time` does **not** survive a
+/// sync round-trip intact: the KDBX on-disk time format is whole-second
+/// (and the engine may hold finer precision), so the "same" version can
+/// carry a slightly different mtime on the two replicas after a
+/// project→sync→ingest cycle. Gating the match on exact mtime equality
+/// then misses a genuine ancestor and parks a spurious conflict for what
+/// is really a one-sided edit (PR-2 soak Bug A — see
+/// `_project-management/sync-soak-bugs.md`). Matching on content is robust
+/// to that: it only ever finds *more* (content-valid) ancestors, and a
+/// true no-LCA result now means the two sides genuinely share no version.
 ///
 /// **Candidate set includes each side's *current* entry**, not just
 /// `<History>` snapshots. The common case for LCA-by-current is:
@@ -591,36 +626,25 @@ pub(crate) fn find_common_ancestor<'a>(
     local_binaries: &[Binary],
     remote_binaries: &[Binary],
 ) -> Option<&'a Entry> {
-    // Group remote candidates by mtime. Candidates = current + history.
-    let mut remote_by_mtime: HashMap<chrono::DateTime<chrono::Utc>, Vec<&Entry>> = HashMap::new();
-    for snap in std::iter::once(remote).chain(remote.history.iter()) {
-        if let Some(t) = snap.times.last_modification_time {
-            remote_by_mtime.entry(t).or_default().push(snap);
-        }
-    }
+    // Every remote candidate's content hash (current + history), mtime
+    // irrelevant. Each side dereferences its own binary pool.
+    let remote_hashes: Vec<[u8; 32]> = std::iter::once(remote)
+        .chain(remote.history.iter())
+        .map(|r| entry_content_hash(r, remote_binaries))
+        .collect();
 
     // Walk local candidates (current + history) newest → oldest so the
-    // first content-matching hit is the most recent shared record.
-    let mut local_iter: Vec<&Entry> = std::iter::once(local)
-        .chain(local.history.iter())
-        .filter(|e| e.times.last_modification_time.is_some())
-        .collect();
+    // first content match is the most recent shared version. Records with
+    // no timestamp sort last (they can still match by content). Constant-
+    // time hash compare per the workspace rule (hashes aren't secret here,
+    // but the convention holds regardless).
+    let mut local_iter: Vec<&Entry> = std::iter::once(local).chain(local.history.iter()).collect();
     local_iter.sort_by_key(|e| std::cmp::Reverse(e.times.last_modification_time));
 
     for l in local_iter {
-        let t = l.times.last_modification_time?;
-        let Some(remotes) = remote_by_mtime.get(&t) else {
-            continue;
-        };
-        // Each side's entries reference their own pool's binaries.
-        // After slice B5, attachments are part of the hash so the
-        // pool argument matters per call.
         let lh = entry_content_hash(l, local_binaries);
-        for r in remotes {
-            let rh = entry_content_hash(r, remote_binaries);
-            if ct_eq(&lh, &rh) {
-                return Some(l);
-            }
+        if remote_hashes.iter().any(|rh| ct_eq(&lh, rh)) {
+            return Some(l);
         }
     }
     None
@@ -722,9 +746,14 @@ mod tests {
 
     #[test]
     fn lca_none_when_no_overlap() {
+        // Distinct current titles too: matching is by content now, so two
+        // *identical* currents (e.g. both empty) would legitimately be a
+        // shared version. True no-overlap means no shared content anywhere.
         let mut local = entry();
+        local.title = "local-current".into();
         local.history = vec![snapshot("v1", at(2026, 1))];
         let mut remote = entry();
+        remote.title = "remote-current".into();
         remote.history = vec![snapshot("v2", at(2026, 2))];
 
         assert!(find_common_ancestor(&local, &remote, &[], &[]).is_none());
