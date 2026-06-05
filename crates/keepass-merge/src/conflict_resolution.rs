@@ -12,7 +12,7 @@
 //! peer must learn to stop holding and adopt it — so a resolution is
 //! recorded as a vault-level (`<Meta><CustomData>`) entry under
 //! [`CONFLICT_RESOLUTION_CUSTOM_DATA_KEY`], **set-unioned** on merge
-//! (mirroring [`crate::tombstone::union_history_tombstones`]).
+//! (mirroring the history-tombstone CRDT in [`crate::tombstone`]).
 //!
 //! ## Secret-safety (hard constraint)
 //!
