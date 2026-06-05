@@ -1,32 +1,27 @@
 //! End-to-end coverage for `apply_merge_park_conflicts` — the
-//! non-blocking conflict-parking variant of `apply_merge`.
+//! **hold-open** conflict variant of `apply_merge`.
 //!
 //! Property surface:
 //!
-//! 1. `apply_merge_park_conflicts` never errors on
-//!    conflict-bearing outcomes (the synthesised KeepLocal
-//!    resolution is always valid).
-//! 2. After parking, every entry whose conflict was parked has at
-//!    least one history record carrying the parked-conflict marker.
-//! 3. Local's *current* state for parked entries is unchanged —
-//!    parking only adds to history, never mutates the live entry's
-//!    main fields. (This is what makes the rework "preserve user
-//!    edits" rather than the silently-LWW design we're replacing.)
-//! 4. Two peers running `apply_merge_park_conflicts` on the same
-//!    `(local, remote)` pair converge on the same set of parked
-//!    conflicts.
+//! 1. `apply_merge_park_conflicts` never errors on conflict-bearing
+//!    outcomes (the synthesised keep-local resolution is always valid).
+//! 2. A held conflict keeps **this side's own** current value for the
+//!    conflicting facet — no winner is picked, nothing is overwritten.
+//! 3. Two peers running `apply_merge_park_conflicts` on the same
+//!    `(local, remote)` pair surface the same set of held conflicts.
+//!
+//! (The old park-and-converge marker assertions are gone: hold-open
+//! writes no `<History>` marker; the conflict is surfaced via the merge
+//! outcome and resolved by an explicit later choice.)
 
 use chrono::{TimeZone, Utc};
 use keepass_core::model::{CustomField, Entry, EntryId, GroupId, Timestamps, Vault};
-use keepass_merge::{
-    FIELD_CONFLICT_CUSTOM_DATA_KEY, FieldConflictMarker, MergeOutcome, ParkConflictsConfig,
-    apply_merge_park_conflicts, merge,
-};
+use keepass_merge::{MergeOutcome, ParkConflictsConfig, apply_merge_park_conflicts, merge};
 use proptest::prelude::*;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Strategies — same shape as p2p_convergence.rs / auto_merge previous slice.
+// Strategies — same shape as p2p_convergence.rs.
 // ---------------------------------------------------------------------------
 
 fn entry_strategy() -> impl Strategy<Value = Entry> {
@@ -86,8 +81,8 @@ fn config() -> ParkConflictsConfig {
     ParkConflictsConfig::with_now(now())
 }
 
-/// `MergeOutcome` doesn't expose a trivial "is anything to do?"
-/// check; gathers everything the auto-merge would touch.
+/// `MergeOutcome` doesn't expose a trivial "is anything to do?" check;
+/// gathers everything the auto-merge would touch.
 fn outcome_has_work(outcome: &MergeOutcome) -> bool {
     !outcome.entry_conflicts.is_empty()
         || !outcome.delete_edit_conflicts.is_empty()
@@ -119,7 +114,9 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Every parked-conflict entry has a marker on a history record.
+// 2. Hold-open keeps THIS side's own value. After apply, a conflicted
+// entry's current title equals local's pre-merge title — the merge never
+// overwrites the local side of a held conflict with the remote's value.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -130,139 +127,50 @@ proptest! {
     })]
 
     #[test]
-    fn parked_conflict_pushes_remote_as_marked_history(
-        a in vault_strategy(), b in vault_strategy(),
-    ) {
-        let outcome = merge(&a, &b).expect("merge");
-        prop_assume!(!outcome.entry_conflicts.is_empty());
-        let mut local = a.clone();
-        let report = apply_merge_park_conflicts(&mut local, &b, &outcome, &config())
-            .expect("apply");
-        for entry_id in &report.entries_with_parked_conflict {
-            let entry = find_entry(&local.root, *entry_id).expect("entry survives merge");
-            let marked: Vec<&Entry> = entry
-                .history
-                .iter()
-                .filter(|h| {
-                    h.custom_data
-                        .iter()
-                        .any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
-                })
-                .collect();
-            prop_assert!(
-                !marked.is_empty(),
-                "parked entry {entry_id:?} has no marked history record"
-            );
-            // Marker JSON round-trips.
-            for h in &marked {
-                let cd = h
-                    .custom_data
-                    .iter()
-                    .find(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
-                    .unwrap();
-                let parsed = FieldConflictMarker::from_value(&cd.value)
-                    .expect("marker JSON must round-trip");
-                prop_assert_eq!(parsed.at, now(), "marker timestamp matches config");
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 3. Parked entries' main state matches the mtime-based winner (spec §5.2):
-// the side with the newer `last_modification_time` becomes the live entry's
-// state; the loser is pushed into history with the field-conflict marker.
-// Sensitive-field conflicts (Password / `Protected="True"`) deterministically
-// keep local arbitrarily — spec §5.1.
-//
-// Both branches preserve the rework's "no silent data loss" promise: the
-// loser-side state is always retained in history under the marker, so a
-// user can recover it via the resolver UI.
-// ---------------------------------------------------------------------------
-
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 256,
-        max_global_rejects: 100_000,
-        ..ProptestConfig::default()
-    })]
-
-    #[test]
-    fn parked_entry_main_state_matches_mtime_winner(
+    fn held_conflict_keeps_local_current_value(
         a in vault_strategy(), b in vault_strategy(),
     ) {
         let outcome = merge(&a, &b).expect("merge");
         prop_assume!(!outcome.entry_conflicts.is_empty());
 
-        // For each conflict, predict the post-merge title:
-        // - `Title` not among the conflicting `field_deltas` (only the
-        //   non-Title fields collided) → merged starts as a clone of
-        //   `conflict.local`, so post.title == local.title regardless
-        //   of mtime.
-        // - `Title` is in `field_deltas` and the conflict is sensitive
-        //   (any delta key is Password or has `Protected="True"` on
-        //   either side) → spec §5.1 keeps local arbitrarily.
-        // - `Title` is in `field_deltas` and the conflict is not
-        //   sensitive → spec §5.2 mtime winner picks the title.
+        // Local's pre-merge value for each conflicted entry.
         let expected: std::collections::HashMap<EntryId, String> = outcome
             .entry_conflicts
             .iter()
-            .map(|c| {
-                let title_in_deltas = c.field_deltas.iter().any(|d| d.key == "Title");
-                if !title_in_deltas {
-                    return (c.entry_id, c.local.title.clone());
-                }
-                let sensitive = c.field_deltas.iter().any(|d| {
-                    d.key == "Password"
-                        || c.local
-                            .custom_fields
-                            .iter()
-                            .any(|f| f.key == d.key && f.protected)
-                        || c.remote
-                            .custom_fields
-                            .iter()
-                            .any(|f| f.key == d.key && f.protected)
-                });
-                let title = if sensitive {
-                    c.local.title.clone()
-                } else {
-                    let l_mt = c.local.times.last_modification_time;
-                    let r_mt = c.remote.times.last_modification_time;
-                    let local_wins = match (l_mt, r_mt) {
-                        (Some(l), Some(r)) => l >= r, // tie → local per pubkey-TODO fallback
-                        (Some(_) | None, None) => true,
-                        (None, Some(_)) => false,
-                    };
-                    if local_wins {
-                        c.local.title.clone()
-                    } else {
-                        c.remote.title.clone()
-                    }
-                };
-                (c.entry_id, title)
-            })
+            .map(|c| (c.entry_id, c.local.title.clone()))
             .collect();
 
         let mut local = a.clone();
-        apply_merge_park_conflicts(&mut local, &b, &outcome, &config()).expect("apply");
+        let report = apply_merge_park_conflicts(&mut local, &b, &outcome, &config())
+            .expect("apply");
 
-        for (entry_id, expected_title) in &expected {
+        for (entry_id, local_title) in &expected {
             let post = find_entry(&local.root, *entry_id).expect("entry survives");
             prop_assert_eq!(
                 &post.title,
-                expected_title,
-                "parked entry {:?}'s current title was {:?} but spec winner is {:?}",
-                entry_id, post.title, expected_title,
+                local_title,
+                "held conflict for {:?} overwrote local's value (got {:?}, expected local's {:?})",
+                entry_id, post.title, local_title,
             );
+        }
+
+        // No FieldConflictMarker is written any more: the entry's history
+        // must carry no `keys.field_conflict.v1` custom_data.
+        for entry_id in &report.entries_with_parked_conflict {
+            let entry = find_entry(&local.root, *entry_id).expect("entry survives");
+            let has_marker = entry.history.iter().any(|h| {
+                h.custom_data
+                    .iter()
+                    .any(|cd| cd.key == "keys.field_conflict.v1")
+            });
+            prop_assert!(!has_marker, "hold-open must not write a parked-conflict marker");
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// 4. Two peers running park_conflicts on the same (a, b) end up with
-// the same set of parked-conflict entries. The merge crate already
-// guarantees `entry_conflicts.len()` is symmetric — this propagates
-// that to the parked-marker bookkeeping.
+// 3. Two peers running park_conflicts on the same (a, b) surface the same
+// set of held-conflict entries.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -273,7 +181,7 @@ proptest! {
     })]
 
     #[test]
-    fn two_peers_park_same_conflict_set(
+    fn two_peers_hold_same_conflict_set(
         a in vault_strategy(), b in vault_strategy(),
     ) {
         let outcome_ab = merge(&a, &b).expect("merge a<-b");
@@ -287,14 +195,13 @@ proptest! {
         let report_b = apply_merge_park_conflicts(&mut b_prime, &a, &outcome_ba, &config())
             .expect("apply on peer B");
 
-        // Same SET of parked entries (order may differ).
-        let mut parked_a: Vec<EntryId> = report_a.entries_with_parked_conflict.clone();
-        let mut parked_b: Vec<EntryId> = report_b.entries_with_parked_conflict.clone();
-        parked_a.sort_by_key(|id| id.0);
-        parked_b.sort_by_key(|id| id.0);
+        let mut held_a: Vec<EntryId> = report_a.entries_with_parked_conflict.clone();
+        let mut held_b: Vec<EntryId> = report_b.entries_with_parked_conflict.clone();
+        held_a.sort_by_key(|id| id.0);
+        held_b.sort_by_key(|id| id.0);
         prop_assert_eq!(
-            parked_a, parked_b,
-            "two peers must park the same set of entries"
+            held_a, held_b,
+            "two peers must surface the same set of held conflicts"
         );
     }
 }

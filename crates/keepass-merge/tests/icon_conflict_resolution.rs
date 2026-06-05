@@ -167,23 +167,19 @@ fn icon_conflict_missing_resolution_returns_error() {
     );
 }
 
-/// Bug C (sync loop): a genuine two-different-present-icon conflict must
-/// **byte-converge** under the production parking path, exactly as a
-/// field conflict does. Each peer independently merges the other's view
-/// and parks; after one round both peers' *current* icon must agree and
-/// a re-merge must show nothing left to do. Pre-fix, the parking path
-/// hardcoded the icon winner to `Local`, so each peer kept its own icon,
-/// the vaults never converged, and the sync layer ping-ponged forever
-/// (`merged with 1 parked conflict` every ~1s). See
-/// `_project-management/sync-soak-bugs.md`.
+/// Hold-open (supersedes the #212 "converge via parking" behaviour): a
+/// genuine two-different-present-icon conflict is **held open** — each
+/// device keeps its *own* icon until the user resolves. No winner is
+/// picked (the old smaller-uuid tiebreak was arbitrary to the user and
+/// discarded "mine vs theirs"). Crucially the merge is still **loop-safe**:
+/// each peer keeps its own icon and a re-merge writes nothing, so there's
+/// no ping-pong — the conflict is simply a stable held state surfaced for
+/// review. See `_project-management/sync-conflict-state-redesign.md`.
 #[test]
-fn icon_only_conflict_converges_via_parking() {
+fn icon_only_conflict_holds_open_each_side_keeps_own() {
     let ancestor_icon = Uuid::from_u128(0x01);
-    // Two genuinely-new, distinct icons. `icon_a < icon_b` so the
-    // deterministic tiebreak (smaller custom_icon_uuid wins) picks A's.
     let icon_a = Uuid::from_u128(0x0a);
     let icon_b = Uuid::from_u128(0x0b);
-    assert!(icon_a < icon_b, "test premise: icon_a is the smaller uuid");
 
     let id = EntryId(Uuid::from_u128(0x42));
 
@@ -215,30 +211,45 @@ fn icon_only_conflict_converges_via_parking() {
     let a0 = a.clone();
     let b0 = b.clone();
     let out_ab = merge(&a0, &b0).expect("merge a<-b");
-    apply_merge_park_conflicts(&mut a, &b0, &out_ab, &cfg).expect("park on A");
+    assert!(
+        out_ab
+            .entry_conflicts
+            .iter()
+            .any(|c| c.icon_delta.is_some()),
+        "both-diverged icons must surface as an icon conflict",
+    );
+    apply_merge_park_conflicts(&mut a, &b0, &out_ab, &cfg).expect("hold-open on A");
     let out_ba = merge(&b0, &a0).expect("merge b<-a");
-    apply_merge_park_conflicts(&mut b, &a0, &out_ba, &cfg).expect("park on B");
+    apply_merge_park_conflicts(&mut b, &a0, &out_ba, &cfg).expect("hold-open on B");
 
-    // Both peers must land on the SAME current icon (the smaller uuid).
-    let a_icon = find(&a, 0x42).custom_icon_uuid;
-    let b_icon = find(&b, 0x42).custom_icon_uuid;
+    // Hold-open: each peer keeps its OWN icon (no winner picked).
     assert_eq!(
-        a_icon, b_icon,
-        "icon-only conflict did not converge: A={a_icon:?} B={b_icon:?} — sync loop",
-    );
-    assert_eq!(
-        a_icon,
+        find(&a, 0x42).custom_icon_uuid,
         Some(icon_a),
-        "deterministic winner is the smaller uuid"
+        "A must keep its own icon under hold-open",
+    );
+    assert_eq!(
+        find(&b, 0x42).custom_icon_uuid,
+        Some(icon_b),
+        "B must keep its own icon under hold-open",
     );
 
-    // And the loop must stop: a fresh merge of the two converged vaults
-    // surfaces no further icon conflict.
+    // Loop-safety: re-merging the held state is a fixpoint — the conflict
+    // is still surfaced (it's unresolved) but applying it writes nothing.
     let settle = merge(&a, &b).expect("settle merge");
     assert!(
-        settle.entry_conflicts.is_empty(),
-        "re-merge still parks an icon conflict → loop persists: {:?}",
-        settle.entry_conflicts,
+        settle
+            .entry_conflicts
+            .iter()
+            .any(|c| c.icon_delta.is_some()),
+        "unresolved icon conflict stays surfaced until explicit resolution",
+    );
+    let a_before = a.clone();
+    apply_merge_park_conflicts(&mut a, &b, &settle, &cfg).expect("re-apply on A");
+    assert_eq!(
+        find(&a, 0x42).custom_icon_uuid,
+        find(&a_before, 0x42).custom_icon_uuid,
+        "re-applying a held conflict must not change A's value (loop-safe fixpoint)",
     );
 }
 
