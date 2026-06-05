@@ -42,7 +42,7 @@ pub use crate::conflict::{
 };
 pub use crate::conflict_resolution::{
     CONFLICT_RESOLUTION_CUSTOM_DATA_KEY, ConflictKind, ConflictResolution, ConflictResolutionError,
-    parse_conflict_resolutions,
+    add_conflict_resolution, parse_conflict_resolutions,
 };
 pub use crate::error::MergeError;
 pub use crate::events::MergeEvent;
