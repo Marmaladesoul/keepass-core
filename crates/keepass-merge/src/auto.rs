@@ -30,10 +30,12 @@
 //! auto-resolves the easy cases (one side changed); only true clashes
 //! are held.
 
+use chrono::{DateTime, Utc};
 use keepass_core::model::{EntryId, Group, Vault};
 
 use crate::apply::apply_merge;
 use crate::conflict::{AttachmentDeltaKind, EntryConflict};
+use crate::conflict_resolution::{ConflictKind, ConflictResolution, parse_conflict_resolutions};
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice, Resolution};
 use crate::{MergeError, MergeOutcome};
 
@@ -108,10 +110,22 @@ pub fn apply_merge_park_conflicts(
     outcome: &MergeOutcome,
     _config: &ParkConflictsConfig,
 ) -> Result<ParkedConflictsReport, MergeError> {
-    // Spec §6 always-info: one event per held conflict for the activity
-    // log + badge. Emitted before apply mutates the tree so the events
-    // reference the pre-merge state.
+    // Resolution records (1c): a conflict covered by an authoritative
+    // resolution is *adopted* (converges to the resolving side) instead of
+    // held. Read both Metas; the per-facet decision is in `facet_decision`.
+    let local_res = parse_conflict_resolutions(&local.meta.custom_data).unwrap_or_default();
+    let remote_res = parse_conflict_resolutions(&remote.meta.custom_data).unwrap_or_default();
+
+    let (resolution, held) = synthesize_with_resolutions(outcome, &local_res, &remote_res);
+
+    // Spec §6 always-info: one event per *held* conflict (adopted ones
+    // already had their resolve event on the resolving peer). Emitted
+    // before apply mutates the tree so events reference pre-merge state.
+    let held_set: std::collections::HashSet<EntryId> = held.iter().copied().collect();
     for conflict in &outcome.entry_conflicts {
+        if !held_set.contains(&conflict.entry_id) {
+            continue;
+        }
         crate::events::emit(&crate::MergeEvent::ConflictParked {
             entry: conflict.entry_id,
             title: conflict.local.title.clone(),
@@ -140,12 +154,10 @@ pub fn apply_merge_park_conflicts(
         });
     }
 
-    // Hold-open: keep this side's value for every conflicting facet.
-    let resolution = synthesize_keep_local_resolution(outcome);
     apply_merge(local, remote, outcome, &resolution)?;
 
     Ok(ParkedConflictsReport {
-        entries_with_parked_conflict: outcome.entry_conflicts.iter().map(|c| c.entry_id).collect(),
+        entries_with_parked_conflict: held,
         entries_restored_from_deletion: outcome.delete_edit_conflicts.clone(),
         attachments_kept_both: outcome
             .entry_conflicts
@@ -187,33 +199,68 @@ fn is_sensitive_conflict(conflict: &EntryConflict) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Keep-local resolution synthesis.
+// Resolution synthesis (hold-open + resolution-record adoption).
 // ---------------------------------------------------------------------------
 
-/// Build a [`Resolution`] that keeps **local's** value for every
-/// conflicting field and icon (hold-open), keeps both files for a
-/// both-differ attachment (non-destructive), and edit-wins for
-/// delete-vs-edit. On peer A this keeps A's values; on peer B it keeps
-/// B's — each device holds its own, symmetric and convergent in
-/// *membership* (both surface the same conflict set).
-fn synthesize_keep_local_resolution(outcome: &MergeOutcome) -> Resolution {
+/// Build the [`Resolution`] to feed `apply_merge`, plus the set of
+/// entries still **held** (not resolved). For each conflicting field/icon:
+/// if an authoritative resolution record covers it, adopt the resolving
+/// side (converge); otherwise keep local (hold). Attachments take the
+/// non-destructive keep-both / keep-present merge (never "held").
+/// Delete-vs-edit is edit-wins.
+fn synthesize_with_resolutions(
+    outcome: &MergeOutcome,
+    local_res: &[ConflictResolution],
+    remote_res: &[ConflictResolution],
+) -> (Resolution, Vec<EntryId>) {
     let mut resolution = Resolution::default();
+    let mut held: Vec<EntryId> = Vec::new();
 
     for conflict in &outcome.entry_conflicts {
+        let local_mtime = conflict.local.times.last_modification_time;
+        let remote_mtime = conflict.remote.times.last_modification_time;
+        let mut entry_held = false;
+
         if !conflict.field_deltas.is_empty() {
             let mut field_choices = std::collections::HashMap::new();
             for delta in &conflict.field_deltas {
-                field_choices.insert(delta.key.clone(), ConflictSide::Local);
+                let (side, facet_held) = facet_decision(
+                    conflict.entry_id,
+                    ConflictKind::Field,
+                    Some(&delta.key),
+                    local_res,
+                    remote_res,
+                    local_mtime,
+                    remote_mtime,
+                );
+                entry_held |= facet_held;
+                field_choices.insert(delta.key.clone(), side);
             }
             resolution
                 .entry_field_choices
                 .insert(conflict.entry_id, field_choices);
         }
 
+        if conflict.icon_delta.is_some() {
+            let (side, facet_held) = facet_decision(
+                conflict.entry_id,
+                ConflictKind::Icon,
+                None,
+                local_res,
+                remote_res,
+                local_mtime,
+                remote_mtime,
+            );
+            entry_held |= facet_held;
+            resolution
+                .entry_icon_choices
+                .insert(conflict.entry_id, side);
+        }
+
         // Attachments are not a single-value facet: keep both differing
         // files (renamed) rather than holding, and keep the present side
-        // for one-sided deltas. Non-destructive, so no data is lost and
-        // there's nothing to "hold".
+        // for one-sided deltas. Non-destructive — counts as "work" so the
+        // entry stays surfaced until the merge has installed both files.
         if !conflict.attachment_deltas.is_empty() {
             let mut attachment_choices = std::collections::HashMap::new();
             for delta in &conflict.attachment_deltas {
@@ -229,12 +276,11 @@ fn synthesize_keep_local_resolution(outcome: &MergeOutcome) -> Resolution {
             resolution
                 .entry_attachment_choices
                 .insert(conflict.entry_id, attachment_choices);
+            entry_held = true;
         }
 
-        if conflict.icon_delta.is_some() {
-            resolution
-                .entry_icon_choices
-                .insert(conflict.entry_id, ConflictSide::Local);
+        if entry_held {
+            held.push(conflict.entry_id);
         }
     }
 
@@ -244,7 +290,76 @@ fn synthesize_keep_local_resolution(outcome: &MergeOutcome) -> Resolution {
             .insert(*entry_id, DeleteEditChoice::KeepLocal);
     }
 
-    resolution
+    (resolution, held)
+}
+
+/// Convenience for callers/tests that want pure hold-open (no resolution
+/// records): keep local everywhere, every conflict held.
+#[cfg(test)]
+fn synthesize_keep_local_resolution(outcome: &MergeOutcome) -> Resolution {
+    synthesize_with_resolutions(outcome, &[], &[]).0
+}
+
+/// Decide one conflicting facet `(entry, kind, key)`: which side's value
+/// to apply, and whether it is still **held** (unresolved).
+///
+/// Pre-P2P (no `by` pubkey) we infer the resolver from **presence
+/// asymmetry** — the resolution record travels with the resolver's vault,
+/// so the first sync after a resolution sees it on exactly one side:
+/// - remote-only ⇒ remote resolved ⇒ **adopt remote** (converge), unless
+///   local edited after `resolved_at` (then local's edit re-opens → hold);
+/// - local-only ⇒ local already holds the resolved value (keep local,
+///   resolved), unless remote edited after `resolved_at` (re-open → hold);
+/// - both present ⇒ propagated/converged in the normal flow; if it's still
+///   surfaced as a conflict here it's the rare both-resolved-differently
+///   case → hold (needs the `by` tiebreak, TODO(PR-4));
+/// - neither ⇒ no resolution ⇒ hold.
+fn facet_decision(
+    entry: EntryId,
+    kind: ConflictKind,
+    key: Option<&str>,
+    local_res: &[ConflictResolution],
+    remote_res: &[ConflictResolution],
+    local_mtime: Option<DateTime<Utc>>,
+    remote_mtime: Option<DateTime<Utc>>,
+) -> (ConflictSide, bool) {
+    let lr = find_resolution(local_res, entry, kind, key);
+    let rr = find_resolution(remote_res, entry, kind, key);
+    match (lr, rr) {
+        (None, Some(r)) => {
+            if edited_after(local_mtime, r.resolved_at) {
+                (ConflictSide::Local, true) // local re-edited → re-open
+            } else {
+                (ConflictSide::Remote, false) // adopt remote's resolved value
+            }
+        }
+        (Some(l), None) => {
+            if edited_after(remote_mtime, l.resolved_at) {
+                (ConflictSide::Local, true) // remote re-edited → re-open
+            } else {
+                (ConflictSide::Local, false) // local already holds the resolved value
+            }
+        }
+        // Both resolved (edge) or no resolution → hold, keep local.
+        (Some(_), Some(_)) | (None, None) => (ConflictSide::Local, true),
+    }
+}
+
+/// True when `mtime` is strictly after `resolved_at` — i.e. an edit
+/// landed after the resolution and supersedes it. An unknown (`None`)
+/// mtime is treated as not-after (the resolution stands).
+fn edited_after(mtime: Option<DateTime<Utc>>, resolved_at: DateTime<Utc>) -> bool {
+    mtime.is_some_and(|t| t > resolved_at)
+}
+
+fn find_resolution<'a>(
+    res: &'a [ConflictResolution],
+    entry: EntryId,
+    kind: ConflictKind,
+    key: Option<&str>,
+) -> Option<&'a ConflictResolution> {
+    res.iter()
+        .find(|r| r.entry == entry.0 && r.kind == kind && r.key.as_deref() == key)
 }
 
 /// Walk `group` looking for the entry with `id`; returns its title (a
