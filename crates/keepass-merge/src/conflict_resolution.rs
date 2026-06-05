@@ -86,6 +86,36 @@ pub struct ConflictResolution {
 }
 
 impl ConflictResolution {
+    /// Construct a resolution record.
+    ///
+    /// Public so downstream crates (keys-engine) can mint records when the
+    /// user resolves a conflict — the `#[non_exhaustive]` attribute
+    /// otherwise blocks struct-literal construction outside this crate.
+    ///
+    /// `key` must be `Some` for [`ConflictKind::Field`] /
+    /// [`ConflictKind::Attachment`] and `None` for [`ConflictKind::Icon`];
+    /// that pairing is a caller invariant, not enforced here.
+    ///
+    /// Per the secret-safety rule (module docs) there is deliberately no
+    /// value parameter — the chosen value rides as ordinary protected entry
+    /// data, never in the record.
+    #[must_use]
+    pub fn new(
+        entry: Uuid,
+        kind: ConflictKind,
+        key: Option<String>,
+        resolved_at: DateTime<Utc>,
+        by: Option<[u8; 32]>,
+    ) -> Self {
+        Self {
+            entry,
+            kind,
+            key,
+            resolved_at,
+            by,
+        }
+    }
+
     /// Identity tuple for set-union dedup.
     fn key_tuple(&self) -> (Uuid, ConflictKind, Option<&str>) {
         (self.entry, self.kind, self.key.as_deref())
@@ -170,6 +200,34 @@ pub(crate) fn union_conflict_resolutions(
     out
 }
 
+/// Add (or update) a conflict-resolution record on a vault's Meta
+/// `custom_data`, set-unioned by `(entry, kind, key)` — the most recent
+/// `resolved_at` wins (matching how the Meta merge unions the two sides).
+///
+/// This is the downstream write-path analogue of
+/// [`crate::tombstone::add_history_tombstone`]: keys-engine calls it when
+/// the user resolves a conflict, so the record propagates and every peer
+/// adopts the resolving side's value and stops holding (design doc §5.3).
+///
+/// Idempotent: re-adding an identical record is a no-op; a newer
+/// `resolved_at` for the same `(entry, kind, key)` supersedes the old one,
+/// while an older one is ignored.
+///
+/// # Errors
+///
+/// Returns [`ConflictResolutionError::Parse`] only if the Meta already
+/// holds a malformed `keys.conflict_resolutions.v1` value. A vault with no
+/// prior resolutions never errors.
+pub fn add_conflict_resolution(
+    meta_custom_data: &mut Vec<CustomDataItem>,
+    record: &ConflictResolution,
+) -> Result<(), ConflictResolutionError> {
+    let existing = parse_conflict_resolutions(meta_custom_data)?;
+    let merged = union_conflict_resolutions(&existing, std::slice::from_ref(record));
+    write_conflict_resolutions_to_custom_data(meta_custom_data, &merged, Some(record.resolved_at));
+    Ok(())
+}
+
 /// Serialise `Uuid` as a hyphenated string for `#[serde(with = ...)]`.
 mod uuid_str {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -252,6 +310,62 @@ mod tests {
         let c = res(1, ConflictKind::Icon, None, 1);
         let out = union_conflict_resolutions(&[a, b], std::slice::from_ref(&c));
         assert_eq!(out.len(), 3, "field/field/icon are distinct conflicts");
+    }
+
+    #[test]
+    fn new_matches_struct_literal() {
+        let made = ConflictResolution::new(
+            Uuid::from_u128(7),
+            ConflictKind::Field,
+            Some("Password".to_string()),
+            at(3),
+            None,
+        );
+        assert_eq!(made, res(7, ConflictKind::Field, Some("Password"), 3));
+    }
+
+    #[test]
+    fn add_conflict_resolution_appends_unions_and_supersedes() {
+        let mut cd = Vec::new();
+
+        // First resolution lands.
+        add_conflict_resolution(&mut cd, &res(1, ConflictKind::Field, Some("Password"), 1))
+            .expect("add");
+        assert_eq!(parse_conflict_resolutions(&cd).unwrap().len(), 1);
+
+        // A distinct facet adds a second record.
+        add_conflict_resolution(&mut cd, &res(1, ConflictKind::Icon, None, 1)).expect("add");
+        assert_eq!(parse_conflict_resolutions(&cd).unwrap().len(), 2);
+
+        // A newer resolution for the same (entry, kind, key) supersedes, not appends.
+        add_conflict_resolution(&mut cd, &res(1, ConflictKind::Field, Some("Password"), 5))
+            .expect("add");
+        let parsed = parse_conflict_resolutions(&cd).unwrap();
+        assert_eq!(parsed.len(), 2, "same key supersedes rather than stacking");
+        let pw = parsed
+            .iter()
+            .find(|r| r.kind == ConflictKind::Field)
+            .expect("password resolution present");
+        assert_eq!(pw.resolved_at, at(5), "latest decision wins");
+    }
+
+    #[test]
+    fn add_conflict_resolution_is_idempotent_and_ignores_older() {
+        let mut cd = Vec::new();
+        let newer = res(1, ConflictKind::Field, Some("Password"), 5);
+        add_conflict_resolution(&mut cd, &newer).expect("add");
+
+        // Re-adding the same record changes nothing.
+        add_conflict_resolution(&mut cd, &newer).expect("add");
+        assert_eq!(
+            parse_conflict_resolutions(&cd).unwrap(),
+            vec![newer.clone()]
+        );
+
+        // An older resolution for the same key is ignored (union keeps latest).
+        add_conflict_resolution(&mut cd, &res(1, ConflictKind::Field, Some("Password"), 2))
+            .expect("add");
+        assert_eq!(parse_conflict_resolutions(&cd).unwrap(), vec![newer]);
     }
 
     #[test]
