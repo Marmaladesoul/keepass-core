@@ -211,8 +211,17 @@ fn min_with_unlimited_i64(a: i64, b: i64) -> i64 {
 /// so the merge is deterministic.
 fn merge_meta_custom_data(a: &[CustomDataItem], b: &[CustomDataItem]) -> Vec<CustomDataItem> {
     use std::collections::HashMap;
+
+    use crate::conflict_resolution::CONFLICT_RESOLUTION_CUSTOM_DATA_KEY;
+
     let mut by_key: HashMap<&str, &CustomDataItem> = HashMap::new();
     for item in a.iter().chain(b.iter()) {
+        // The conflict-resolution list is a CRDT set, not an LWW scalar —
+        // two peers can resolve different conflicts independently and both
+        // decisions must survive. Skip it here; it's set-unioned below.
+        if item.key == CONFLICT_RESOLUTION_CUSTOM_DATA_KEY {
+            continue;
+        }
         match by_key.get(item.key.as_str()).copied() {
             None => {
                 by_key.insert(item.key.as_str(), item);
@@ -234,6 +243,15 @@ fn merge_meta_custom_data(a: &[CustomDataItem], b: &[CustomDataItem]) -> Vec<Cus
         }
     }
     let mut out: Vec<CustomDataItem> = by_key.into_values().cloned().collect();
+
+    // Set-union the conflict-resolution CRDT separately (skipped above).
+    // Parse failures degrade to empty — a corrupt value must not crash a
+    // merge; the unioned, re-serialised list overwrites it anyway.
+    let res_a = crate::conflict_resolution::parse_conflict_resolutions(a).unwrap_or_default();
+    let res_b = crate::conflict_resolution::parse_conflict_resolutions(b).unwrap_or_default();
+    let unioned = crate::conflict_resolution::union_conflict_resolutions(&res_a, &res_b);
+    crate::conflict_resolution::write_conflict_resolutions_to_custom_data(&mut out, &unioned, None);
+
     out.sort_by(|x, y| x.key.cmp(&y.key));
     out
 }

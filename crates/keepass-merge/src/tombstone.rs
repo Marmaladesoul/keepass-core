@@ -592,10 +592,10 @@ pub(crate) fn attachment_tombstone_set(
 // Hex serde helpers for the [u8; 32] fields.
 // ---------------------------------------------------------------------------
 
-mod hex_array_32 {
+pub(crate) mod hex_array_32 {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(super) fn serialize<S: Serializer>(bytes: &[u8; 32], ser: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(bytes: &[u8; 32], ser: S) -> Result<S::Ok, S::Error> {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(64);
         for b in bytes {
@@ -605,12 +605,12 @@ mod hex_array_32 {
         ser.serialize_str(&s)
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u8; 32], D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u8; 32], D::Error> {
         let s = String::deserialize(de)?;
         decode_32(&s).map_err(serde::de::Error::custom)
     }
 
-    pub(super) fn decode_32(s: &str) -> Result<[u8; 32], String> {
+    pub(crate) fn decode_32(s: &str) -> Result<[u8; 32], String> {
         if s.len() != 64 {
             return Err(format!("expected 64 hex chars, got {}", s.len()));
         }
@@ -623,7 +623,7 @@ mod hex_array_32 {
     }
 }
 
-mod hex_array_32_opt {
+pub(crate) mod hex_array_32_opt {
     use super::hex_array_32::decode_32;
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -631,7 +631,7 @@ mod hex_array_32_opt {
     // `&Option<T>` shape here — we can't switch to `Option<&T>` without
     // changing the call site contract.
     #[allow(clippy::ref_option)]
-    pub(super) fn serialize<S: Serializer>(
+    pub(crate) fn serialize<S: Serializer>(
         bytes: &Option<[u8; 32]>,
         ser: S,
     ) -> Result<S::Ok, S::Error> {
@@ -641,7 +641,7 @@ mod hex_array_32_opt {
         }
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         de: D,
     ) -> Result<Option<[u8; 32]>, D::Error> {
         let opt: Option<String> = Option::<String>::deserialize(de)?;
