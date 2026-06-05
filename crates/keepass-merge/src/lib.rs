@@ -18,7 +18,6 @@ pub mod conflict;
 pub mod conflict_resolution;
 pub mod error;
 pub mod events;
-pub mod field_conflict;
 pub mod outcome;
 
 pub mod prune;
@@ -47,7 +46,6 @@ pub use crate::conflict_resolution::{
 };
 pub use crate::error::MergeError;
 pub use crate::events::MergeEvent;
-pub use crate::field_conflict::{FIELD_CONFLICT_CUSTOM_DATA_KEY, FieldConflictMarker};
 pub use crate::merge::merge;
 pub use crate::outcome::MergeOutcome;
 pub use crate::prune::prune_history_with_tombstones;

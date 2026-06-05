@@ -15,9 +15,7 @@
 
 use chrono::{TimeZone, Timelike, Utc};
 use keepass_core::model::{Entry, EntryId, GroupId, Timestamps, Vault};
-use keepass_merge::{
-    FIELD_CONFLICT_CUSTOM_DATA_KEY, ParkConflictsConfig, apply_merge_park_conflicts, merge,
-};
+use keepass_merge::{ParkConflictsConfig, apply_merge_park_conflicts, merge};
 use uuid::Uuid;
 
 fn at(s: u32) -> Timestamps {
@@ -58,17 +56,6 @@ fn find(v: &Vault, id: u128) -> &Entry {
         .expect("entry present")
 }
 
-fn marker_count(e: &Entry) -> usize {
-    e.history
-        .iter()
-        .filter(|h| {
-            h.custom_data
-                .iter()
-                .any(|cd| cd.key == FIELD_CONFLICT_CUSTOM_DATA_KEY)
-        })
-        .count()
-}
-
 /// Faithful round-trip: B' is produced by the *real* apply, then echoed
 /// back to A. No hand-stamped divergence. If this parks, the bug is
 /// entirely inside keepass-merge.
@@ -101,10 +88,9 @@ fn faithful_round_trip_of_one_sided_edit_is_a_noop() {
         b_e.title, "alpha renamed",
         "B should take A's one-sided rename"
     );
-    assert_eq!(
-        marker_count(b_e),
-        0,
-        "B parked a spurious conflict (one-sided edit)"
+    assert!(
+        out_b.entry_conflicts.is_empty(),
+        "B surfaced a spurious conflict on a one-sided edit"
     );
 
     // Step 2 — echo back: A merges B's merged result.
@@ -116,10 +102,9 @@ fn faithful_round_trip_of_one_sided_edit_is_a_noop() {
         a_e.title, "alpha renamed",
         "A's current must stay the rename"
     );
-    assert_eq!(
-        marker_count(a_e),
-        0,
-        "A parked a spurious conflict on the echo-back of its OWN edit"
+    assert!(
+        out_a.entry_conflicts.is_empty(),
+        "A surfaced a spurious conflict on the echo-back of its OWN edit"
     );
 }
 
@@ -168,10 +153,9 @@ fn truncated_echo_back_does_not_bloat_history() {
         e.title, "Five edited",
         "A's edit must win over the stale peer value"
     );
-    assert_eq!(
-        marker_count(e),
-        0,
-        "stale-vs-current must not park a conflict"
+    assert!(
+        out.entry_conflicts.is_empty(),
+        "stale-vs-current must not surface a conflict"
     );
     let five_count = e.history.iter().filter(|h| h.title == "Five").count();
     assert_eq!(
@@ -215,9 +199,8 @@ fn stale_ancestor_value_off_by_mtime_is_not_parked() {
     apply_merge_park_conflicts(&mut a_prime, &vault_r, &out, &cfg(20)).expect("apply A");
     let e = find(&a_prime, 1);
     assert_eq!(e.title, "alpha renamed", "current must stay the rename");
-    assert_eq!(
-        marker_count(e),
-        0,
-        "remote's value is an ancestor in local history — must not park as a conflict"
+    assert!(
+        out.entry_conflicts.is_empty(),
+        "remote's value is an ancestor in local history — must not surface a conflict"
     );
 }
