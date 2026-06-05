@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod conflict;
+pub mod conflict_resolution;
 pub mod error;
 pub mod events;
 pub mod field_conflict;
@@ -39,6 +40,10 @@ pub use crate::auto::{ParkConflictsConfig, ParkedConflictsReport, apply_merge_pa
 pub use crate::conflict::{
     AttachmentDelta, AttachmentDeltaKind, EntryConflict, FieldDelta, FieldDeltaKind, GroupConflict,
     IconDelta,
+};
+pub use crate::conflict_resolution::{
+    CONFLICT_RESOLUTION_CUSTOM_DATA_KEY, ConflictKind, ConflictResolution, ConflictResolutionError,
+    parse_conflict_resolutions,
 };
 pub use crate::error::MergeError;
 pub use crate::events::MergeEvent;
