@@ -62,6 +62,17 @@ use crate::time::second_resolution;
 type Mtime = Option<DateTime<Utc>>;
 type Bucket<'a> = Vec<([u8; 32], &'a Entry)>;
 
+/// True when `entry` carries a parked-conflict marker in its
+/// `custom_data`. The marker is excluded from `entry_content_hash`, so
+/// the dedup in [`merge_histories`] consults this directly to keep a
+/// marked record from being evicted by its unmarked content-twin.
+fn has_conflict_marker(entry: &Entry) -> bool {
+    entry
+        .custom_data
+        .iter()
+        .any(|c| c.key == crate::field_conflict::FIELD_CONFLICT_CUSTOM_DATA_KEY)
+}
+
 /// Merge two `<History>` lists losslessly **except** for records
 /// the caller has explicitly tombstoned. See module docs for the
 /// dedup, ordering, and scope contracts.
@@ -113,8 +124,25 @@ pub(crate) fn merge_histories(
             continue;
         }
         let bucket = by_mtime.entry(mtime).or_default();
-        if !bucket.iter().any(|(h, _)| ct_eq(h, &hash)) {
-            bucket.push((hash, snap));
+        match bucket.iter().position(|(h, _)| ct_eq(h, &hash)) {
+            None => bucket.push((hash, snap)),
+            Some(idx) => {
+                // Content-twin already in the bucket. The parked-conflict
+                // marker lives in `custom_data`, which `entry_content_hash`
+                // excludes — so a marked snapshot and its unmarked twin
+                // collide here. Prefer the MARKED record: otherwise the
+                // first-encountered (local) unmarked twin would evict the
+                // peer's marked one and the conflict would surface on only
+                // one device (see `sync-soak-bugs.md`). The rule is
+                // deterministic and symmetric in (local, remote) — marked
+                // beats unmarked regardless of side or order — so it stays
+                // convergent. A resolved marker is still cleared everywhere:
+                // its history tombstone keys on the same content hash, so it
+                // filters both twins out before this dedup runs.
+                if !has_conflict_marker(bucket[idx].1) && has_conflict_marker(snap) {
+                    bucket[idx] = (hash, snap);
+                }
+            }
         }
     }
 
@@ -323,6 +351,40 @@ mod tests {
         assert!(
             out.is_empty(),
             "tombstone on the ms-precise record must filter its second-truncated twin"
+        );
+    }
+
+    #[test]
+    fn marked_conflict_record_wins_dedup_against_unmarked_twin() {
+        // The parked-conflict marker lives in `custom_data`, which
+        // `entry_content_hash` excludes — so a marked snapshot and its
+        // unmarked content-twin at the same mtime collapse in dedup. The
+        // MARKED one must win, else the conflict marker is silently
+        // dropped on any peer that merges against an unmarked twin → the
+        // conflict surfaces on only one device (Bug, sync-soak-bugs.md).
+        use keepass_core::model::CustomDataItem;
+        let mtime = at(2026, 1);
+        let unmarked = snapshot("item", mtime.clone());
+        let mut marked = snapshot("item", mtime);
+        marked.custom_data.push(CustomDataItem::new(
+            crate::field_conflict::FIELD_CONFLICT_CUSTOM_DATA_KEY.to_string(),
+            "{\"at\":\"2026-01-02T00:00:00Z\"}".to_string(),
+            None,
+        ));
+        // Local peer has only the unmarked twin; remote peer has both.
+        let out = merge_histories(
+            std::slice::from_ref(&unmarked),
+            &[unmarked.clone(), marked],
+            &[],
+            &no_tombstones(),
+        );
+        assert_eq!(out.len(), 1, "content-twins collapse to a single record");
+        assert!(
+            out[0]
+                .custom_data
+                .iter()
+                .any(|c| { c.key == crate::field_conflict::FIELD_CONFLICT_CUSTOM_DATA_KEY }),
+            "the marked record must win the dedup so the conflict propagates to every peer",
         );
     }
 
