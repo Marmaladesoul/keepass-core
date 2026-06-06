@@ -44,6 +44,7 @@ pub use crate::conflict_resolution::{
     CONFLICT_RESOLUTION_CUSTOM_DATA_KEY, ConflictKind, ConflictResolution, ConflictResolutionError,
     add_conflict_resolution, parse_conflict_resolutions,
 };
+pub use crate::entry_merge::{Classification, Granularity, classify};
 pub use crate::error::MergeError;
 pub use crate::events::MergeEvent;
 pub use crate::merge::merge;

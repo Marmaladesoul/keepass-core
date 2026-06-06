@@ -694,9 +694,269 @@ fn custom_map(entry: &Entry) -> HashMap<&str, (&str, bool)> {
         .collect()
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Public entry-pair classifier — the multi-peer owner-rows "brain".
+//
+// See `_project-management/sync-multipeer-store.md` §9 Phase 1. This is a
+// purely additive public wrapper around [`find_common_ancestor`] +
+// [`merge_entry`]; it changes no existing caller. The owner-rows store
+// (keys-engine, Phase 2+) calls it per entry to decide, for one peer's
+// version of an entry: advance our copy (`AutoMerged`), keep the peer's
+// value as a conflict row (`Conflict`), or do nothing (`InSync`).
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Granularity of the *both-sides-edited* conflict test (design doc §3).
+///
+/// Only affects the one case where each side moved a *different* facet off
+/// the shared ancestor — everywhere else the verdict is identical. The knob
+/// the design doc calls "the one real granularity knob"; kept as a parameter
+/// so the call site (not the brain) owns the decision, to be settled on soak
+/// feel rather than guesswork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Granularity {
+    /// "I changed Title, you changed Notes" merges silently; only a genuine
+    /// *same*-field (or icon) clash is a conflict. Matches the behaviour of
+    /// the vault-level `merge` / [`crate::apply_merge`].
+    Field,
+    /// Any item both sides touched is flagged for the resolver, even when the
+    /// edited fields don't overlap. Shown a touch more often than `Field`;
+    /// identical resolver UX. The password-manager-leaning option per the
+    /// design doc.
+    Item,
+}
+
+/// Verdict of [`classify`] for one `(local, peer)` entry pair.
+///
+/// Mirrors the validated spike's `Outcome` (Agree / AutoResolved / Conflict)
+/// over the real [`Entry`] type.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum Classification {
+    /// The two sides agree across every facet `classify` reconciles
+    /// (standard + custom fields, icon, tags) — nothing to ingest.
+    ///
+    /// Facets `classify` deliberately does **not** examine — attachments,
+    /// `<History>`, `custom_data`, timestamps — can still differ here: an
+    /// entry that diverges *only* in one of those classifies `InSync`.
+    /// Reconciling them is [`crate::apply_merge`]'s job (content pools land
+    /// in a later phase); see [`Classification::AutoMerged`] for the same
+    /// scope boundary.
+    InSync,
+    /// Every divergence auto-resolved against the LCA. `merged` is `local`
+    /// advanced to the combined result — one-sided takes, plus (under
+    /// [`Granularity::Field`]) both-sided edits of *different* fields. No
+    /// user input required.
+    ///
+    /// When only the peer is behind (we moved a facet off the LCA, the peer
+    /// didn't), `merged` equals `local` — there is nothing to fold in, but
+    /// the sides still differ so this is not `InSync`.
+    AutoMerged {
+        /// `local` with the peer's non-conflicting field/icon changes folded
+        /// in and tags 3-way-merged against the ancestor.
+        ///
+        /// **Scope.** Attachments, `<History>`, `custom_data`, and timestamps
+        /// are inherited from `local` **unchanged**: reconciling those needs
+        /// the cross-pool binary remap that lives in [`crate::apply_merge`],
+        /// which remains the byte-level merge. `classify` is the field/icon
+        /// conflict-detection brain, not a whole-entry merge — the owner-rows
+        /// ingest pairs it with `apply_merge` for the byte-level work.
+        merged: Box<Entry>,
+    },
+    /// At least one facet genuinely conflicts: both sides moved the same field
+    /// or the icon off the LCA (any granularity), or — under
+    /// [`Granularity::Item`] — both sides edited the item at all. Carries the
+    /// full resolver payload, reusing the same [`crate::conflict::EntryConflict`]
+    /// the vault-level merge produces so the FFI + resolver UI are unchanged.
+    ///
+    /// `field_deltas` / `icon_delta` are populated per granularity:
+    /// `Field` surfaces only the facets needing user input (same as the
+    /// vault merge); `Item` surfaces every differing field/icon so the
+    /// resolver shows the full per-field picker. `attachment_deltas` is always
+    /// empty here — attachments ride [`crate::apply_merge`], not `classify`.
+    ///
+    /// Like attachments, any 3-way-merged tag set is **not** folded in on the
+    /// conflict path: tag reconciliation for a conflicted entry is deferred to
+    /// resolve time, mirroring the `AutoMerged` scope boundary.
+    Conflict {
+        /// Both full sides plus the differing-facet deltas.
+        conflict: Box<crate::conflict::EntryConflict>,
+    },
+}
+
+/// Classify one peer's version of an entry against ours, using the entry's
+/// `<History>` as the shared ancestor (LCA). The reusable per-entry brain
+/// behind the multi-peer owner-rows store.
+///
+/// Purely additive: wraps the existing `find_common_ancestor` +
+/// `merge_entry` and changes no existing caller. `local_binaries` /
+/// `peer_binaries` are the two sides' [`keepass_core::model::Vault`] binary
+/// pools, threaded through so the LCA is located with the same content hash
+/// the production merge uses.
+///
+/// When the two sides share no ancestor (e.g. `<History>` trimmed past the
+/// fork point), the wrapped classifier falls back conservatively — a
+/// both-present field that differs is a `Conflict`, never a silent pick — so
+/// `classify` returns `Conflict` rather than guessing. See [`Classification`]
+/// for the verdict shape and [`Granularity`] for the both-sides-edited knob.
+pub fn classify(
+    local: &Entry,
+    peer: &Entry,
+    local_binaries: &[Binary],
+    peer_binaries: &[Binary],
+    granularity: Granularity,
+) -> Classification {
+    let out = merge_entry(local, peer, local_binaries, peer_binaries);
+
+    // A genuine conflict = both sides moved the *same* field, or the icon,
+    // off the LCA. (Attachments are out of `classify`'s scope — see
+    // `Classification::AutoMerged` — so they never feed the verdict.)
+    let genuine_conflict = !out.conflicts.is_empty() || out.icon_conflict.is_some();
+
+    // Which side(s) moved a field/icon off the shared ancestor. A genuine
+    // conflict means both sides moved the same facet, so it counts for both.
+    let local_moved = genuine_conflict
+        || out.auto_resolutions.iter().any(|(_, s)| *s == Side::Local)
+        || out.icon_auto_resolution == Some(Side::Local);
+    let peer_moved = genuine_conflict
+        || out.auto_resolutions.iter().any(|(_, s)| *s == Side::Remote)
+        || out.icon_auto_resolution == Some(Side::Remote);
+
+    if !local_moved && !peer_moved && !out.tags_changed_from_local {
+        return Classification::InSync;
+    }
+
+    let is_conflict = match granularity {
+        Granularity::Field => genuine_conflict,
+        Granularity::Item => genuine_conflict || (local_moved && peer_moved),
+    };
+
+    if is_conflict {
+        let (field_deltas, icon_delta) = match granularity {
+            // Field-level: surface only the facets that need user input
+            // (same as the vault-level merge's `EntryConflict`).
+            Granularity::Field => (out.conflicts, out.icon_conflict),
+            // Item-level: the whole item is flagged, so surface every
+            // differing field/icon for the per-field picker (design doc §3).
+            Granularity::Item => (
+                differing_field_deltas(local, peer),
+                icon_delta_if_differs(local, peer),
+            ),
+        };
+        return Classification::Conflict {
+            conflict: Box::new(crate::conflict::EntryConflict {
+                entry_id: local.id,
+                local: local.clone(),
+                remote: peer.clone(),
+                field_deltas,
+                attachment_deltas: Vec::new(),
+                icon_delta,
+            }),
+        };
+    }
+
+    // Auto-merge: advance `local` by the peer's one-sided field/icon changes
+    // and the 3-way-merged tag set. Side::Local resolutions are already in
+    // place (we started from a clone of `local`).
+    let mut merged = local.clone();
+    for (key, side) in &out.auto_resolutions {
+        if *side == Side::Remote {
+            take_field_from(&mut merged, peer, key);
+        }
+    }
+    if out.icon_auto_resolution == Some(Side::Remote) {
+        merged.custom_icon_uuid = peer.custom_icon_uuid;
+    }
+    merged.tags = out.merged_tags.into_iter().collect();
+    Classification::AutoMerged {
+        merged: Box::new(merged),
+    }
+}
+
+/// Every standard or custom field whose value differs between the two sides,
+/// classified by which side(s) hold it. Builds the item-level resolver
+/// payload — every difference becomes a pickable row — where the field-level
+/// path surfaces only the same-field clashes.
+fn differing_field_deltas(local: &Entry, peer: &Entry) -> Vec<FieldDelta> {
+    let mut deltas = Vec::new();
+    for &name in STANDARD_FIELDS {
+        if standard_value(local, name) != standard_value(peer, name) {
+            // Standard fields are always present on both sides.
+            deltas.push(FieldDelta {
+                key: name.into(),
+                kind: FieldDeltaKind::BothDiffer,
+            });
+        }
+    }
+    let local_custom = custom_map(local);
+    let peer_custom = custom_map(peer);
+    let mut keys: BTreeSet<&str> = BTreeSet::new();
+    keys.extend(local_custom.keys().copied());
+    keys.extend(peer_custom.keys().copied());
+    for key in keys {
+        let l = local_custom.get(key).copied();
+        let p = peer_custom.get(key).copied();
+        if l == p {
+            continue;
+        }
+        let kind = match (l.is_some(), p.is_some()) {
+            (true, true) => FieldDeltaKind::BothDiffer,
+            (true, false) => FieldDeltaKind::LocalOnly,
+            (false, true) => FieldDeltaKind::RemoteOnly,
+            (false, false) => unreachable!("key collected from union of local + peer"),
+        };
+        deltas.push(FieldDelta {
+            key: key.into(),
+            kind,
+        });
+    }
+    deltas
+}
+
+/// An [`crate::conflict::IconDelta`] iff the two sides' `custom_icon_uuid`
+/// differ. The item-level companion to [`differing_field_deltas`].
+fn icon_delta_if_differs(local: &Entry, peer: &Entry) -> Option<crate::conflict::IconDelta> {
+    (local.custom_icon_uuid != peer.custom_icon_uuid).then_some(crate::conflict::IconDelta {
+        local_custom_icon_uuid: local.custom_icon_uuid,
+        remote_custom_icon_uuid: peer.custom_icon_uuid,
+    })
+}
+
+/// Copy field `key`'s value from `source` into `target` — standard field,
+/// custom field (value + `protected` bit), or removal of a custom field the
+/// `source` no longer holds. Mirrors the apply layer's `set_field_from`; kept
+/// local to the classifier so Phase 1 stays additive (no visibility change to
+/// the apply internals). The two are small and stable; a future refactor can
+/// unify them if a third caller appears.
+fn take_field_from(target: &mut Entry, source: &Entry, key: &str) {
+    match key {
+        "Title" => target.title.clone_from(&source.title),
+        "UserName" => target.username.clone_from(&source.username),
+        "Password" => target.password.clone_from(&source.password),
+        "URL" => target.url.clone_from(&source.url),
+        "Notes" => target.notes.clone_from(&source.notes),
+        _ => match source.custom_fields.iter().find(|f| f.key == key) {
+            Some(src) => match target.custom_fields.iter_mut().find(|f| f.key == key) {
+                Some(dst) => {
+                    dst.value.clone_from(&src.value);
+                    dst.protected = src.protected;
+                }
+                None => target
+                    .custom_fields
+                    .push(keepass_core::model::CustomField::new(
+                        src.key.clone(),
+                        src.value.clone(),
+                        src.protected,
+                    )),
+            },
+            None => target.custom_fields.retain(|f| f.key != key),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Side, find_common_ancestor, merge_entry};
+    use super::{Classification, Granularity, Side, classify, find_common_ancestor, merge_entry};
     use crate::conflict::{AttachmentDeltaKind, FieldDeltaKind};
     use chrono::{TimeZone, Utc};
     use keepass_core::model::{CustomField, Entry, EntryId, Timestamps};
@@ -1405,6 +1665,347 @@ mod tests {
         assert_eq!(
             out.attachment_conflicts[0].kind,
             AttachmentDeltaKind::RemoteOnly
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Public entry-pair classifier (Phase 1 — multi-peer owner-rows brain)
+    // -----------------------------------------------------------------
+    //
+    // Mirrors the validated spike's scenarios
+    // (`KeysCore/.../tests/multipeer_spike.rs`) over the real `Entry`:
+    // one-sided auto-take, both-sided same-field conflict, the
+    // field-vs-item granularity split, the no-shared-ancestor fallback,
+    // plus icon + tag coverage the spike's 3-field model didn't carry.
+
+    const C_BASE: (&str, &str, &str) = ("Title", "pw0", "notes");
+
+    /// An entry whose CURRENT value is `current` and whose `<History>`
+    /// holds one ancestor snapshot `base` stamped day `base_day` — the
+    /// LCA both forks share. Mirrors the spike's `entry()` fixture.
+    fn forked(base: (&str, &str, &str), base_day: u32, current: (&str, &str, &str)) -> Entry {
+        let mut snap = entry();
+        snap.title = base.0.into();
+        snap.password = base.1.into();
+        snap.notes = base.2.into();
+        snap.times = at(2026, base_day);
+
+        let mut e = entry();
+        e.title = current.0.into();
+        e.password = current.1.into();
+        e.notes = current.2.into();
+        e.history = vec![snap];
+        e
+    }
+
+    /// Sorted field-delta keys from a `Conflict` verdict (panics otherwise).
+    fn conflict_field_keys(c: &Classification) -> Vec<String> {
+        match c {
+            Classification::Conflict { conflict } => {
+                let mut keys: Vec<String> = conflict
+                    .field_deltas
+                    .iter()
+                    .map(|d| d.key.clone())
+                    .collect();
+                keys.sort();
+                keys
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_in_sync_when_identical() {
+        let local = forked(C_BASE, 1, C_BASE);
+        let peer = forked(C_BASE, 1, C_BASE);
+        assert!(matches!(
+            classify(&local, &peer, &[], &[], Granularity::Field),
+            Classification::InSync
+        ));
+    }
+
+    #[test]
+    fn classify_one_sided_peer_edit_auto_merges() {
+        // Peer changed the title; we never touched the entry → auto-take,
+        // no conflict (the case that would be miserable if flagged).
+        let local = forked(C_BASE, 1, C_BASE);
+        let peer = forked(C_BASE, 1, ("Title-B", "pw0", "notes"));
+        match classify(&local, &peer, &[], &[], Granularity::Field) {
+            Classification::AutoMerged { merged } => {
+                assert_eq!(merged.title, "Title-B", "peer's change adopted");
+                assert_eq!(merged.password, "pw0", "untouched field kept");
+            }
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_both_sided_same_field_conflicts() {
+        // Both moved Password off the LCA, differently → genuine conflict,
+        // both values preserved on the carried sides.
+        let local = forked(C_BASE, 1, ("Title", "pw-MINE", "notes"));
+        let peer = forked(C_BASE, 1, ("Title", "pw-THEIRS", "notes"));
+        let c = classify(&local, &peer, &[], &[], Granularity::Field);
+        assert_eq!(conflict_field_keys(&c), vec!["Password".to_string()]);
+        let Classification::Conflict { conflict } = c else {
+            unreachable!()
+        };
+        assert_eq!(conflict.local.password, "pw-MINE");
+        assert_eq!(conflict.remote.password, "pw-THEIRS");
+        assert!(conflict.attachment_deltas.is_empty());
+    }
+
+    #[test]
+    fn classify_both_sided_diff_fields_field_level_merges() {
+        // I changed Title, peer changed Notes → field-level merges silently.
+        let local = forked(C_BASE, 1, ("Title-MINE", "pw0", "notes"));
+        let peer = forked(C_BASE, 1, ("Title", "pw0", "notes-THEIRS"));
+        match classify(&local, &peer, &[], &[], Granularity::Field) {
+            Classification::AutoMerged { merged } => {
+                assert_eq!(merged.title, "Title-MINE", "my field kept");
+                assert_eq!(merged.notes, "notes-THEIRS", "their field merged in");
+            }
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_both_sided_diff_fields_item_level_flags() {
+        // Same inputs as above; item-level flags the item and surfaces every
+        // differing field for the resolver picker (design doc §3).
+        let local = forked(C_BASE, 1, ("Title-MINE", "pw0", "notes"));
+        let peer = forked(C_BASE, 1, ("Title", "pw0", "notes-THEIRS"));
+        let c = classify(&local, &peer, &[], &[], Granularity::Item);
+        assert_eq!(
+            conflict_field_keys(&c),
+            vec!["Notes".to_string(), "Title".to_string()]
+        );
+    }
+
+    #[test]
+    fn classify_granularity_knob_flips_diff_field_verdict() {
+        // The one-line knob: identical inputs, opposite verdicts.
+        let local = forked(C_BASE, 1, ("Title-MINE", "pw0", "notes"));
+        let peer = forked(C_BASE, 1, ("Title", "pw0", "notes-THEIRS"));
+        assert!(matches!(
+            classify(&local, &peer, &[], &[], Granularity::Field),
+            Classification::AutoMerged { .. }
+        ));
+        assert!(matches!(
+            classify(&local, &peer, &[], &[], Granularity::Item),
+            Classification::Conflict { .. }
+        ));
+    }
+
+    #[test]
+    fn classify_no_shared_ancestor_falls_back_to_conflict() {
+        // Disjoint histories + currents ⇒ no shared snapshot. A both-present
+        // field that differs parks conservatively, never a silent pick.
+        let local = forked(C_BASE, 1, ("Title", "pw-A", "notes"));
+        let peer = forked(("X", "Y", "Z"), 9, ("Title", "pw-B", "notes"));
+        assert!(
+            find_common_ancestor(&local, &peer, &[], &[]).is_none(),
+            "fixture must genuinely share no ancestor"
+        );
+        let c = classify(&local, &peer, &[], &[], Granularity::Field);
+        assert_eq!(conflict_field_keys(&c), vec!["Password".to_string()]);
+    }
+
+    #[test]
+    fn classify_tags_only_diff_auto_merges() {
+        // Fields identical, peer added a tag → no conflict, tag merged in
+        // (even under item granularity — tags never conflict).
+        let local = forked(C_BASE, 1, C_BASE);
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        peer.tags = vec!["work".into()];
+        match classify(&local, &peer, &[], &[], Granularity::Item) {
+            Classification::AutoMerged { merged } => {
+                assert!(
+                    merged.tags.contains(&"work".to_string()),
+                    "peer's tag merged in"
+                );
+            }
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_icon_one_sided_auto_merges() {
+        // Peer assigned a custom icon, we have none, no field change →
+        // additive present-wins, no conflict.
+        let local = forked(C_BASE, 1, C_BASE);
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        peer.custom_icon_uuid = Some(icon(7));
+        match classify(&local, &peer, &[], &[], Granularity::Field) {
+            Classification::AutoMerged { merged } => {
+                assert_eq!(
+                    merged.custom_icon_uuid,
+                    Some(icon(7)),
+                    "peer's icon adopted"
+                );
+            }
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_icon_both_diverge_conflicts() {
+        // Both sides carry a different, genuinely-new custom icon → icon-only
+        // conflict: no field deltas, an icon delta carrying both sides.
+        let mut local = forked(C_BASE, 1, C_BASE);
+        local.custom_icon_uuid = Some(icon(1));
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        peer.custom_icon_uuid = Some(icon(2));
+        match classify(&local, &peer, &[], &[], Granularity::Field) {
+            Classification::Conflict { conflict } => {
+                assert!(conflict.field_deltas.is_empty(), "icon-only conflict");
+                let d = conflict.icon_delta.expect("icon_delta present");
+                assert_eq!(d.local_custom_icon_uuid, Some(icon(1)));
+                assert_eq!(d.remote_custom_icon_uuid, Some(icon(2)));
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_peer_added_custom_field_auto_merges() {
+        // Peer added a protected custom field; we have none → take it (value
+        // and protected bit), no conflict.
+        let local = forked(C_BASE, 1, C_BASE);
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        peer.custom_fields = vec![CustomField::new("TOTP", "seed", true)];
+        match classify(&local, &peer, &[], &[], Granularity::Field) {
+            Classification::AutoMerged { merged } => {
+                let f = merged
+                    .custom_fields
+                    .iter()
+                    .find(|f| f.key == "TOTP")
+                    .expect("custom field merged in");
+                assert_eq!(f.value, "seed");
+                assert!(f.protected, "protected bit carried");
+            }
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_peer_removed_custom_field_auto_merges_drop() {
+        // LCA had custom field X; we keep it unchanged; peer removed it off
+        // the LCA → one-sided take, X dropped from the merged value (the
+        // deletion is honoured, not silently resurrected).
+        let mut ancestor = entry();
+        ancestor.custom_fields = vec![CustomField::new("X", "v", false)];
+        ancestor.times = at(2026, 1);
+
+        let mut local = entry();
+        local.custom_fields = vec![CustomField::new("X", "v", false)];
+        local.history = vec![ancestor.clone()];
+
+        let mut peer = entry();
+        peer.history = vec![ancestor];
+
+        match classify(&local, &peer, &[], &[], Granularity::Field) {
+            Classification::AutoMerged { merged } => {
+                assert!(
+                    !merged.custom_fields.iter().any(|f| f.key == "X"),
+                    "peer's deletion honoured — X dropped from merged"
+                );
+            }
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_field_conflict_plus_one_sided_carries_full_sides() {
+        // Password clashes (both moved it); Title is a one-sided peer edit.
+        // Field-granularity Conflict surfaces only the clash, but carries both
+        // full sides so the dropped one-sided change stays recoverable — the
+        // hold-open "present, never auto-merge" guarantee (design doc §3).
+        let local = forked(C_BASE, 1, ("Title", "pw-MINE", "notes"));
+        let peer = forked(C_BASE, 1, ("Title-PEER", "pw-THEIRS", "notes"));
+        let c = classify(&local, &peer, &[], &[], Granularity::Field);
+        assert_eq!(
+            conflict_field_keys(&c),
+            vec!["Password".to_string()],
+            "only the genuine clash is surfaced under Field granularity"
+        );
+        let Classification::Conflict { conflict } = c else {
+            unreachable!()
+        };
+        assert_eq!(conflict.local.title, "Title");
+        assert_eq!(
+            conflict.remote.title, "Title-PEER",
+            "peer's one-sided Title preserved on the carried side"
+        );
+        assert_eq!(conflict.local.password, "pw-MINE");
+        assert_eq!(conflict.remote.password, "pw-THEIRS");
+    }
+
+    #[test]
+    fn classify_item_same_field_clash_single_delta() {
+        // Item granularity routes field_deltas through `differing_field_deltas`
+        // (a different path from `out.conflicts`). A genuine same-field clash
+        // must surface as exactly one BothDiffer delta.
+        let local = forked(C_BASE, 1, ("Title", "pw-MINE", "notes"));
+        let peer = forked(C_BASE, 1, ("Title", "pw-THEIRS", "notes"));
+        let c = classify(&local, &peer, &[], &[], Granularity::Item);
+        assert_eq!(conflict_field_keys(&c), vec!["Password".to_string()]);
+        let Classification::Conflict { conflict } = c else {
+            unreachable!()
+        };
+        assert_eq!(conflict.field_deltas.len(), 1);
+        assert_eq!(conflict.field_deltas[0].kind, FieldDeltaKind::BothDiffer);
+    }
+
+    #[test]
+    fn classify_auto_merges_icon_and_field_together() {
+        // Peer made a one-sided Title edit AND assigned a one-sided icon; both
+        // land in the merged value (exercises the icon overlay alongside a
+        // field take, not in isolation).
+        let local = forked(C_BASE, 1, C_BASE);
+        let mut peer = forked(C_BASE, 1, ("Title-B", "pw0", "notes"));
+        peer.custom_icon_uuid = Some(icon(9));
+        match classify(&local, &peer, &[], &[], Granularity::Field) {
+            Classification::AutoMerged { merged } => {
+                assert_eq!(merged.title, "Title-B", "field take folded in");
+                assert_eq!(
+                    merged.custom_icon_uuid,
+                    Some(icon(9)),
+                    "icon take folded in"
+                );
+            }
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_in_sync_with_shared_multi_snapshot_history() {
+        // Identical current values + identical multi-snapshot history on both
+        // sides → InSync (the verdict ignores the richer shared history).
+        let mut local = forked(C_BASE, 1, C_BASE);
+        local.history = vec![snapshot("v0", at(2026, 1)), snapshot("v1", at(2026, 2))];
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        peer.history = vec![snapshot("v0", at(2026, 1)), snapshot("v1", at(2026, 2))];
+        assert!(matches!(
+            classify(&local, &peer, &[], &[], Granularity::Field),
+            Classification::InSync
+        ));
+    }
+
+    #[test]
+    fn classify_attachment_only_diff_is_in_sync() {
+        // Attachments are outside `classify`'s scope (they ride apply_merge /
+        // the Phase-5 content pools). An entry differing ONLY in an attachment
+        // classifies InSync — the documented scope boundary.
+        let local = forked(C_BASE, 1, C_BASE);
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        peer.attachments = vec![att("secret.txt", 0)];
+        assert!(
+            matches!(
+                classify(&local, &peer, &[], &[bin(b"data")], Granularity::Field),
+                Classification::InSync
+            ),
+            "attachment-only divergence is out of classify's scope → InSync"
         );
     }
 }
