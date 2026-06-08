@@ -556,6 +556,13 @@ pub(super) fn build_resolved_entry(
     // before merging so the combined result carries only local-pool
     // ref_ids.
     let rebound_remote_history = rebind_history(&conflict.remote.history, remap);
+    // Rebind the remote *current* too (history cleared) so it can be added as
+    // the rejected-side snapshot below in the local binary pool's ref space.
+    let mut remote_current = conflict.remote.clone();
+    remote_current.history.clear();
+    let rebound_remote_current = rebind_history(std::slice::from_ref(&remote_current), remap)
+        .pop()
+        .unwrap_or(remote_current);
     // After rebinding we're done mutating the binary pool for this
     // entry; the rest of build_resolved_entry needs only a read-only
     // view of it for hashing + history dedup.
@@ -573,23 +580,38 @@ pub(super) fn build_resolved_entry(
         local_binaries,
         &ts_set,
     );
-    let mut snapshot = conflict.local.clone();
-    snapshot.history.clear();
-    // Second-resolution mtime comparison, matching `build_merged_entry`
-    // and `merge_histories`: ms-stamped engine mtimes vs second-
-    // truncated KDBX round-trips would otherwise push the loser's
-    // pre-merge snapshot alongside its already-merged twin (Bug A
-    // history bloat — see `sync-soak-bugs.md`). `ts_set` is likewise
-    // truncated by `tombstone_set`.
-    let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
-    let snapshot_mtime = second_resolution(snapshot.times.last_modification_time);
-    let snapshot_is_tombstoned = ts_set.contains(&(snapshot_mtime, snapshot_hash));
-    let already_present = combined.iter().any(|h| {
-        second_resolution(h.times.last_modification_time) == snapshot_mtime
-            && entry_content_hash(h, local_binaries) == snapshot_hash
-    });
-    if !already_present && !snapshot_is_tombstoned {
-        combined.push(snapshot);
+    // Non-destructive resolution: preserve BOTH sides' pre-resolution current
+    // states in `<History>`, EXCEPT whichever became the resolved value (that
+    // side is the live entry, not history). So "keep ours" preserves *theirs*,
+    // "keep theirs" preserves *ours*, and a per-field mix preserves both — and
+    // there is never a redundant history copy of the chosen value. (Previously
+    // only local's pre-state was snapshotted, which duplicated the current value
+    // on a keep-ours resolution and silently dropped the rejected "theirs".)
+    let merged_hash = entry_content_hash(&merged, local_binaries);
+    let mut local_current = conflict.local.clone();
+    local_current.history.clear();
+    for snapshot in [local_current, rebound_remote_current] {
+        let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
+        // The side that became the resolved value lives as `merged`, not as a
+        // history record — skip it (this is the redundant-copy fix).
+        if snapshot_hash == merged_hash {
+            continue;
+        }
+        // Second-resolution mtime comparison, matching `build_merged_entry`
+        // and `merge_histories`: ms-stamped engine mtimes vs second-truncated
+        // KDBX round-trips would otherwise push a pre-merge snapshot alongside
+        // its already-merged twin (Bug A history bloat — see `sync-soak-bugs.md`).
+        let snapshot_mtime = second_resolution(snapshot.times.last_modification_time);
+        if ts_set.contains(&(snapshot_mtime, snapshot_hash)) {
+            continue;
+        }
+        let already_present = combined.iter().any(|h| {
+            second_resolution(h.times.last_modification_time) == snapshot_mtime
+                && entry_content_hash(h, local_binaries) == snapshot_hash
+        });
+        if !already_present {
+            combined.push(snapshot);
+        }
     }
     merged.history = combined;
     write_tombstones_to_custom_data(&mut merged.custom_data, &unioned_ts, None);

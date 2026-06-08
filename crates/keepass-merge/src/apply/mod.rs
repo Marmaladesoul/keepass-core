@@ -724,6 +724,39 @@ mod tests {
     }
 
     #[test]
+    fn resolution_keep_local_preserves_rejected_remote_in_history() {
+        // Non-destructive resolution: keeping "ours" must snapshot the rejected
+        // "theirs" into history — NOT a redundant copy of the chosen value.
+        let mut outcome = MergeOutcome::default();
+        outcome
+            .entry_conflicts
+            .push(make_entry_conflict(1, "ours", "theirs", at(2026, 1)));
+        let mut resolution = Resolution::default();
+        let mut fields = HashMap::new();
+        fields.insert("Title".into(), ConflictSide::Local);
+        resolution
+            .entry_field_choices
+            .insert(EntryId(Uuid::from_u128(1)), fields);
+        let mut local = vault_with(vec![entry(1, "ours", at(2026, 1))]);
+        let remote = vault_with(vec![entry(1, "theirs", at(2026, 1))]);
+        apply_merge(&mut local, &remote, &outcome, &resolution).expect("apply");
+
+        let merged = &local.root.entries[0];
+        assert_eq!(
+            merged.title, "ours",
+            "current keeps the chosen (local) value"
+        );
+        assert!(
+            merged.history.iter().any(|h| h.title == "theirs"),
+            "rejected remote value must be preserved in history"
+        );
+        assert!(
+            !merged.history.iter().any(|h| h.title == "ours"),
+            "no redundant history copy of the chosen value"
+        );
+    }
+
+    #[test]
     fn delete_edit_keep_local_drops_remote_tombstone_and_keeps_entry() {
         let when = Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap();
         let mut local = vault_with(vec![entry(1, "kept", at(2026, 1))]);
