@@ -16,6 +16,7 @@
 
 pub mod conflict;
 pub mod conflict_resolution;
+pub mod digest;
 pub mod error;
 pub mod events;
 pub mod outcome;
@@ -44,6 +45,7 @@ pub use crate::conflict_resolution::{
     CONFLICT_RESOLUTION_CUSTOM_DATA_KEY, ConflictKind, ConflictResolution, ConflictResolutionError,
     add_conflict_resolution, parse_conflict_resolutions,
 };
+pub use crate::digest::vault_content_digest;
 pub use crate::entry_merge::{Classification, Granularity, classify};
 pub use crate::error::MergeError;
 pub use crate::events::MergeEvent;
