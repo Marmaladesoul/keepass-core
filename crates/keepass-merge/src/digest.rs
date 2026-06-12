@@ -29,6 +29,10 @@
 //!   replicas that differ only in an entry's icon have *not*
 //!   converged, so the digest hashes each entry's `icon_id` /
 //!   `custom_icon_uuid` alongside its content hash.
+//! - **Previous parent** (`<PreviousParentGroup>`, KDBX 4.1). It
+//!   decides where a restore puts the entry, so replicas that differ
+//!   in it will *behave* differently even when everything visible
+//!   matches today.
 //!
 //! Excluded, deliberately:
 //!
@@ -42,12 +46,22 @@
 //!   state, not user-visible content.
 //! - **UI / client state**: `is_expanded`, auto-type config, custom
 //!   data, and all `Meta` fields except the recycle-bin pointer (bin
-//!   enablement and identity are user-visible vault behaviour).
+//!   enablement and identity are user-visible vault behaviour). Note
+//!   this means the equality guarantee is scoped: `Meta` content
+//!   beyond the bin pointer (database name/description, custom icon
+//!   *pool* bytes, …) can differ between digest-equal replicas.
 //!
 //! Stability contract: same as `hash::entry_content_hash` —
 //! deterministic for a given `keepass-merge` build, **not** stable
 //! across releases or implementations. Compare digests produced by
 //! the same build; do not persist them.
+//!
+//! Confidentiality: the digest's preimage includes plaintext field
+//! values (via `entry_content_hash`) with no salt or KDF, so treat
+//! the value as **secret-adjacent** — compare it in memory, never
+//! log, persist, or transmit it. For a vault whose other contents an
+//! attacker already knows, a leaked digest is an offline guessing
+//! oracle for the remaining secret.
 
 use keepass_core::model::{Group, GroupId, Vault};
 use sha2::{Digest, Sha256};
@@ -99,6 +113,7 @@ pub fn vault_content_digest(vault: &Vault) -> [u8; 32] {
         hasher.update(entry_content_hash(entry, &vault.binaries));
         hasher.update(entry.icon_id.to_le_bytes());
         update_optional_uuid(&mut hasher, entry.custom_icon_uuid);
+        update_optional_uuid(&mut hasher, entry.previous_parent_group.map(|g| g.0));
     }
 
     hasher.update([SECTION_META]);
@@ -239,6 +254,16 @@ mod tests {
         let mut v3 = two_group_vault(false);
         v3.root.groups[0].entries[0].custom_icon_uuid = Some(uuid(9));
         assert_ne!(vault_content_digest(&v1), vault_content_digest(&v3));
+    }
+
+    #[test]
+    fn previous_parent_diverges() {
+        // Previous parent decides where restore puts the entry —
+        // behaviour-bearing, so divergence must be visible.
+        let v1 = two_group_vault(false);
+        let mut v2 = two_group_vault(false);
+        v2.root.groups[0].entries[0].previous_parent_group = Some(GroupId(uuid(3)));
+        assert_ne!(vault_content_digest(&v1), vault_content_digest(&v2));
     }
 
     #[test]
