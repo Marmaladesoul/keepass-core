@@ -53,7 +53,7 @@ fn public_classify_auto_merges_one_sided_edit() {
     let peer = forked(id, BASE, 1_000, ("Acme", "pw-new", "notes")); // peer rotated the password
 
     match classify(&local, &peer, &[], &[], Granularity::Field) {
-        Classification::AutoMerged { merged } => {
+        Classification::AutoMerged { merged, .. } => {
             assert_eq!(merged.password, "pw-new", "peer's rotation adopted");
         }
         other => panic!("expected AutoMerged, got {other:?}"),
