@@ -149,12 +149,59 @@ pub(crate) struct EntryMergeOutput {
 /// merge does: ensure the merged entry's attachment list mirrors that
 /// side's presence-or-absence for this name. When the winning side has
 /// the attachment, take its bytes; when the winning side doesn't,
-/// drop it from the merged entry.
+/// drop it from the merged entry. [`classify`] surfaces the remote-side
+/// winners as [`AttachmentChange`] instructions on
+/// [`Classification::AutoMerged`].
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // wired up in slice B3
 pub(crate) struct AttachmentAutoResolution {
     pub name: String,
     pub side: Side,
+}
+
+/// One attachment instruction accompanying
+/// [`Classification::AutoMerged`] — the LCA-backed, *one-sided* peer
+/// attachment changes the verdict adopted (5c: attachment
+/// propagation through the pairwise owner-rows path).
+///
+/// Carried as explicit instructions, bytes included, rather than via
+/// the merged [`Entry`]'s `attachments` list: that list's `ref_id`s
+/// index a binary pool, and a merged entry mixing kept-local and
+/// adopted-peer attachments would have to reference two pools at
+/// once. The consumer applies these against its own storage instead
+/// (content-addressed, so the bytes dedup on arrival).
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum AttachmentChange {
+    /// Adopt the peer's bytes under `name` (add, or replace the local
+    /// attachment of the same name).
+    Take {
+        /// Attachment name (the KDBX `<Binary><Key>`).
+        name: String,
+        /// The peer-side payload bytes.
+        bytes: Vec<u8>,
+    },
+    /// Remove the local attachment under `name` — the peer deleted it
+    /// after the shared ancestor, and local left it untouched.
+    Drop {
+        /// Attachment name.
+        name: String,
+    },
+}
+
+impl std::fmt::Debug for AttachmentChange {
+    /// Manual impl: prints the byte *count*, never the bytes —
+    /// attachment payloads are vault content and must not reach logs
+    /// via a stray `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Take { name, bytes } => f
+                .debug_struct("Take")
+                .field("name", name)
+                .field("bytes_len", &bytes.len())
+                .finish(),
+            Self::Drop { name } => f.debug_struct("Drop").field("name", name).finish(),
+        }
+    }
 }
 
 /// Names of the standard `<String>` fields on an [`Entry`].
@@ -755,13 +802,20 @@ pub enum Classification {
         /// `local` with the peer's non-conflicting field/icon changes folded
         /// in and tags 3-way-merged against the ancestor.
         ///
-        /// **Scope.** Attachments, `<History>`, `custom_data`, and timestamps
-        /// are inherited from `local` **unchanged**: reconciling those needs
-        /// the cross-pool binary remap that lives in [`crate::apply_merge`],
-        /// which remains the byte-level merge. `classify` is the field/icon
-        /// conflict-detection brain, not a whole-entry merge — the owner-rows
-        /// ingest pairs it with `apply_merge` for the byte-level work.
+        /// **Scope.** `<History>`, `custom_data`, and timestamps are
+        /// inherited from `local` **unchanged**. The merged entry's
+        /// `attachments` list is also local's — adopted attachment
+        /// changes travel as the explicit [`AttachmentChange`]
+        /// instructions alongside, because a single entry cannot
+        /// reference two binary pools at once (see `attachment_changes`).
         merged: Box<Entry>,
+        /// LCA-backed one-sided peer attachment changes to apply after
+        /// adopting `merged` (5c). Empty when attachments agree or only
+        /// local moved them. Both-sided attachment divergence stays on
+        /// the conservative conflict path (`classify_attachments`'s
+        /// no-LCA posture included) and is **not** auto-applied — see
+        /// the scope note on [`Classification::Conflict`].
+        attachment_changes: Vec<AttachmentChange>,
     },
     /// At least one facet genuinely conflicts: both sides moved the same field
     /// or the icon off the LCA (any granularity), or — under
@@ -809,18 +863,31 @@ pub fn classify(
     let out = merge_entry(local, peer, local_binaries, peer_binaries);
 
     // A genuine conflict = both sides moved the *same* field, or the icon,
-    // off the LCA. (Attachments are out of `classify`'s scope — see
-    // `Classification::AutoMerged` — so they never feed the verdict.)
+    // off the LCA. Both-sided attachment divergence (and the deliberate
+    // no-LCA-conflict posture in `classify_attachments`) stays OUT of the
+    // verdict for now: surfacing it here would park entries the owner-rows
+    // resolver cannot yet resolve (conflict rows don't store attachments) —
+    // the remaining 5c slice. LCA-backed one-sided attachment changes DO
+    // feed the verdict below, as auto-merges.
     let genuine_conflict = !out.conflicts.is_empty() || out.icon_conflict.is_some();
 
-    // Which side(s) moved a field/icon off the shared ancestor. A genuine
-    // conflict means both sides moved the same facet, so it counts for both.
+    // Which side(s) moved a field/icon/attachment off the shared ancestor.
+    // A genuine conflict means both sides moved the same facet, so it
+    // counts for both.
     let local_moved = genuine_conflict
         || out.auto_resolutions.iter().any(|(_, s)| *s == Side::Local)
-        || out.icon_auto_resolution == Some(Side::Local);
+        || out.icon_auto_resolution == Some(Side::Local)
+        || out
+            .attachment_auto_resolutions
+            .iter()
+            .any(|r| r.side == Side::Local);
     let peer_moved = genuine_conflict
         || out.auto_resolutions.iter().any(|(_, s)| *s == Side::Remote)
-        || out.icon_auto_resolution == Some(Side::Remote);
+        || out.icon_auto_resolution == Some(Side::Remote)
+        || out
+            .attachment_auto_resolutions
+            .iter()
+            .any(|r| r.side == Side::Remote);
 
     if !local_moved && !peer_moved && !out.tags_changed_from_local {
         return Classification::InSync;
@@ -868,8 +935,38 @@ pub fn classify(
         merged.custom_icon_uuid = peer.custom_icon_uuid;
     }
     merged.tags = out.merged_tags.into_iter().collect();
+
+    // Remote-side attachment winners become explicit instructions:
+    // the peer holding the name means "take its bytes" (dereferenced
+    // from the peer pool here, where the pool is in scope); the peer
+    // NOT holding it means its LCA-backed removal won — drop ours.
+    // Side::Local winners need nothing: merged already is local.
+    let attachment_changes = out
+        .attachment_auto_resolutions
+        .iter()
+        .filter(|r| r.side == Side::Remote)
+        .map(|r| {
+            let peer_bytes = peer
+                .attachments
+                .iter()
+                .find(|a| a.name == r.name)
+                .and_then(|a| peer_binaries.get(a.ref_id as usize))
+                .map(|b| b.data.clone());
+            match peer_bytes {
+                Some(bytes) => AttachmentChange::Take {
+                    name: r.name.clone(),
+                    bytes,
+                },
+                None => AttachmentChange::Drop {
+                    name: r.name.clone(),
+                },
+            }
+        })
+        .collect();
+
     Classification::AutoMerged {
         merged: Box::new(merged),
+        attachment_changes,
     }
 }
 
@@ -956,7 +1053,10 @@ fn take_field_from(target: &mut Entry, source: &Entry, key: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Classification, Granularity, Side, classify, find_common_ancestor, merge_entry};
+    use super::{
+        AttachmentChange, Classification, Granularity, Side, classify, find_common_ancestor,
+        merge_entry,
+    };
     use crate::conflict::{AttachmentDeltaKind, FieldDeltaKind};
     use chrono::{TimeZone, Utc};
     use keepass_core::model::{CustomField, Entry, EntryId, Timestamps};
@@ -1731,7 +1831,7 @@ mod tests {
         let local = forked(C_BASE, 1, C_BASE);
         let peer = forked(C_BASE, 1, ("Title-B", "pw0", "notes"));
         match classify(&local, &peer, &[], &[], Granularity::Field) {
-            Classification::AutoMerged { merged } => {
+            Classification::AutoMerged { merged, .. } => {
                 assert_eq!(merged.title, "Title-B", "peer's change adopted");
                 assert_eq!(merged.password, "pw0", "untouched field kept");
             }
@@ -1761,7 +1861,7 @@ mod tests {
         let local = forked(C_BASE, 1, ("Title-MINE", "pw0", "notes"));
         let peer = forked(C_BASE, 1, ("Title", "pw0", "notes-THEIRS"));
         match classify(&local, &peer, &[], &[], Granularity::Field) {
-            Classification::AutoMerged { merged } => {
+            Classification::AutoMerged { merged, .. } => {
                 assert_eq!(merged.title, "Title-MINE", "my field kept");
                 assert_eq!(merged.notes, "notes-THEIRS", "their field merged in");
             }
@@ -1819,7 +1919,7 @@ mod tests {
         let mut peer = forked(C_BASE, 1, C_BASE);
         peer.tags = vec!["work".into()];
         match classify(&local, &peer, &[], &[], Granularity::Item) {
-            Classification::AutoMerged { merged } => {
+            Classification::AutoMerged { merged, .. } => {
                 assert!(
                     merged.tags.contains(&"work".to_string()),
                     "peer's tag merged in"
@@ -1837,7 +1937,7 @@ mod tests {
         let mut peer = forked(C_BASE, 1, C_BASE);
         peer.custom_icon_uuid = Some(icon(7));
         match classify(&local, &peer, &[], &[], Granularity::Field) {
-            Classification::AutoMerged { merged } => {
+            Classification::AutoMerged { merged, .. } => {
                 assert_eq!(
                     merged.custom_icon_uuid,
                     Some(icon(7)),
@@ -1875,7 +1975,7 @@ mod tests {
         let mut peer = forked(C_BASE, 1, C_BASE);
         peer.custom_fields = vec![CustomField::new("TOTP", "seed", true)];
         match classify(&local, &peer, &[], &[], Granularity::Field) {
-            Classification::AutoMerged { merged } => {
+            Classification::AutoMerged { merged, .. } => {
                 let f = merged
                     .custom_fields
                     .iter()
@@ -1905,7 +2005,7 @@ mod tests {
         peer.history = vec![ancestor];
 
         match classify(&local, &peer, &[], &[], Granularity::Field) {
-            Classification::AutoMerged { merged } => {
+            Classification::AutoMerged { merged, .. } => {
                 assert!(
                     !merged.custom_fields.iter().any(|f| f.key == "X"),
                     "peer's deletion honoured — X dropped from merged"
@@ -1966,7 +2066,7 @@ mod tests {
         let mut peer = forked(C_BASE, 1, ("Title-B", "pw0", "notes"));
         peer.custom_icon_uuid = Some(icon(9));
         match classify(&local, &peer, &[], &[], Granularity::Field) {
-            Classification::AutoMerged { merged } => {
+            Classification::AutoMerged { merged, .. } => {
                 assert_eq!(merged.title, "Title-B", "field take folded in");
                 assert_eq!(
                     merged.custom_icon_uuid,
@@ -1993,19 +2093,101 @@ mod tests {
     }
 
     #[test]
-    fn classify_attachment_only_diff_is_in_sync() {
-        // Attachments are outside `classify`'s scope (they ride apply_merge /
-        // the Phase-5 content pools). An entry differing ONLY in an attachment
-        // classifies InSync — the documented scope boundary.
+    fn classify_peer_attachment_add_auto_merges_with_take() {
+        // 5c: an LCA-backed, peer-only attachment add is an auto-merge
+        // carrying an explicit Take instruction with the peer's bytes.
+        // (This test previously pinned the opposite — attachment-only
+        // divergence verdicting InSync — when attachments were outside
+        // classify's scope.)
         let local = forked(C_BASE, 1, C_BASE);
         let mut peer = forked(C_BASE, 1, C_BASE);
         peer.attachments = vec![att("secret.txt", 0)];
-        assert!(
-            matches!(
-                classify(&local, &peer, &[], &[bin(b"data")], Granularity::Field),
-                Classification::InSync
-            ),
-            "attachment-only divergence is out of classify's scope → InSync"
-        );
+        match classify(&local, &peer, &[], &[bin(b"data")], Granularity::Field) {
+            Classification::AutoMerged {
+                attachment_changes, ..
+            } => match attachment_changes.as_slice() {
+                [AttachmentChange::Take { name, bytes }] => {
+                    assert_eq!(name, "secret.txt");
+                    assert_eq!(bytes, b"data");
+                }
+                other => panic!("expected one Take, got {other:?}"),
+            },
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_peer_attachment_remove_auto_merges_with_drop() {
+        // The peer deleted an attachment local still holds. Local never
+        // edited (its current IS the shared ancestor, attachment
+        // included); the peer pushed a history snapshot of that
+        // ancestor when it deleted. The LCA matcher pairs local-current
+        // with peer-history by content hash, the 3-way sees the peer's
+        // removal as the only change → Drop instruction.
+        let mut local = forked(C_BASE, 1, C_BASE);
+        local.history.clear();
+        local.attachments = vec![att("stale.txt", 0)];
+
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        if let Some(h) = peer.history.first_mut() {
+            h.attachments = vec![att("stale.txt", 0)];
+        }
+
+        match classify(
+            &local,
+            &peer,
+            &[bin(b"old-bytes")],
+            &[bin(b"old-bytes")],
+            Granularity::Field,
+        ) {
+            Classification::AutoMerged {
+                attachment_changes, ..
+            } => match attachment_changes.as_slice() {
+                [AttachmentChange::Drop { name }] => assert_eq!(name, "stale.txt"),
+                other => panic!("expected one Drop, got {other:?}"),
+            },
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_local_attachment_add_no_instructions() {
+        // Local-only attachment changes need nothing applied: merged IS
+        // local. The verdict is AutoMerged (sides differ) with an empty
+        // instruction list.
+        let mut local = forked(C_BASE, 1, C_BASE);
+        local.attachments = vec![att("mine.txt", 0)];
+        let peer = forked(C_BASE, 1, C_BASE);
+        match classify(&local, &peer, &[bin(b"mine")], &[], Granularity::Field) {
+            Classification::AutoMerged {
+                attachment_changes, ..
+            } => assert!(attachment_changes.is_empty(), "nothing to apply locally"),
+            other => panic!("expected AutoMerged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_no_lca_attachment_divergence_not_auto_adopted() {
+        // No shared ancestor: classify_attachments deliberately stays
+        // conservative (present-wins would silently undo deletions), so
+        // a no-LCA attachment divergence must never produce adoption
+        // instructions, whatever the entry-level verdict is.
+        let mut local = forked(C_BASE, 1, C_BASE);
+        local.history.clear();
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        peer.history.clear();
+        peer.attachments = vec![att("orphan.txt", 0)];
+        if let Classification::AutoMerged {
+            attachment_changes, ..
+        } = classify(&local, &peer, &[], &[bin(b"x")], Granularity::Field)
+        {
+            assert!(
+                attachment_changes.is_empty(),
+                "no-LCA divergence must not auto-adopt"
+            );
+        }
+        // Conflict / InSync are acceptable conservative verdicts; the
+        // property under test is only that no adoption instruction is
+        // fabricated without an LCA.
     }
 }
