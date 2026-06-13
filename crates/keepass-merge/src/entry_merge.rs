@@ -65,6 +65,7 @@ use sha2::{Digest, Sha256};
 
 use crate::conflict::{AttachmentDelta, AttachmentDeltaKind, FieldDelta, FieldDeltaKind};
 use crate::hash::{ct_eq, entry_content_hash};
+use crate::time::second_resolution;
 
 /// Which side an auto-resolved field should be applied from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -628,26 +629,50 @@ pub(crate) fn local_edited_after(
     }
 }
 
-/// Find the most-recent entry-history record present on both sides.
+/// Find the most-recent entry version present on both sides — the
+/// per-entry LCA for the 3-way classifiers.
 ///
-/// **Match key is `content_hash` — NOT `last_modification_time`.** Any two
-/// records with the same content hash have identical field values (that's
-/// what the hash covers), so they yield the *identical* per-field 3-way
-/// outcome regardless of which is chosen as the ancestor. mtime is used
-/// only to order the local candidates newest-first, so the first content
-/// match is the *most-recent* shared version (the tightest ancestor —
-/// fewest false "both changed"). It is **not** a match gate.
+/// **Matching runs in two passes.** Content alone is not a generation
+/// identity: an edit that returns an entry to a previously-seen content
+/// state (removing an attachment ⇒ back to the pre-add state; setting a
+/// field back to an old value) makes the SAME hash recur at different
+/// generations, and a content-only matcher can alias a new record to an
+/// ancient shared snapshot. Against that wrong ancestor, the peer's
+/// stale copy reads as a fresh one-sided change (the alias-er's newest
+/// intent silently reverts), or a one-sided change reads as both-sided
+/// (a facet divergence the verdict then swallows) — keyhole DESIGN.md
+/// Finding #8.
 ///
-/// This matters because `last_modification_time` does **not** survive a
-/// sync round-trip intact: the KDBX on-disk time format is whole-second
-/// (and the engine may hold finer precision), so the "same" version can
-/// carry a slightly different mtime on the two replicas after a
-/// project→sync→ingest cycle. Gating the match on exact mtime equality
-/// then misses a genuine ancestor and parks a spurious conflict for what
-/// is really a one-sided edit (PR-2 soak Bug A — see
-/// `_project-management/sync-soak-bugs.md`). Matching on content is robust
-/// to that: it only ever finds *more* (content-valid) ancestors, and a
-/// true no-LCA result now means the two sides genuinely share no version.
+/// **The winning pair maximises
+/// `min(local generation rank, remote generation rank)`** (rank: oldest
+/// history snapshot = 0, …, current = highest), tie-broken by the later
+/// local mtime, then the later local rank. The fork point is by
+/// definition a version BOTH lineages contain, with everything after it
+/// on each side being that side's divergence — so the tightest ancestor
+/// is the pair sitting latest in BOTH lineages, not the first content
+/// match found walking one side. Mtime-first walking (the previous
+/// rule) breaks inside a same-second burst, where an entry's CURRENT
+/// record (e.g. just-removed-attachment, content equal to an ancient
+/// state) ties on time with everything and matches an ancient remote
+/// snapshot before the true latest shared generation is ever considered
+/// — the dominant shape of the Finding-#8 fuzz failures. Rank ordering
+/// also kills the cross-second variant (restoring an old value made the
+/// restorer's current alias to the peer's ancient snapshot and silently
+/// revert), because the true shared generation always out-ranks an
+/// ancient recurrence on the min() side.
+///
+/// **Why mtime is a tie-break, not a match gate:** the same logical
+/// generation does NOT carry the same mtime on both replicas — classify's
+/// auto-merge adoption builds the advanced entry from a clone of the
+/// LOCAL side, so an adopted change keeps the adopter's mtime (observed
+/// live: identical content hashes one second apart). Gating pairs on
+/// mtime equality therefore rejects genuine shared generations and
+/// regresses to ancient pre-fork pairs — measured at 3× the failure
+/// rate of content-only matching on the attachment fuzzer. A re-stamped
+/// echo (same value, mtime seconds off — KDBX-3.1 truncation or a
+/// round-trip re-stamp) must also still match, and does. (Residue: if
+/// history quota-trimming has evicted the true shared generation, the
+/// surviving pick is the best available guess, as before.)
 ///
 /// **Candidate set includes each side's *current* entry**, not just
 /// `<History>` snapshots. The common case for LCA-by-current is:
@@ -673,28 +698,85 @@ pub(crate) fn find_common_ancestor<'a>(
     local_binaries: &[Binary],
     remote_binaries: &[Binary],
 ) -> Option<&'a Entry> {
-    // Every remote candidate's content hash (current + history), mtime
-    // irrelevant. Each side dereferences its own binary pool.
-    let remote_hashes: Vec<[u8; 32]> = std::iter::once(remote)
-        .chain(remote.history.iter())
-        .map(|r| entry_content_hash(r, remote_binaries))
-        .collect();
+    // Candidates per side in generation-RANK order: oldest history
+    // snapshot = 0, …, current = highest (KDBX history is oldest-first
+    // on disk). Each side dereferences its own binary pool. Constant-
+    // time hash compare per the workspace rule (hashes aren't secret
+    // here, but the convention holds regardless).
+    type PairKey = (usize, Option<chrono::DateTime<chrono::Utc>>, usize);
+    type Candidate<'e> = (
+        &'e Entry,
+        [u8; 32],
+        Option<chrono::DateTime<chrono::Utc>>,
+        usize,
+    );
+    let rank_candidates = |e: &'a Entry, binaries: &[Binary]| -> Vec<Candidate<'a>> {
+        e.history
+            .iter()
+            .chain(std::iter::once(e))
+            .enumerate()
+            .map(|(rank, c)| {
+                (
+                    c,
+                    entry_content_hash(c, binaries),
+                    second_resolution(c.times.last_modification_time),
+                    rank,
+                )
+            })
+            .collect()
+    };
+    let locals = rank_candidates(local, local_binaries);
+    let remotes = rank_candidates(remote, remote_binaries);
 
-    // Walk local candidates (current + history) newest → oldest so the
-    // first content match is the most recent shared version. Records with
-    // no timestamp sort last (they can still match by content). Constant-
-    // time hash compare per the workspace rule (hashes aren't secret here,
-    // but the convention holds regardless).
-    let mut local_iter: Vec<&Entry> = std::iter::once(local).chain(local.history.iter()).collect();
-    local_iter.sort_by_key(|e| std::cmp::Reverse(e.times.last_modification_time));
-
-    for l in local_iter {
-        let lh = entry_content_hash(l, local_binaries);
-        if remote_hashes.iter().any(|rh| ct_eq(&lh, rh)) {
-            return Some(l);
+    // Best content-matching pair by (min rank, local mtime, local rank).
+    let mut best: Option<(PairKey, &'a Entry)> = None;
+    for (l, lh, lm, lrank) in &locals {
+        for (_, rh, _, rrank) in &remotes {
+            if !ct_eq(lh, rh) {
+                continue;
+            }
+            let key = ((*lrank).min(*rrank), *lm, *lrank);
+            if best.as_ref().is_none_or(|(k, _)| key > *k) {
+                best = Some((key, l));
+            }
         }
     }
-    None
+
+    let chosen = best.map(|(_, l)| l);
+    // `KEYS_DEBUG_LCA=1` diagnostics: dump every candidate pair-side and
+    // the chosen ancestor. Same secret posture as keys-engine's
+    // KEYS_DEBUG_ADOPTION — uuid + ranks + floored mtimes + attachment
+    // COUNTS only, plus a 4-byte content-hash prefix to correlate
+    // candidates across the two sides; never field values, names, or
+    // full hashes (stderr may be captured into persistent logs). This
+    // dump is what surfaced the auto-merge-keeps-adopter-mtime fact
+    // that killed the (mtime, hash) compound-key fix candidate.
+    if std::env::var_os("KEYS_DEBUG_LCA").is_some() {
+        let dump = |tag: &str, cs: &[Candidate<'_>]| {
+            for (c, h, m, r) in cs {
+                eprintln!(
+                    "LCA-DEBUG   {tag} rank={r} mtime={m:?} hash={:02x}{:02x}{:02x}{:02x} atts={}",
+                    h[0],
+                    h[1],
+                    h[2],
+                    h[3],
+                    c.attachments.len()
+                );
+            }
+        };
+        eprintln!("LCA-DEBUG entry={}", local.id.0);
+        dump("local ", &locals);
+        dump("remote", &remotes);
+        match &chosen {
+            Some(c) => eprintln!(
+                "LCA-DEBUG chosen mtime={:?} atts={}",
+                c.times.last_modification_time,
+                c.attachments.len()
+            ),
+            None => eprintln!("LCA-DEBUG chosen NONE"),
+        }
+    }
+    chosen
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1081,23 +1163,106 @@ mod tests {
 
     #[test]
     fn lca_found_by_mtime() {
+        // Distinct current titles: identical currents would themselves be
+        // the (legitimate) latest shared version — see lca_none_when_no_overlap.
         let mut local = entry();
+        local.title = "local-current".into();
         local.history = vec![snapshot("v1", at(2026, 1)), snapshot("v2", at(2026, 2))];
         let mut remote = entry();
+        remote.title = "remote-current".into();
         remote.history = vec![snapshot("v1", at(2026, 1)), snapshot("v3", at(2026, 3))];
 
         let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA");
         assert_eq!(lca.title, "v1");
     }
 
+    /// Finding #8, same-second alias: within one floored second mtimes
+    /// cannot disambiguate generations, so pair selection must rank by
+    /// GENERATION position. The old mtime-first walk left history
+    /// oldest-first inside a tie, so an ancient snapshot whose content
+    /// recurred matched before the true latest shared generation —
+    /// turning a disjoint-field auto-merge into a spurious same-field
+    /// conflict (and, facet-dependent, a silent divergence).
+    #[test]
+    fn lca_same_second_tie_prefers_newest_generation() {
+        let t = at(2026, 1);
+        // Shared lineage, all in one second: ("A","X") → ("B","X").
+        let gen0 = {
+            let mut e = snapshot("A", t.clone());
+            e.notes = "X".into();
+            e
+        };
+        let gen1 = {
+            let mut e = snapshot("B", t.clone());
+            e.notes = "X".into();
+            e
+        };
+        // Remote edited title B→C; local edited notes X→Y. Disjoint.
+        let mut remote = snapshot("C", t.clone());
+        remote.notes = "X".into();
+        remote.history = vec![gen0.clone(), gen1.clone()];
+        let mut local = snapshot("B", t.clone());
+        local.notes = "Y".into();
+        local.history = vec![gen0, gen1];
+
+        let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA");
+        assert_eq!(
+            (lca.title.as_str(), lca.notes.as_str()),
+            ("B", "X"),
+            "latest shared generation, not the ancient same-second recurrence",
+        );
+        match classify(&local, &remote, &[], &[], Granularity::Field) {
+            Classification::AutoMerged { merged, .. } => {
+                assert_eq!(merged.title, "C", "remote's one-sided title lands");
+                assert_eq!(merged.notes, "Y", "local's one-sided notes survive");
+            }
+            other => panic!("disjoint same-second edits must auto-merge, got {other:?}"),
+        }
+    }
+
+    /// Finding #8, cross-second alias: an edit restoring a PREVIOUS value
+    /// makes the restorer's current entry content-match the peer's
+    /// ancient snapshot. Newest-local-first matching took that pair as
+    /// the LCA, read the peer's stale copy as a fresh one-sided edit,
+    /// and silently reverted the restore. Under min-rank pair selection
+    /// the true shared generation (the pre-restore value, late in BOTH
+    /// lineages) out-ranks the current↔ancient pair, and the restore —
+    /// local's newest intent — survives.
+    #[test]
+    fn lca_replace_back_to_old_value_does_not_alias() {
+        let gen0 = snapshot("old", at(2026, 1));
+        let gen1 = snapshot("new", at(2026, 2));
+        // Local restored "old" on day 3; remote still sits at "new".
+        let mut local = snapshot("old", at(2026, 3));
+        local.history = vec![gen0.clone(), gen1.clone()];
+        let mut remote = snapshot("new", at(2026, 2));
+        remote.history = vec![gen0];
+
+        let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA");
+        assert_eq!(
+            (lca.title.as_str(), lca.times.last_modification_time),
+            ("new", at(2026, 2).last_modification_time),
+            "the pre-restore generation is the ancestor, not the aliased current/gen0 pair",
+        );
+        match classify(&local, &remote, &[], &[], Granularity::Field) {
+            Classification::AutoMerged { merged, .. } => {
+                assert_eq!(merged.title, "old", "the restore must not silently revert");
+            }
+            other => panic!("one-sided restore must auto-merge keeping local, got {other:?}"),
+        }
+    }
+
     #[test]
     fn lca_collision_broken_by_content() {
         // Two history records share an mtime but differ in content; only the
-        // matching-content one is the real ancestor.
+        // matching-content one is the real ancestor. Distinct current titles
+        // for the same reason as lca_found_by_mtime.
         let mtime = at(2026, 1);
         let mut local = entry();
+        local.title = "local-current".into();
         local.history = vec![snapshot("shared", mtime.clone())];
         let mut remote = entry();
+        remote.title = "remote-current".into();
         remote.history = vec![snapshot("other", mtime.clone()), snapshot("shared", mtime)];
 
         let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA");
