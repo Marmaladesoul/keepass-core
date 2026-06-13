@@ -944,14 +944,17 @@ pub fn classify(
 ) -> Classification {
     let out = merge_entry(local, peer, local_binaries, peer_binaries);
 
-    // A genuine conflict = both sides moved the *same* field, or the icon,
-    // off the LCA. Both-sided attachment divergence (and the deliberate
-    // no-LCA-conflict posture in `classify_attachments`) stays OUT of the
-    // verdict for now: surfacing it here would park entries the owner-rows
-    // resolver cannot yet resolve (conflict rows don't store attachments) —
-    // the remaining 5c slice. LCA-backed one-sided attachment changes DO
-    // feed the verdict below, as auto-merges.
-    let genuine_conflict = !out.conflicts.is_empty() || out.icon_conflict.is_some();
+    // A genuine conflict = both sides moved the *same* field, the icon,
+    // or the *same-name* attachment off the LCA (and the deliberate
+    // no-LCA-conflict posture in `classify_attachments`). Attachment
+    // conflicts joined the verdict once the owner-rows resolver could
+    // hold and resolve them — conflict rows store attachment state
+    // (keyhole Finding #7) and the resolver's rebuilt "theirs" carries
+    // it. LCA-backed one-sided attachment changes still feed the
+    // verdict below as auto-merges.
+    let genuine_conflict = !out.conflicts.is_empty()
+        || out.icon_conflict.is_some()
+        || !out.attachment_conflicts.is_empty();
 
     // Which side(s) moved a field/icon/attachment off the shared ancestor.
     // A genuine conflict means both sides moved the same facet, so it
@@ -981,14 +984,16 @@ pub fn classify(
     };
 
     if is_conflict {
-        let (field_deltas, icon_delta) = match granularity {
+        let (field_deltas, attachment_deltas, icon_delta) = match granularity {
             // Field-level: surface only the facets that need user input
             // (same as the vault-level merge's `EntryConflict`).
-            Granularity::Field => (out.conflicts, out.icon_conflict),
+            Granularity::Field => (out.conflicts, out.attachment_conflicts, out.icon_conflict),
             // Item-level: the whole item is flagged, so surface every
-            // differing field/icon for the per-field picker (design doc §3).
+            // differing field/attachment/icon for the per-facet picker
+            // (design doc §3).
             Granularity::Item => (
                 differing_field_deltas(local, peer),
+                differing_attachment_deltas(local, peer, local_binaries, peer_binaries),
                 icon_delta_if_differs(local, peer),
             ),
         };
@@ -998,7 +1003,7 @@ pub fn classify(
                 local: local.clone(),
                 remote: peer.clone(),
                 field_deltas,
-                attachment_deltas: Vec::new(),
+                attachment_deltas,
                 icon_delta,
             }),
         };
@@ -1087,6 +1092,47 @@ fn differing_field_deltas(local: &Entry, peer: &Entry) -> Vec<FieldDelta> {
         deltas.push(FieldDelta {
             key: key.into(),
             kind,
+        });
+    }
+    deltas
+}
+
+/// Every attachment name whose bytes differ between the two sides,
+/// classified by which side(s) hold it — the attachment companion to
+/// [`differing_field_deltas`] for the item-level resolver payload.
+/// Comparison is by content sha through each side's own binary pool
+/// (dangling refs read as absent, matching [`attachment_map`]).
+fn differing_attachment_deltas(
+    local: &Entry,
+    peer: &Entry,
+    local_binaries: &[Binary],
+    peer_binaries: &[Binary],
+) -> Vec<AttachmentDelta> {
+    let local_map = attachment_map(local, local_binaries);
+    let peer_map = attachment_map(peer, peer_binaries);
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    names.extend(local_map.keys().copied());
+    names.extend(peer_map.keys().copied());
+    let mut deltas = Vec::new();
+    for name in names {
+        let l = local_map.get(name).copied();
+        let p = peer_map.get(name).copied();
+        if l.map(|s| s.sha256) == p.map(|s| s.sha256) {
+            continue;
+        }
+        let kind = match (l.is_some(), p.is_some()) {
+            (true, true) => AttachmentDeltaKind::BothDiffer,
+            (true, false) => AttachmentDeltaKind::LocalOnly,
+            (false, true) => AttachmentDeltaKind::RemoteOnly,
+            (false, false) => unreachable!("name collected from union of local + peer"),
+        };
+        deltas.push(AttachmentDelta {
+            name: name.into(),
+            kind,
+            local_sha256: l.and_then(|s| s.sha256),
+            remote_sha256: p.and_then(|s| s.sha256),
+            local_size: l.and_then(|s| s.size),
+            remote_size: p.and_then(|s| s.size),
         });
     }
     deltas
@@ -2354,5 +2400,63 @@ mod tests {
         // Conflict / InSync are acceptable conservative verdicts; the
         // property under test is only that no adoption instruction is
         // fabricated without an LCA.
+    }
+
+    #[test]
+    fn classify_both_sided_same_name_attachment_parks() {
+        // 5c (post Finding #7): both sides replaced the SAME attachment
+        // name with different bytes off a shared base — only the user
+        // can settle that, so the verdict is Conflict (hold open) with
+        // the attachment delta surfaced for the resolver. Previously
+        // this divergence was silently kept out of the verdict (no
+        // park, no pick → permanent un-badged replica divergence).
+        let mut local = forked(C_BASE, 1, C_BASE);
+        if let Some(h) = local.history.first_mut() {
+            h.attachments = vec![att("doc.txt", 0)];
+        }
+        local.attachments = vec![att("doc.txt", 1)];
+        let mut peer = forked(C_BASE, 1, C_BASE);
+        if let Some(h) = peer.history.first_mut() {
+            h.attachments = vec![att("doc.txt", 0)];
+        }
+        peer.attachments = vec![att("doc.txt", 1)];
+
+        match classify(
+            &local,
+            &peer,
+            &[bin(b"base"), bin(b"from-local")],
+            &[bin(b"base"), bin(b"from-peer")],
+            Granularity::Field,
+        ) {
+            Classification::Conflict { conflict } => {
+                assert!(conflict.field_deltas.is_empty(), "no field divergence");
+                assert_eq!(conflict.attachment_deltas.len(), 1);
+                let d = &conflict.attachment_deltas[0];
+                assert_eq!(d.name, "doc.txt");
+                assert_eq!(d.kind, AttachmentDeltaKind::BothDiffer);
+            }
+            other => panic!("both-sided same-name attachment must park, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_item_granularity_surfaces_attachment_deltas() {
+        // Item granularity flags the whole entry; the resolver payload
+        // must then carry every differing attachment, not just the
+        // same-name clashes (the attachment companion to
+        // differing_field_deltas).
+        let local = forked(C_BASE, 1, ("Title-L", "pw0", "notes"));
+        let mut peer = forked(C_BASE, 1, ("Title-P", "pw0", "notes"));
+        peer.attachments = vec![att("extra.txt", 0)];
+
+        match classify(&local, &peer, &[], &[bin(b"x")], Granularity::Item) {
+            Classification::Conflict { conflict } => {
+                assert_eq!(conflict.attachment_deltas.len(), 1);
+                let d = &conflict.attachment_deltas[0];
+                assert_eq!(d.name, "extra.txt");
+                assert_eq!(d.kind, AttachmentDeltaKind::RemoteOnly);
+            }
+            other => panic!("expected item-level Conflict, got {other:?}"),
+        }
     }
 }
