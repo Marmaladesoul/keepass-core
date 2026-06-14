@@ -54,7 +54,7 @@ use crate::model::entry_editor::PendingBinaryOps;
 use crate::model::{
     Attachment, AutoType, Binary, Clock, CustomIcon, DeletedObject, Entry, EntryEditor, EntryId,
     Group, GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, PortableEntry,
-    SystemClock, Timestamps, Vault,
+    RandomUuids, SystemClock, Timestamps, UuidSource, Vault,
 };
 use crate::protector::{FieldProtector, ProtectorError, SessionKey, open_with_key, seal_with_key};
 use crate::secret::{CompositeKey, TransformedKey};
@@ -535,8 +535,88 @@ impl Kdbx<Unlocked> {
         composite: &CompositeKey,
         database_name: impl Into<String>,
     ) -> Result<Self, Error> {
-        let database_name = database_name.into();
+        Self::create_empty_v4_inner(
+            composite,
+            database_name.into(),
+            None,
+            Box::new(SystemClock),
+            &RandomUuids,
+        )
+    }
 
+    /// Like [`Self::create_empty_v4`] but installs a
+    /// [`FieldProtector`] for the fresh vault.
+    ///
+    /// The empty vault has no protected fields to wrap, so the
+    /// protector is simply stored on the resulting [`Kdbx<Unlocked>`]
+    /// and used as entries are added (their freshly-set password /
+    /// custom-field values are wrapped via the entry editor before
+    /// any subsequent save). Passing `None` is equivalent to
+    /// [`Self::create_empty_v4`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::create_empty_v4`].
+    pub fn create_empty_v4_with_protector(
+        composite: &CompositeKey,
+        database_name: impl Into<String>,
+        protector: Option<Arc<dyn FieldProtector>>,
+    ) -> Result<Self, Error> {
+        Self::create_empty_v4_inner(
+            composite,
+            database_name.into(),
+            protector,
+            Box::new(SystemClock),
+            &RandomUuids,
+        )
+    }
+
+    /// Like [`Self::create_empty_v4_with_protector`] but with the
+    /// creation [`Clock`] and root-id [`UuidSource`] injected, so a fresh
+    /// vault is byte-reproducible.
+    ///
+    /// `clock` stamps the root group's [`Timestamps`] (and is retained on
+    /// the unlocked vault for later mutations, exactly as `unlock`'s clock
+    /// is); `uuids` mints the root [`GroupId`]. Pass a
+    /// [`crate::model::FixedClock`] + [`crate::model::SeededUuids`] to make
+    /// `create → save` produce the same logical vault every run (the KDBX
+    /// *bytes* still differ — master seed / IV / KDF salt are fresh OS
+    /// randomness each save — but the entity ids and timestamps that drive
+    /// sync are pinned). The default [`Self::create_empty_v4`] uses
+    /// [`SystemClock`] + [`RandomUuids`].
+    ///
+    /// Only the root id is drawn here; a caller that wants further
+    /// creation ids pinned (e.g. an eager recycle bin) should draw them
+    /// from the *same* `uuids` instance and pass them explicitly via
+    /// [`NewGroup::with_uuid`], so the whole create shares one coherent
+    /// id sequence.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::create_empty_v4`].
+    pub fn create_empty_v4_deterministic(
+        composite: &CompositeKey,
+        database_name: impl Into<String>,
+        protector: Option<Arc<dyn FieldProtector>>,
+        clock: Box<dyn Clock>,
+        uuids: &dyn UuidSource,
+    ) -> Result<Self, Error> {
+        Self::create_empty_v4_inner(composite, database_name.into(), protector, clock, uuids)
+    }
+
+    /// Shared core of the `create_empty_v4*` family: builds a fresh KDBX4
+    /// vault with one empty root group, deriving the transformed key
+    /// against freshly-generated Argon2 params. The clock, root-id source,
+    /// and protector are injected so the public wrappers can fix
+    /// production defaults ([`SystemClock`] + [`RandomUuids`] + no
+    /// protector) or pin them for reproducible tests/fuzzing.
+    fn create_empty_v4_inner(
+        composite: &CompositeKey,
+        database_name: String,
+        protector: Option<Arc<dyn FieldProtector>>,
+        clock: Box<dyn Clock>,
+        uuids: &dyn UuidSource,
+    ) -> Result<Self, Error> {
         // Fresh randomness. Single getrandom batch per buffer; failures
         // collapse to CryptoError::Decrypt because the call sites all
         // share that error variant (see `rekey` for the same pattern).
@@ -586,8 +666,13 @@ impl Kdbx<Unlocked> {
             public_custom_data: None,
         };
 
-        // Fresh vault: empty root group named after `database_name`.
-        let root_id = GroupId(uuid::Uuid::new_v4());
+        // Fresh vault: empty root group named after `database_name`, its id
+        // drawn from the injected source. Root timestamps stay at
+        // `Timestamps::default()` (as `Group::empty` sets them) — the
+        // injected `clock` is retained on `Unlocked` and stamps subsequent
+        // mutations (e.g. a caller's eager recycle bin via `add_group`),
+        // matching how `unlock`'s clock behaves.
+        let root_id = GroupId(uuids.next_uuid());
         let mut vault = Vault::empty(root_id);
         vault.meta.database_name.clone_from(&database_name);
         vault.root.name = database_name;
@@ -598,40 +683,17 @@ impl Kdbx<Unlocked> {
             version: Version::V4,
             state: Unlocked {
                 vault,
-                clock: Box::new(SystemClock),
+                clock,
                 outer_header,
                 inner_stream: Some(InnerStreamParams {
                     algorithm: InnerStreamAlgorithm::ChaCha20,
                     key: inner_stream_key,
                 }),
                 transformed_key,
-                protector: None,
+                protector,
                 protected_fields: ProtectedFieldMap::new(),
             },
         })
-    }
-
-    /// Like [`Self::create_empty_v4`] but installs a
-    /// [`FieldProtector`] for the fresh vault.
-    ///
-    /// The empty vault has no protected fields to wrap, so the
-    /// protector is simply stored on the resulting [`Kdbx<Unlocked>`]
-    /// and used as entries are added (their freshly-set password /
-    /// custom-field values are wrapped via the entry editor before
-    /// any subsequent save). Passing `None` is equivalent to
-    /// [`Self::create_empty_v4`].
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::create_empty_v4`].
-    pub fn create_empty_v4_with_protector(
-        composite: &CompositeKey,
-        database_name: impl Into<String>,
-        protector: Option<Arc<dyn FieldProtector>>,
-    ) -> Result<Self, Error> {
-        let mut kdbx = Self::create_empty_v4(composite, database_name)?;
-        kdbx.state.protector = protector;
-        Ok(kdbx)
     }
 
     /// The decoded vault.
