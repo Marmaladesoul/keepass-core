@@ -51,7 +51,6 @@ pub mod uuid_source;
 pub mod vault;
 
 pub use clock::{Clock, FixedClock, SystemClock};
-pub use uuid_source::{RandomUuids, SeededUuids, UuidSource};
 pub use entry::{Attachment, AutoType, AutoTypeAssociation, CustomField, Entry};
 pub use entry_editor::{CustomFieldValue, EntryEditor};
 pub use group::Group;
@@ -63,6 +62,7 @@ pub use portable::PortableEntry;
 pub use types::{
     CustomDataItem, EntryId, GroupId, HistoryPolicy, ModelError, Timestamps, UnknownElement,
 };
+pub use uuid_source::{RandomUuids, SeededUuids, UuidSource};
 pub use vault::{Binary, DeletedObject, Vault};
 
 // ---------------------------------------------------------------------------
