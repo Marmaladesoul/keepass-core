@@ -47,6 +47,7 @@ pub mod new_entry;
 pub mod new_group;
 pub mod portable;
 pub mod types;
+pub mod uuid_source;
 pub mod vault;
 
 pub use clock::{Clock, FixedClock, SystemClock};
@@ -61,6 +62,7 @@ pub use portable::PortableEntry;
 pub use types::{
     CustomDataItem, EntryId, GroupId, HistoryPolicy, ModelError, Timestamps, UnknownElement,
 };
+pub use uuid_source::{RandomUuids, SeededUuids, UuidSource};
 pub use vault::{Binary, DeletedObject, Vault};
 
 // ---------------------------------------------------------------------------
