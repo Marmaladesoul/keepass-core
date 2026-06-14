@@ -646,7 +646,11 @@ pub(crate) fn local_edited_after(
 /// **The winning pair maximises
 /// `min(local generation rank, remote generation rank)`** (rank: oldest
 /// history snapshot = 0, …, current = highest), tie-broken by the later
-/// local mtime, then the later local rank. The fork point is by
+/// `max(local rank, remote rank)`, then the matched content hash. Every
+/// component is order-independent, so two peers running `classify` in
+/// opposite orders pick the same ancestor (Finding #12) — the old key's
+/// `local mtime`/`local rank` tail flipped on swap and made same-second
+/// matches choose different sides. The fork point is by
 /// definition a version BOTH lineages contain, with everything after it
 /// on each side being that side's divergence — so the tightest ancestor
 /// is the pair sitting latest in BOTH lineages, not the first content
@@ -661,18 +665,20 @@ pub(crate) fn local_edited_after(
 /// revert), because the true shared generation always out-ranks an
 /// ancient recurrence on the min() side.
 ///
-/// **Why mtime is a tie-break, not a match gate:** the same logical
-/// generation does NOT carry the same mtime on both replicas — classify's
-/// auto-merge adoption builds the advanced entry from a clone of the
-/// LOCAL side, so an adopted change keeps the adopter's mtime (observed
-/// live: identical content hashes one second apart). Gating pairs on
-/// mtime equality therefore rejects genuine shared generations and
-/// regresses to ancient pre-fork pairs — measured at 3× the failure
-/// rate of content-only matching on the attachment fuzzer. A re-stamped
-/// echo (same value, mtime seconds off — KDBX-3.1 truncation or a
-/// round-trip re-stamp) must also still match, and does. (Residue: if
-/// history quota-trimming has evicted the true shared generation, the
-/// surviving pick is the best available guess, as before.)
+/// **Why matching is by content hash, not mtime** (and why mtime plays
+/// no part in selection at all — it was the old tiebreak, dropped for
+/// symmetry by Finding #12): the same logical generation does NOT carry
+/// the same mtime on both replicas — classify's auto-merge adoption
+/// builds the advanced entry from a clone of the LOCAL side, so an
+/// adopted change keeps the adopter's mtime (observed live: identical
+/// content hashes one second apart). Gating pairs on mtime equality
+/// therefore rejects genuine shared generations and regresses to ancient
+/// pre-fork pairs — measured at 3× the failure rate of content-only
+/// matching on the attachment fuzzer. A re-stamped echo (same value,
+/// mtime seconds off — KDBX-3.1 truncation or a round-trip re-stamp)
+/// must also still match, and does. (Residue: if history quota-trimming
+/// has evicted the true shared generation, the surviving pick is the
+/// best available guess, as before.)
 ///
 /// **Candidate set includes each side's *current* entry**, not just
 /// `<History>` snapshots. The common case for LCA-by-current is:
@@ -703,39 +709,36 @@ pub(crate) fn find_common_ancestor<'a>(
     // on disk). Each side dereferences its own binary pool. Constant-
     // time hash compare per the workspace rule (hashes aren't secret
     // here, but the convention holds regardless).
-    type PairKey = (usize, Option<chrono::DateTime<chrono::Utc>>, usize);
-    type Candidate<'e> = (
-        &'e Entry,
-        [u8; 32],
-        Option<chrono::DateTime<chrono::Utc>>,
-        usize,
-    );
+    // Pair-selection key — MUST be symmetric under argument swap so two
+    // peers running `classify` in opposite orders pick the same ancestor
+    // (Finding #12). All three components are computed identically
+    // regardless of which side is `local`: the latest *shared* generation
+    // (`min` rank, primary, per Finding #8), then how late it is on the
+    // other side (`max` rank), then the matched content hash as a stable
+    // final tiebreak. (The old key's `local_mtime`/`local_rank` flipped on
+    // swap — same-second matches then chose P one way, Q the other.)
+    type PairKey = (usize, usize, [u8; 32]);
+    type Candidate<'e> = (&'e Entry, [u8; 32], usize);
     let rank_candidates = |e: &'a Entry, binaries: &[Binary]| -> Vec<Candidate<'a>> {
         e.history
             .iter()
             .chain(std::iter::once(e))
             .enumerate()
-            .map(|(rank, c)| {
-                (
-                    c,
-                    entry_content_hash(c, binaries),
-                    second_resolution(c.times.last_modification_time),
-                    rank,
-                )
-            })
+            .map(|(rank, c)| (c, entry_content_hash(c, binaries), rank))
             .collect()
     };
     let locals = rank_candidates(local, local_binaries);
     let remotes = rank_candidates(remote, remote_binaries);
 
-    // Best content-matching pair by (min rank, local mtime, local rank).
+    // Best content-matching pair by (min rank, max rank, matched content
+    // hash) — symmetric under argument swap (Finding #12).
     let mut best: Option<(PairKey, &'a Entry)> = None;
-    for (l, lh, lm, lrank) in &locals {
-        for (_, rh, _, rrank) in &remotes {
+    for (l, lh, lrank) in &locals {
+        for (_, rh, rrank) in &remotes {
             if !ct_eq(lh, rh) {
                 continue;
             }
-            let key = ((*lrank).min(*rrank), *lm, *lrank);
+            let key = ((*lrank).min(*rrank), (*lrank).max(*rrank), *lh);
             if best.as_ref().is_none_or(|(k, _)| key > *k) {
                 best = Some((key, l));
             }
@@ -753,7 +756,10 @@ pub(crate) fn find_common_ancestor<'a>(
     // that killed the (mtime, hash) compound-key fix candidate.
     if std::env::var_os("KEYS_DEBUG_LCA").is_some() {
         let dump = |tag: &str, cs: &[Candidate<'_>]| {
-            for (c, h, m, r) in cs {
+            for (c, h, r) in cs {
+                // Floored mtime computed here (debug-only) — it's no longer
+                // carried in Candidate since selection stopped using it.
+                let m = second_resolution(c.times.last_modification_time);
                 eprintln!(
                     "LCA-DEBUG   {tag} rank={r} mtime={m:?} hash={:02x}{:02x}{:02x}{:02x} atts={}",
                     h[0],
@@ -1182,8 +1188,8 @@ fn take_field_from(target: &mut Entry, source: &Entry, key: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttachmentChange, Classification, Granularity, Side, classify, find_common_ancestor,
-        merge_entry,
+        AttachmentChange, Classification, Granularity, Side, classify, entry_content_hash,
+        find_common_ancestor, merge_entry,
     };
     use crate::conflict::{AttachmentDeltaKind, FieldDeltaKind};
     use chrono::{TimeZone, Utc};
@@ -1220,6 +1226,40 @@ mod tests {
 
         let lca = find_common_ancestor(&local, &remote, &[], &[]).expect("LCA");
         assert_eq!(lca.title, "v1");
+    }
+
+    /// Finding #12: the LCA must be the SAME regardless of which side is
+    /// passed as `local`. Two peers run `classify(local, peer)` in
+    /// opposite orders; if the pair-selection tiebreak depends on the
+    /// local side they pick different ancestors and classify the same
+    /// divergence asymmetrically — one peer badges a conflict the other
+    /// doesn't (a Bug-D-class cross-peer conflict-set divergence).
+    ///
+    /// Setup: two same-second snapshots P and Q, each side holds BOTH but
+    /// in opposite generation positions (A = [P]→Q, B = [Q]→P). With
+    /// equal mtimes the old `(min_rank, local_mtime, local_rank)` tiebreak
+    /// fell to `local_rank`, which flips on swap → P one way, Q the other.
+    #[test]
+    fn lca_is_symmetric_under_argument_swap() {
+        let ts = at(2026, 1);
+        let snap_p = snapshot("P", ts.clone());
+        let snap_q = snapshot("Q", ts.clone());
+        let mut dev_a = snap_q.clone();
+        dev_a.history = vec![snap_p.clone()]; // A: history P, current Q
+        let mut dev_b = snap_p.clone();
+        dev_b.history = vec![snap_q.clone()]; // B: history Q, current P
+
+        let lca_ab = find_common_ancestor(&dev_a, &dev_b, &[], &[]).expect("LCA a,b");
+        let lca_ba = find_common_ancestor(&dev_b, &dev_a, &[], &[]).expect("LCA b,a");
+        // Assert on the matched CONTENT HASH, not just the title: the hash
+        // is the actual selection key, so equal hashes prove both orders
+        // chose content-equal ancestors (the real Bug-D witness). Title
+        // equality alone would only prove the title facet matched.
+        assert_eq!(
+            entry_content_hash(lca_ab, &[]),
+            entry_content_hash(lca_ba, &[]),
+            "LCA must not depend on argument order (Finding #12)"
+        );
     }
 
     /// Finding #8, same-second alias: within one floored second mtimes
