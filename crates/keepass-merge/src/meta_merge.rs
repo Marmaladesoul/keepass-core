@@ -46,6 +46,39 @@ use keepass_core::model::{CustomDataItem, CustomIcon, Meta};
 /// remote. Pure mutation; no errors — `merge::merge`'s master-key
 /// pre-flight rejects the hard-fault case before this can run.
 pub(crate) fn merge_meta(local: &mut Meta, remote: &Meta) {
+    // Scalar facets, split into `merge_meta_scalars` so a consumer that
+    // reconciles the icon and custom-data pools separately (keys-engine's
+    // owner-rows `ingest_peer`) can reuse the exact scalar LWW rules without
+    // double-handling those pools.
+    merge_meta_scalars(local, remote);
+
+    // --- Custom-icon pool: grow-only set keyed by UUID. Per-UUID
+    // collision keeps the later `last_modified` so a rename or
+    // resave on one side propagates.
+    local.custom_icons = union_custom_icons(&local.custom_icons, &remote.custom_icons);
+
+    // --- Vault-level `<Meta><CustomData>`: per-key union with LWW
+    // arbitration on the per-item `last_modified` timestamp. Spec
+    // §2.1 names this "Per-key 3-way (§4)"; without a vault-level LCA
+    // the 3-way collapses to "union by key, LWW per key on
+    // collision". Audit item 4b's `keys.cd_tombstones.v1` filter will
+    // plug in on top of this once it lands.
+    local.custom_data = merge_meta_custom_data(&local.custom_data, &remote.custom_data);
+}
+
+/// Apply the spec §2.1 per-field rules to the **scalar** `Meta` facets only —
+/// the user-edited surfaces (name / description / default-username /
+/// recycle-bin config), the settings-arbitrated block, master-key provenance,
+/// and the privacy-conservative history caps. Does NOT touch the custom-icon
+/// pool or the vault-level custom-data map; `merge_meta` is this plus those
+/// two.
+///
+/// Exposed so keys-engine's owner-rows `ingest_peer` can reuse the identical
+/// scalar convergence (it reconciles the icon pool content-addressed and
+/// threads resolution records through custom-data on its own path, so it wants
+/// the scalars without the pool merges). Sharing one implementation keeps the
+/// disk-reconcile and peer-sync paths from drifting on the LWW rules.
+pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
     // --- User-edited scalars: per-field LWW on the field's own
     // "*_changed" timestamp. The spec calls for activity-log emission
     // when the remote side wins; that surface lands with audit item 10
@@ -142,24 +175,12 @@ pub(crate) fn merge_meta(local: &mut Meta, remote: &Meta) {
     local.history_max_size =
         min_with_unlimited_i64(local.history_max_size, remote.history_max_size);
 
-    // --- Custom-icon pool: grow-only set keyed by UUID. Per-UUID
-    // collision keeps the later `last_modified` so a rename or
-    // resave on one side propagates.
-    local.custom_icons = union_custom_icons(&local.custom_icons, &remote.custom_icons);
-
-    // --- Vault-level `<Meta><CustomData>`: per-key union with LWW
-    // arbitration on the per-item `last_modified` timestamp. Spec
-    // §2.1 names this "Per-key 3-way (§4)"; without a vault-level LCA
-    // the 3-way collapses to "union by key, LWW per key on
-    // collision". Audit item 4b's `keys.cd_tombstones.v1` filter will
-    // plug in on top of this once it lands.
-    local.custom_data = merge_meta_custom_data(&local.custom_data, &remote.custom_data);
-
     // NOTE: `generator`, `header_hash`, `unknown_xml` are not merged
     // per the spec. `generator` is overwritten by whichever writer
     // emits the next save; `header_hash` is KDBX3 belt-and-braces
     // that gets recomputed on write; `unknown_xml` is per-side
-    // round-trip ballast.
+    // round-trip ballast. The custom-icon pool and vault-level
+    // custom-data are merged by `merge_meta`, not here.
 }
 
 /// `true` when remote's `*_changed` timestamp is strictly newer than

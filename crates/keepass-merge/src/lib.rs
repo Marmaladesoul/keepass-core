@@ -50,6 +50,7 @@ pub use crate::entry_merge::{AttachmentChange, Classification, Granularity, clas
 pub use crate::error::MergeError;
 pub use crate::events::MergeEvent;
 pub use crate::merge::merge;
+pub use crate::meta_merge::merge_meta_scalars;
 pub use crate::outcome::MergeOutcome;
 pub use crate::prune::prune_history_with_tombstones;
 pub use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice, Resolution};
