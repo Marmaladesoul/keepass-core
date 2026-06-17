@@ -249,6 +249,84 @@ pub fn add_history_tombstone(
     Ok(())
 }
 
+/// Propagate history-record deletions from a peer copy of the same
+/// entry onto `entry`, in place.
+///
+/// This is the single-entry, peer-pull twin of the disk-reconcile
+/// pre-pass `union_history_tombstones_across_entries` (private, in
+/// `apply/tree.rs`): the lazy-conflict ingest path (`ingest_peer` in
+/// the engine) classifies an entry that differs *only* in its history
+/// tombstones as `InSync` and skips it, so a "scrub this old version"
+/// deletion never reaches the peer. Calling this for every shared entry
+/// — regardless of the surrounding merge verdict — closes that gap.
+///
+/// Steps, all delegating to the canonical OR-set helpers so the two
+/// ingest paths can't drift on the CRDT:
+///
+/// 1. Union both entries' `keys.history_tombstones.v1` lists
+///    (`union_history_tombstones`).
+/// 2. Drop from `entry.history` every record matching a unioned
+///    tombstone by `(second-resolution mtime, content hash)`
+///    (`tombstone_set` + `entry_content_hash`).
+/// 3. Write the unioned set back to `entry.custom_data`
+///    (`None` last-modified — this is a pure merge step, no wall-clock).
+///
+/// `binaries` is the binary pool `entry.history` references (the local
+/// vault's pool), used to dereference attachment `ref_id`s for the
+/// content hash. Pass the same pool the records index into so the hash
+/// matches the one [`add_history_tombstone`] recorded.
+///
+/// Only `entry.history` and the tombstone slot of `entry.custom_data`
+/// are touched — the live entry's standard fields are never altered, so
+/// this is safe to run for *any* shared entry orthogonally to the
+/// field/icon/attachment reconcile (like the entry-location pass).
+///
+/// Returns `true` when `entry` changed — a record was pruned and/or the
+/// tombstone list grew. Callers persist only on `true`; a `false`
+/// return is the steady state that makes a sync loop terminate
+/// (idempotent once both sides agree).
+///
+/// # Errors
+///
+/// Returns [`TombstoneError::Parse`] if either side already carries a
+/// malformed `keys.history_tombstones.v1` value.
+pub fn reconcile_history_tombstones(
+    entry: &mut Entry,
+    peer: &Entry,
+    binaries: &[Binary],
+) -> Result<bool, TombstoneError> {
+    let local_ts = parse_tombstones(&entry.custom_data)?;
+    let peer_ts = parse_tombstones(&peer.custom_data)?;
+    // Fast path: nothing tombstoned on either side — the overwhelmingly
+    // common case. No history scan, no custom_data rewrite.
+    if local_ts.is_empty() && peer_ts.is_empty() {
+        return Ok(false);
+    }
+
+    let unioned = union_history_tombstones(&local_ts, &peer_ts);
+    let ts_set = tombstone_set(&unioned);
+
+    // Prune local history records the unioned set tombstones. Second-
+    // resolution mtime to match `tombstone_set`'s coarsened keys (the
+    // KDBX round trip floors mtimes to whole seconds).
+    let before = entry.history.len();
+    entry.history.retain(|h| {
+        let hash = entry_content_hash(h, binaries);
+        let mtime = crate::time::second_resolution(h.times.last_modification_time);
+        !ts_set.contains(&(mtime, hash))
+    });
+    let pruned = entry.history.len() != before;
+
+    // Did the tombstone list itself grow / change? Compare against the
+    // canonicalised local-only list (the same sort + dedup the union
+    // applies) so an idempotent re-run reports no change.
+    let local_canonical = union_history_tombstones(&local_ts, &[]);
+    let tombstones_changed = unioned != local_canonical;
+
+    write_tombstones_to_custom_data(&mut entry.custom_data, &unioned, None);
+    Ok(pruned || tombstones_changed)
+}
+
 // ---------------------------------------------------------------------------
 // Tag remove-tombstones (`keys.tag_state.v1`).
 //
