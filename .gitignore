@@ -40,5 +40,8 @@ _design/
 /_localdocs/
 _project-management/
 
+# Personal agent instructions — private (public guidance is in AGENTS.md).
+CLAUDE.md
+
 # Python fixture-generator cache
 tests/fixtures/__pycache__/
