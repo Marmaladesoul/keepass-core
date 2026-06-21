@@ -1,6 +1,6 @@
 //! Fixture round-trip for [`Kdbx::edit_entry`].
 //!
-//! Per MUTATION.md §"Slicing plan" slice 4. Covers all three
+//! Per the design notes §"Slicing plan" slice 4. Covers all three
 //! [`HistoryPolicy`] variants — `Snapshot`, `NoSnapshot`, and
 //! `SnapshotIfOlderThan(window)` across both sides of the window
 //! boundary — and asserts the expected history bookkeeping survives

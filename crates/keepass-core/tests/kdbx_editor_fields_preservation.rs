@@ -6,7 +6,7 @@
 //!
 //! One small test per field — granular on purpose, so a regression
 //! pinpoints the field that broke rather than a batch-level failure.
-//! See `FFI_PHASE1.md` item 1 for the requirement this closes.
+//! See `the design notes` item 1 for the requirement this closes.
 //!
 //! Fixture: `tests/fixtures/pykeepass/editor-fields.kdbx` (see
 //! `tests/fixtures/generate.py::gen_pykeepass_editor_fields`).

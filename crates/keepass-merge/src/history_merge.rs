@@ -15,7 +15,7 @@
 //! milliseconds but the KDBX on-disk format is whole-second, so the
 //! same snapshot can carry a sub-second mtime on one side and a
 //! truncated one on the other after a sync round-trip; coarsening the
-//! key collapses those twins (see `sync-soak-bugs.md` Bug A). Records
+//! key collapses those twins (see `the design notes` Bug A). Records
 //! at genuinely different seconds stay in distinct groups. Within a
 //! group:
 //!

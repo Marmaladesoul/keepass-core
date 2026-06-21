@@ -27,7 +27,7 @@
 //! `<History>` are *not* part of the comparator. They ride along with
 //! whichever side wins the entry-level merge in slice 5's apply step.
 //! Per-attachment / per-tag conflict surface is logged in
-//! `MERGE_BACKLOG.md` for v0.1.x.
+//! `the design notes` for v0.1.x.
 //!
 //! ## Ancestor candidate set
 //!
@@ -89,7 +89,7 @@ pub(crate) struct EntryMergeOutput {
     /// Attachment names whose 3-way merge could not auto-resolve.
     /// Populated by the classifier added in slice B2; no consumer yet
     /// — routing in `merge.rs` and `apply.rs` will start reading this
-    /// in slice B3 (per `_localdocs/MERGE_ATTACHMENT_DESIGN.md`).
+    /// in slice B3 (per `internal design notes`).
     #[allow(dead_code)]
     pub attachment_conflicts: Vec<AttachmentDelta>,
     /// Attachment names whose 3-way merge has a clear answer. Same
@@ -98,7 +98,7 @@ pub(crate) struct EntryMergeOutput {
     #[allow(dead_code)]
     pub attachment_auto_resolutions: Vec<AttachmentAutoResolution>,
     /// The merged tag set after applying 3-way set semantics against
-    /// the LCA (per `_localdocs/MERGE_TAGS_DESIGN.md`). Apply writes
+    /// the LCA (per `internal design notes`). Apply writes
     /// this onto the merged entry when the entry routes through any
     /// bucket. Always populated; identical to `local.tags` as a set
     /// when the merge had nothing to do for tags.
@@ -353,7 +353,7 @@ fn resolve_no_lca(local_present: bool, remote_present: bool) -> Resolution {
 }
 
 /// Classify `custom_icon_uuid` divergence between local and remote
-/// against the (optional) LCA. See `_localdocs/MERGE_ICON_CLASSIFIER.md`.
+/// against the (optional) LCA. See `internal design notes`.
 ///
 /// Absence is the implicit base for icons: a present custom icon is an
 /// *additive* change that wins over absence. This holds **uniformly**,
@@ -526,7 +526,7 @@ fn classify_attachments(
 }
 
 /// Tag set merge against the (optional) LCA. See
-/// `_localdocs/MERGE_TAGS_DESIGN.md`.
+/// `internal design notes`.
 ///
 /// Tags carry presence/absence only — there's no slot/content
 /// distinction that could produce a conflict between two writers.
@@ -640,7 +640,7 @@ pub(crate) fn local_edited_after(
 /// ancient shared snapshot. Against that wrong ancestor, the peer's
 /// stale copy reads as a fresh one-sided change (the alias-er's newest
 /// intent silently reverts), or a one-sided change reads as both-sided
-/// (a facet divergence the verdict then swallows) — keyhole DESIGN.md
+/// (a facet divergence the verdict then swallows) — keyhole the design notes
 /// Finding #8.
 ///
 /// **The winning pair maximises
@@ -832,7 +832,7 @@ fn custom_map(entry: &Entry) -> HashMap<&str, (&str, bool)> {
 // ───────────────────────────────────────────────────────────────────────────
 // Public entry-pair classifier — the multi-peer owner-rows "brain".
 //
-// See `_project-management/sync-multipeer-store.md` §9 Phase 1. This is a
+// See `internal design notes` §9 Phase 1. This is a
 // purely additive public wrapper around [`find_common_ancestor`] +
 // [`merge_entry`]; it changes no existing caller. The owner-rows store
 // (keys-engine, Phase 2+) calls it per entry to decide, for one peer's
@@ -1569,7 +1569,7 @@ mod tests {
     // Attachment classifier (slice B2)
     // -----------------------------------------------------------------
     //
-    // Coverage of the classification table in MERGE_ATTACHMENT_DESIGN.md.
+    // Coverage of the classification table in the design notes.
     // The classifier output isn't read anywhere yet (consumer lands in
     // slice B3) so these tests assert directly on `out
     // .attachment_auto_resolutions` and `out.attachment_conflicts`.

@@ -9,7 +9,7 @@
 //! The history-dedup paths key on `last_modification_time`, so without
 //! normalisation those ms-vs-second twins land in different buckets and
 //! both survive — the "history bloat" half of Bug A
-//! (`_project-management/sync-soak-bugs.md`).
+//! (`internal design notes`).
 //!
 //! [`second_resolution`] truncates an mtime to whole seconds so the
 //! twins collapse, while records at genuinely *different* seconds stay

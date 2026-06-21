@@ -2,7 +2,7 @@
 //!
 //! [`MergeEvent`] is the stable type the engine layer will hook to
 //! persist activity-log entries (per the eventual
-//! `sync-activity-log.md` spec). Today the merge crate just emits the
+//! `the design notes` spec). Today the merge crate just emits the
 //! events via [`mod@tracing`] at the spec §6-prescribed level — engine
 //! layers that don't want a persisted log can drop the events on the
 //! floor with a no-op subscriber.

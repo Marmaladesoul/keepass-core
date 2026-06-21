@@ -119,7 +119,7 @@ fn remote_resolution_is_adopted_and_clears_the_conflict() {
 fn local_edit_after_resolution_supersedes_and_holds() {
     // A resolved the icon at T, but B then changed its icon at T2 > T.
     // B's later edit re-opens the conflict — the resolution must NOT be
-    // adopted (bogsy's supersession requirement).
+    // adopted (the maintainer's supersession requirement).
     let icon_a = Uuid::from_u128(0x0a);
     let icon_b_new = Uuid::from_u128(0x0c);
     let (mut a_vault, mut b_vault) = icon_conflict_pair(icon_a, Uuid::from_u128(0x0b));

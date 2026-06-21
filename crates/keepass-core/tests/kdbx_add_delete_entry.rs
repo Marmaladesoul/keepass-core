@@ -1,6 +1,6 @@
 //! Fixture round-trip for [`Kdbx::add_entry`] / [`Kdbx::delete_entry`].
 //!
-//! Per MUTATION.md §"Slicing plan" slice 2. Each test opens a real
+//! Per the design notes §"Slicing plan" slice 2. Each test opens a real
 //! fixture, applies the mutation, saves via `save_to_bytes`, re-opens,
 //! and asserts the expected vault shape.
 

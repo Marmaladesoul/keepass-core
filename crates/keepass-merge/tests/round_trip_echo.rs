@@ -1,5 +1,5 @@
 //! Round-trip (echo-back) convergence for a one-sided edit — the Bug A
-//! repro from the PR-2 soak. See `_project-management/sync-soak-bugs.md`.
+//! repro from the PR-2 soak. See `internal design notes`.
 //!
 //! The existing `p2p_convergence` proptests model a *single* round of
 //! independent merges and assert only that the merge *outcome* is empty

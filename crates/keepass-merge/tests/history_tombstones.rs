@@ -5,7 +5,7 @@
 //! `merge` + `apply_merge` respect them across the round trips that
 //! make up real-world sync scenarios.
 //!
-//! See `_project-management/history-tombstones.md` (in the Keys repo)
+//! See `internal design notes` (in the Keys repo)
 //! for the §8 test list this file implements.
 
 use chrono::{TimeZone, Utc};

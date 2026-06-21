@@ -1,6 +1,6 @@
 //! Slice 9 — `Kdbx::<Unlocked>::rekey(&CompositeKey)`.
 //!
-//! Per MUTATION.md §"Slicing plan" slice 9. Rotates the master seed,
+//! Per the design notes §"Slicing plan" slice 9. Rotates the master seed,
 //! the encryption IV, and the KDF salt/seed before re-deriving the
 //! transformed key against the new composite key. Stamps
 //! `Meta::master_key_changed` and `Meta::settings_changed` from the

@@ -16,7 +16,7 @@
 //! via [`MergeOutcome::entry_conflicts`], and converges only when the
 //! user explicitly resolves — a resolution then propagates as a
 //! [`crate::conflict_resolution::ConflictResolution`] record. See
-//! `_project-management/sync-conflict-state-redesign.md`.
+//! `internal design notes`.
 //!
 //! Because the divergence stays live in current state, "is this entry in
 //! conflict?" is *derived* from the merge outcome each round — there is

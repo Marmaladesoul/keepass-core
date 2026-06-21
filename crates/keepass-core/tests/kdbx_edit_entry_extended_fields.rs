@@ -1,7 +1,7 @@
 //! Fixture round-trip for the slice-5 [`EntryEditor`] additions
 //! (custom fields, tags, decorative fields, expiry, auto-type).
 //!
-//! Per MUTATION.md §"Slicing plan" slice 5. The integration test
+//! Per the design notes §"Slicing plan" slice 5. The integration test
 //! opens a real fixture, applies one `edit_entry` closure that
 //! exercises every new setter, saves to bytes, re-opens with the
 //! same composite key, and asserts the values stuck — including the

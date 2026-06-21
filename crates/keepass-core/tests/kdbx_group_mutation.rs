@@ -1,7 +1,7 @@
 //! Slice 7 — `Kdbx::add_group` / `delete_group` / `move_group` /
 //! `edit_group` + [`GroupEditor`].
 //!
-//! Per MUTATION.md §"Slicing plan" slice 7. Five concerns, one
+//! Per the design notes §"Slicing plan" slice 7. Five concerns, one
 //! integration test each:
 //!
 //! 1. **add + edit + save round-trip.** Insert a group, set its name

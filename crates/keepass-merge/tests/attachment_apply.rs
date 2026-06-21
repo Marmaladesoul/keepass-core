@@ -121,7 +121,7 @@ fn entry_with_only_attachment_remote_edit_routes_through_disk_only_changes() {
 // and the classifier sees local-attachment == ancestor-attachment
 // (because they're the same Entry). Auto-resolves to TakeRemote,
 // which is semantically wrong but is a pre-existing limitation, not
-// something B3 introduces. Documented in MERGE_ATTACHMENT_DESIGN.md.
+// something B3 introduces. Documented in the design notes.
 // A test for the symmetric "remote edits only an attachment" case
 // passes because the asymmetry of the LCA walker favours the local
 // side.

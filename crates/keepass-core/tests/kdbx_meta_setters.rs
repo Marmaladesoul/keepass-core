@@ -1,6 +1,6 @@
 //! Slice 8 — `Kdbx<Unlocked>` Meta setters.
 //!
-//! Per MUTATION.md §"Slicing plan" slice 8. Every setter writes its
+//! Per the design notes §"Slicing plan" slice 8. Every setter writes its
 //! Meta field and stamps `Meta::settings_changed = clock.now()`.
 //!
 //! The integration test runs every setter through the round-trip

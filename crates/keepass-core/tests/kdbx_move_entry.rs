@@ -1,6 +1,6 @@
 //! Fixture round-trip for [`Kdbx::move_entry`].
 //!
-//! Per MUTATION.md §"Slicing plan" slice 3. Opens a real fixture,
+//! Per the design notes §"Slicing plan" slice 3. Opens a real fixture,
 //! adds an entry under one group, moves it to another, saves via
 //! `save_to_bytes`, re-opens, and asserts:
 //!
@@ -107,7 +107,7 @@ fn move_entry_updates_location_and_previous_parent_and_round_trips() {
     // slice 7 is the one that introduces `add_group`. So we move
     // the entry to the only other legal target: the root itself.
     // It's a "no-op" move in terms of tree position but still stamps
-    // the bookkeeping, which is what MUTATION.md requires.
+    // the bookkeeping, which is what the design notes requires.
     clock_handle.set(move_at);
     kdbx.move_entry(id, root).expect("move_entry");
 

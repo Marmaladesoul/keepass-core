@@ -7,12 +7,28 @@ contributing to this crate. Humans are also welcome to read it.
 
 A pure-Rust, lossless round-trip read/write implementation of the
 KeePass (KDBX) password-database format. Public library, MIT /
-Apache dual-licensed. Consumed downstream via a private FFI facade
-into the macOS Keys app.
+Apache dual-licensed. Consumed downstream by the Keys client
+applications.
 
 The canonical design doc is `_design/` (git-ignored, author-only).
 Key cross-referenced sections are quoted inline in commits when
 relevant — e.g. §4.8.7 on error-collapse discipline.
+
+## Public repo hygiene
+
+**keepass-core is a PUBLIC, open-source repository.** Treat everything
+committed here — code, comments, and commit messages — as permanently
+public and effectively impossible to retract.
+
+- **No PII** — personal emails, real names, OS usernames or home-directory
+  paths, machine names, personal handles or nicknames.
+- **No internal references.** Don't point at private design documents by
+  name or path; describe the rationale inline instead.
+
+A CI scan (`.github/workflows/secret-scan.yml`) catches secrets and known
+markers, but it can't catch free-prose strategy or internal reasoning —
+**the agent/author is the backstop for that.** Re-read each diff and commit
+message before committing; when in doubt, leave it out.
 
 ## How to work
 
@@ -24,8 +40,8 @@ relevant — e.g. §4.8.7 on error-collapse discipline.
 - **Every decoder change ships with an encoder test that
   round-trips the same shape, and vice versa.** Asymmetry between
   read and write is how round-trip fidelity bugs get in.
-- **Never skip a test because it's slow.** The downstream Keys app
-  is macOS-first, so macOS CI coverage in particular is not
+- **Never skip a test because it's slow.** The downstream clients
+  are macOS-first, so macOS CI coverage in particular is not
   optional.
 - **Don't stack branches.** One PR open, merge, next PR from main.
 - **Don't start parallel slices.** Finish and merge before

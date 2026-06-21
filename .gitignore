@@ -38,6 +38,7 @@ _design/
 
 # Author-only design docs
 /_localdocs/
+_project-management/
 
 # Python fixture-generator cache
 tests/fixtures/__pycache__/

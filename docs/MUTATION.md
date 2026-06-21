@@ -1,4 +1,4 @@
-# MUTATION.md — the mutation API for `keepass-core`
+# the design notes — the mutation API for `keepass-core`
 
 Read this before touching anything that edits a `Vault`. This is the
 design contract: every mutation PR must uphold the invariants here, in
@@ -6,7 +6,7 @@ the API shape here.
 
 > **Phase 1 closed 2026-04-25.** The original 9-slice rollout plan
 > shipped in PRs #74–#80 and has been archived to
-> [`_project-management/complete/keepass-core/MUTATION-slicing-history.md`](../../_project-management/complete/keepass-core/MUTATION-slicing-history.md).
+> [`internal design notes`](../../internal design notes).
 > The contract sections below (invariants, clock injection, history
 > policy, ownership model, error enum, API sketch) remain
 > load-bearing reference for any new mutation code.

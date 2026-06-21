@@ -1,7 +1,7 @@
 //! Integration tests for the attachment detach-tombstone mechanism
 //! (`keys.attachment_tombstones.v1`).
 //!
-//! Spec: sync-merge-strategies.md §4 + history-tombstones.md.
+//! Spec: the design notes §4 + the design notes.
 
 use chrono::{TimeZone, Utc};
 use keepass_core::model::{

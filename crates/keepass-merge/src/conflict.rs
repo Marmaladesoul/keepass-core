@@ -135,7 +135,7 @@ pub enum AttachmentDeltaKind {
 /// the other doesn't) **and** the 3-way classifier couldn't pick a
 /// winner against the LCA. Base-icon-ID divergence is silently auto-
 /// merged and does not surface here — see
-/// `_localdocs/MERGE_ICON_CLASSIFIER.md`.
+/// `internal design notes`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IconDelta {

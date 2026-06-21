@@ -174,7 +174,7 @@ fn icon_conflict_missing_resolution_returns_error() {
 /// discarded "mine vs theirs"). Crucially the merge is still **loop-safe**:
 /// each peer keeps its own icon and a re-merge writes nothing, so there's
 /// no ping-pong — the conflict is simply a stable held state surfaced for
-/// review. See `_project-management/sync-conflict-state-redesign.md`.
+/// review. See `internal design notes`.
 #[test]
 fn icon_only_conflict_holds_open_each_side_keeps_own() {
     let ancestor_icon = Uuid::from_u128(0x01);

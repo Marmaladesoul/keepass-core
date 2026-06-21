@@ -303,9 +303,9 @@ pub(super) fn apply_entry_conflict_resolutions(
 /// tag-state back onto `merged.custom_data`.
 ///
 /// The classifier's merged set is the LCA-3-way outcome (see
-/// `_localdocs/MERGE_TAGS_DESIGN.md`); the tombstone pass on top is
+/// `internal design notes`); the tombstone pass on top is
 /// the kdbx-invisible "this tag was explicitly removed, do not
-/// resurrect it" signal documented in sync-merge-strategies.md §4.
+/// resurrect it" signal documented in the design notes §4.
 /// For each tag in the merged set we look up its tombstone (if any)
 /// and ask: is the most recent side that holds this tag carrying an
 /// mtime newer than the tombstone's `at`? If yes, the tag was re-added
@@ -600,7 +600,7 @@ pub(super) fn build_resolved_entry(
         // Second-resolution mtime comparison, matching `build_merged_entry`
         // and `merge_histories`: ms-stamped engine mtimes vs second-truncated
         // KDBX round-trips would otherwise push a pre-merge snapshot alongside
-        // its already-merged twin (Bug A history bloat — see `sync-soak-bugs.md`).
+        // its already-merged twin (Bug A history bloat — see `the design notes`).
         let snapshot_mtime = second_resolution(snapshot.times.last_modification_time);
         if ts_set.contains(&(snapshot_mtime, snapshot_hash)) {
             continue;

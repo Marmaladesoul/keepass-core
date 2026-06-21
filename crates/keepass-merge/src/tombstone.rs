@@ -15,7 +15,7 @@
 //! a Keys-specific custom_data extension so they propagate across an
 //! arbitrary peer topology, not just hub-and-spoke.
 //!
-//! See `_project-management/history-tombstones.md` in the Keys repo
+//! See `internal design notes` in the Keys repo
 //! for the broader design rationale and use cases.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -42,7 +42,7 @@ pub enum TombstoneReason {
     /// gone").
     UserDelete,
     /// Auto-merge resolved a field-LWW conflict; the loser snapshot
-    /// is being cleaned up. See `conflict-resolution-rework.md`.
+    /// is being cleaned up. See `the design notes`.
     ConflictCleanup,
     /// `Meta::HistoryMaxItems` truncation evicted this record.
     QuotaTrim,
@@ -183,7 +183,7 @@ pub(crate) fn union_history_tombstones(
 /// dedup key the history paths look up with: a tombstone issued against
 /// a millisecond-precise mtime must still fire against the same record
 /// once the KDBX round-trip has truncated it to a whole second (and
-/// vice-versa). See `sync-soak-bugs.md` Bug A.
+/// vice-versa). See `the design notes` Bug A.
 #[must_use]
 pub(crate) fn tombstone_set(tombstones: &[HistoryTombstone]) -> TombstoneSet {
     tombstones
@@ -490,7 +490,7 @@ pub(crate) fn union_tag_states(a: &TagState, b: &TagState) -> TagState {
 // ---------------------------------------------------------------------------
 // Attachment detach-tombstones (`keys.attachment_tombstones.v1`).
 //
-// Per the sync-merge strategies spec §4 + history-tombstones.md, an
+// Per the sync-merge strategies spec §4 + the design notes, an
 // attachment detach is tombstoned on `(filename, content_hash)` so a
 // stale peer that still holds the bytes can't silently reattach them
 // on the next sync round. The hash component distinguishes a re-attach

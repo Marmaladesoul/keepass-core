@@ -2,7 +2,7 @@
 //!
 //! Tags merge as a pure set — no public conflict surface; every cell
 //! of the 3-way truth table auto-resolves. See
-//! `_localdocs/MERGE_TAGS_DESIGN.md` for the full table and rationale.
+//! `internal design notes` for the full table and rationale.
 
 use keepass_core::model::{Entry, EntryId, GroupId, Timestamps, Vault};
 use keepass_merge::{Resolution, apply_merge, merge};

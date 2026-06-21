@@ -586,7 +586,7 @@ fn import_stamps_live_entry_times_from_destination_clock() {
     assert_eq!(e.times.last_modification_time, Some(t_dst));
     assert_eq!(e.times.last_access_time, Some(t_dst));
     assert_eq!(e.times.location_changed, Some(t_dst));
-    // usage_count resets per the MUTATION.md invariant. Source's
+    // usage_count resets per the the design notes invariant. Source's
     // was 0 anyway; pin the post-import value explicitly.
     assert_eq!(e.times.usage_count, 0);
     // previous_parent_group cleared to match `add_entry`.

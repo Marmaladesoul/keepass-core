@@ -5,8 +5,7 @@
 //! scenarios that exercise the public `merge` + `apply_merge`
 //! round-trip and verify the tombstone-driven outcome.
 //!
-//! Spec: sync-merge-strategies.md §4 (target spec, in the Keys
-//! `_project-management` tree).
+//! Spec: the merge-strategies design notes (§4, target spec).
 
 use chrono::{TimeZone, Utc};
 use keepass_core::model::{CustomDataItem, Entry, EntryId, GroupId, Timestamps, Vault};

@@ -1,6 +1,6 @@
 //! Public-surface coverage for [`keepass_merge::classify`] — the
 //! per-entry conflict-detection brain behind the multi-peer owner-rows
-//! store (see `_project-management/sync-multipeer-store.md` §9 Phase 1).
+//! store (see `internal design notes` §9 Phase 1).
 //!
 //! The exhaustive scenario matrix lives next to the code as unit tests
 //! in `entry_merge.rs`; this file pins the *public* API shape (the

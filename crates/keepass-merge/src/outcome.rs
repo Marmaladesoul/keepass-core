@@ -114,7 +114,7 @@ pub struct MergeOutcome {
     pub(crate) delete_edit_restore_from_remote: HashMap<EntryId, (Entry, GroupId)>,
     /// Crate-private sidecar: per-entry merged tag set produced by
     /// the tag classifier in [`crate::entry_merge::merge_entry`]. Tags
-    /// merge as a pure set (per `_localdocs/MERGE_TAGS_DESIGN.md`)
+    /// merge as a pure set (per `internal design notes`)
     /// with no conflict cases; apply writes the merged set onto the
     /// merged entry. Stashed for every entry that landed in any
     /// non-empty bucket, including `entry_conflicts`.

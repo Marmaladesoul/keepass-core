@@ -7,7 +7,7 @@
 //! Bookkeeping (history snapshot, `last_modification_time` stamp)
 //! runs automatically in `edit_entry` after the closure returns.
 //!
-//! Slice 4 (MUTATION.md §"Slicing plan") shipped the five canonical
+//! Slice 4 (the design notes §"Slicing plan") shipped the five canonical
 //! string fields. Slice 5 extends the editor to cover custom fields
 //! (with [`CustomFieldValue`] for protected/plain routing), tags,
 //! foreground / background colour, override URL, custom icon UUID,
@@ -122,7 +122,7 @@ impl<'a> EntryEditor<'a> {
     //
     // `needless_pass_by_value` would have us take `&SecretString`,
     // but the move is a load-bearing part of the API contract per
-    // MUTATION.md §"Secret hygiene at the boundary".
+    // the design notes §"Secret hygiene at the boundary".
     #[allow(clippy::needless_pass_by_value)]
     pub fn set_password(&mut self, password: SecretString) {
         password

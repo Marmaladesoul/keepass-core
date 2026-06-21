@@ -531,7 +531,7 @@ pub(super) fn build_merged_entry(
     // sub-second mtime while its already-merged twin in `combined`
     // carries the truncated one (or vice-versa). Exact-mtime comparison
     // missed that and pushed the snapshot alongside its twin — the
-    // "history bloat" half of Bug A (see `sync-soak-bugs.md`). The
+    // "history bloat" half of Bug A (see `the design notes`). The
     // tombstone lookup uses the same resolution (`ts_set` is truncated
     // by `tombstone_set`).
     let snapshot_hash = entry_content_hash(&snapshot, local_binaries);
@@ -767,7 +767,7 @@ fn sha256_attachment(bytes: &[u8]) -> [u8; 32] {
 /// bucket. Idempotent with the downstream bucket logic — the apply
 /// step re-reads tag-state on the entries it rebuilds.
 ///
-/// Filter rule (sync-merge-strategies.md §4): a tag is dropped when
+/// Filter rule (the design notes §4): a tag is dropped when
 /// tombstoned and the holding side's `last_modification_time` is at
 /// or before the tombstone's `at`. An absent mtime can't beat a
 /// concrete tombstone — same conservative posture as the per-bucket

@@ -10,7 +10,7 @@
 //! values are not stable across `keepass-merge` releases or across
 //! KeePass implementations; do not persist them.
 //!
-//! Scope (slice B5 expanded; see `_localdocs/MERGE_CONTENT_HASH_SCOPE.md`):
+//! Scope (slice B5 expanded; see `internal design notes`):
 //!
 //! - Standard string fields (`Title`, `UserName`, `Password`, `URL`,
 //!   `Notes`) hashed by their canonical KDBX names with

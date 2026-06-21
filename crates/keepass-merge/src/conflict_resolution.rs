@@ -2,7 +2,7 @@
 //! must converge across peers.
 //!
 //! Under the **hold-open** model (see
-//! `_project-management/sync-conflict-state-redesign.md`), a conflicted
+//! `internal design notes`), a conflicted
 //! field is never auto-converged: each device keeps its own value until
 //! the user explicitly resolves. "Is `(entry, field)` in conflict?" is
 //! therefore *derived* at merge time from the live current-state

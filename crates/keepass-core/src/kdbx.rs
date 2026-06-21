@@ -986,7 +986,7 @@ impl Kdbx<Unlocked> {
     /// Bookkeeping applied automatically:
     /// - `entry.times.location_changed = self.clock().now()`
     /// - `entry.previous_parent_group = Some(old_parent)`
-    /// - No history snapshot — MUTATION.md §"Bookkeeping invariants"
+    /// - No history snapshot — the design notes §"Bookkeeping invariants"
     ///   explicitly excludes `move_entry` from history: a move is not
     ///   a field edit.
     ///
@@ -1732,7 +1732,7 @@ impl Kdbx<Unlocked> {
             remap_entry_refs(snap, &binary_remap, &icon_remap);
         }
 
-        // Stamp live-entry bookkeeping per MUTATION.md invariants.
+        // Stamp live-entry bookkeeping per the design notes invariants.
         entry.entry.times.creation_time = Some(now);
         entry.entry.times.last_modification_time = Some(now);
         entry.entry.times.last_access_time = Some(now);

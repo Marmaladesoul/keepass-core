@@ -59,7 +59,7 @@ impl NewEntry {
     /// happens at `save_to_bytes`.
     //
     // `SecretString` by value (not `&SecretString`) is deliberate per
-    // MUTATION.md: it moves ownership of the secret out of the
+    // the design notes: it moves ownership of the secret out of the
     // caller, so they can't keep a cheap copy after the builder
     // consumes it. `clippy::needless_pass_by_value` would have us
     // take a reference, but the move is a load-bearing part of the

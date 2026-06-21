@@ -1,7 +1,7 @@
 //! Slice 6 — `EntryEditor::attach` / `detach` with refcounted
 //! [`Vault::binaries`] pool management.
 //!
-//! Per MUTATION.md §"Slicing plan" slice 6. Two concerns:
+//! Per the design notes §"Slicing plan" slice 6. Two concerns:
 //!
 //! 1. **In-memory shared-binary semantics.** Attach the same bytes
 //!    to two different entries → pool gains a single entry, both
