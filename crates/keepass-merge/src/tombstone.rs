@@ -327,6 +327,117 @@ pub fn reconcile_history_tombstones(
     Ok(pruned || tombstones_changed)
 }
 
+/// Fold a peer copy's `<History>` into `entry`'s **losslessly** while
+/// honouring both sides' history tombstones — the post-conflict-resolution
+/// twin of [`reconcile_history_tombstones`].
+///
+/// [`reconcile_history_tombstones`] only *prunes* `entry.history` against the
+/// unioned tombstone set; it never *adds* the peer's records. That is right
+/// for the steady-state in-sync path, where two replicas may legitimately
+/// differ in plain history *depth* (a quota trim or a privacy delete narrows
+/// one side without the other having to grow). A conflict resolution is the
+/// opposite: a deliberate convergence event whose loser snapshot — the
+/// rejected value, an old, scrubbed-but-recoverable secret — is written into
+/// the resolver's history alone. If only the live value converges, that loser
+/// (and any pre-conflict snapshot unique to one side) lingers asymmetrically:
+/// present on one replica's `<History>`, absent on the other. This helper
+/// makes the resolved entry's history the set-union of both sides' (minus
+/// tombstones), so the two replicas converge on the same snapshot set.
+///
+/// Steps, each delegating to the canonical primitives so the resolution-fold
+/// path can't drift from the auto-merge apply path's CRDT or its
+/// attachment-pool handling:
+///
+/// 1. Union both sides' `keys.history_tombstones.v1` lists
+///    (`union_history_tombstones`) and compact to the filter set
+///    (`tombstone_set`).
+/// 2. Rebind the peer's history records into `base_binaries` via the crate's
+///    `BinaryPoolRemap` (content-dedup'd), importing any peer-only attachment
+///    bytes — exactly as `build_merged_entry` does for an auto-merge.
+/// 3. Merge the two histories losslessly with `merge_histories`, which drops
+///    every record the tombstone set covers.
+/// 4. Write the unioned tombstone list back to `entry.custom_data`.
+///
+/// `base_binaries` is the pool `entry.history` references; it is **grown in
+/// place** to cover any record imported from the peer (existing indices are
+/// preserved — the append is non-destructive), so callers must persist the
+/// folded history against the now-grown `base_binaries`, not a stale copy.
+/// `peer_binaries` is the pool `peer.history` references.
+///
+/// Only `entry.history` and the tombstone slot of `entry.custom_data` are
+/// touched — the live entry's standard fields are never altered, so this runs
+/// orthogonally to the field/icon/attachment reconcile, like
+/// [`reconcile_history_tombstones`].
+///
+/// Returns `true` when `entry` changed — a record was added or pruned, and/or
+/// the tombstone list grew. Callers persist only on `true`; a `false` return
+/// is the steady state that makes a sync loop terminate (idempotent once both
+/// sides hold the same union).
+///
+/// # Errors
+///
+/// Returns [`TombstoneError::Parse`] if either side already carries a
+/// malformed `keys.history_tombstones.v1` value.
+pub fn fold_entry_history(
+    entry: &mut Entry,
+    peer: &Entry,
+    base_binaries: &mut Vec<Binary>,
+    peer_binaries: &[Binary],
+) -> Result<bool, TombstoneError> {
+    let local_ts = parse_tombstones(&entry.custom_data)?;
+    let peer_ts = parse_tombstones(&peer.custom_data)?;
+    let unioned_ts = union_history_tombstones(&local_ts, &peer_ts);
+    let ts_set = tombstone_set(&unioned_ts);
+
+    // Rebind the peer's history into the base pool before merging so the
+    // combined output carries only base-pool ref_ids, importing any peer-only
+    // attachment bytes (content-dedup'd) — the same plumbing the auto-merge
+    // apply step uses. History records hold no nested history, so only their
+    // top-level attachments need rebinding.
+    let rebound_peer_history: Vec<Entry> = {
+        let mut remap = crate::binary_pool::BinaryPoolRemap::new(base_binaries, peer_binaries);
+        peer.history
+            .iter()
+            .map(|h| {
+                let mut clone = h.clone();
+                remap.rebind(&mut clone.attachments);
+                clone
+            })
+            .collect()
+    };
+
+    // Lossless union, honouring the unioned tombstone set. `base_binaries` is
+    // now grown to cover every record on either side.
+    let combined = crate::history_merge::merge_histories(
+        &entry.history,
+        &rebound_peer_history,
+        base_binaries,
+        &ts_set,
+    );
+
+    // Changed if the snapshot *set* differs (a record added or pruned) or the
+    // tombstone list grew. Comparing coarsened `(second-mtime, hash)` keys —
+    // the same resolution `merge_histories` dedups at — makes a re-run after
+    // both sides agree report no change, so the sync loop terminates.
+    let key_set = |hist: &[Entry]| -> HashSet<(Option<DateTime<Utc>>, [u8; 32])> {
+        hist.iter()
+            .map(|h| {
+                (
+                    crate::time::second_resolution(h.times.last_modification_time),
+                    entry_content_hash(h, base_binaries),
+                )
+            })
+            .collect()
+    };
+    let history_changed = key_set(&entry.history) != key_set(&combined);
+    let local_canonical = union_history_tombstones(&local_ts, &[]);
+    let tombstones_changed = unioned_ts != local_canonical;
+
+    entry.history = combined;
+    write_tombstones_to_custom_data(&mut entry.custom_data, &unioned_ts, None);
+    Ok(history_changed || tombstones_changed)
+}
+
 // ---------------------------------------------------------------------------
 // Tag remove-tombstones (`keys.tag_state.v1`).
 //
@@ -971,5 +1082,96 @@ mod tests {
         write_tombstones_to_custom_data(&mut cd, &tombstones, Some(ts(2026, 5, 24)));
         let parsed = parse_tombstones(&cd).unwrap();
         assert_eq!(parsed[0].mtime, None);
+    }
+
+    // ---- fold_entry_history -------------------------------------------------
+
+    use keepass_core::model::{Entry, EntryId, Timestamps};
+    use uuid::Uuid;
+
+    /// A history record (an `Entry` with no nested history), distinguished by
+    /// its username and timestamped at `day` so `entry_content_hash` and the
+    /// `(mtime, hash)` dedup key separate it from its siblings.
+    fn snap(username: &str, day: u32) -> Entry {
+        let mut e = Entry::empty(EntryId(Uuid::nil()));
+        e.username = username.into();
+        let mut t = Timestamps::default();
+        t.last_modification_time = Some(ts(2026, 1, day));
+        e.times = t;
+        e
+    }
+
+    fn entry_with_history(history: Vec<Entry>) -> Entry {
+        let mut e = Entry::empty(EntryId(Uuid::nil()));
+        e.history = history;
+        e
+    }
+
+    /// The set of history usernames, sorted — the snapshot-set oracle.
+    fn hist_usernames(e: &Entry) -> Vec<String> {
+        let mut v: Vec<String> = e.history.iter().map(|h| h.username.clone()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn fold_unions_in_peer_only_records() {
+        // base holds {a, m}; peer holds {m, b}. The fold must converge base to
+        // the union {a, b, m} — neither side's unique snapshot is lost.
+        let mut base = entry_with_history(vec![snap("a", 1), snap("m", 2)]);
+        let peer = entry_with_history(vec![snap("m", 2), snap("b", 3)]);
+        let mut base_pool: Vec<Binary> = Vec::new();
+        let changed = fold_entry_history(&mut base, &peer, &mut base_pool, &[]).unwrap();
+        assert!(
+            changed,
+            "folding in a peer-only record must report a change"
+        );
+        assert_eq!(hist_usernames(&base), vec!["a", "b", "m"]);
+    }
+
+    #[test]
+    fn fold_is_idempotent_once_sides_agree() {
+        // After a first fold both sides hold the union; a re-run must be a
+        // no-op so a sync loop terminates.
+        let mut base = entry_with_history(vec![snap("a", 1), snap("b", 3)]);
+        let peer = entry_with_history(vec![snap("a", 1), snap("b", 3)]);
+        let mut base_pool: Vec<Binary> = Vec::new();
+        let changed = fold_entry_history(&mut base, &peer, &mut base_pool, &[]).unwrap();
+        assert!(
+            !changed,
+            "fold of two equal histories must report no change"
+        );
+        assert_eq!(hist_usernames(&base), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn fold_does_not_resurrect_a_tombstoned_record() {
+        // base still holds record `b`; the peer carries a tombstone for it (a
+        // scrub the peer issued). The fold must DROP `b` and adopt the
+        // tombstone — never resurrect a deletion under cover of the union.
+        let b = snap("b", 3);
+        let mut base = entry_with_history(vec![snap("a", 1), b.clone()]);
+        let mut peer = entry_with_history(vec![snap("a", 1)]);
+        let tombstone = HistoryTombstone {
+            mtime: b.times.last_modification_time,
+            hash: entry_content_hash(&b, &[]),
+            at: ts(2026, 6, 1),
+            by: None,
+            reason: TombstoneReason::UserDelete,
+        };
+        write_tombstones_to_custom_data(&mut peer.custom_data, &[tombstone], None);
+
+        let mut base_pool: Vec<Binary> = Vec::new();
+        let changed = fold_entry_history(&mut base, &peer, &mut base_pool, &[]).unwrap();
+        assert!(
+            changed,
+            "pruning `b` and adopting the tombstone is a change"
+        );
+        assert_eq!(hist_usernames(&base), vec!["a"], "`b` must stay scrubbed");
+        assert_eq!(
+            parse_tombstones(&base.custom_data).unwrap().len(),
+            1,
+            "the peer's tombstone must be adopted onto base"
+        );
     }
 }
