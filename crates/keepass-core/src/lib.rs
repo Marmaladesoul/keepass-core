@@ -68,3 +68,5 @@ pub mod xml;
 pub use crate::error::Error;
 #[doc(inline)]
 pub use crate::secret::CompositeKey;
+#[doc(inline)]
+pub use crate::secret::{KeyFileError, generate_keyfile_keyx_v2, keyfile_hash, keyfile_to_keyx_v2};
