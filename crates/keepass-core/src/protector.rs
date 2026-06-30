@@ -40,8 +40,8 @@
 
 use std::fmt::Debug;
 
-use aes_gcm::Aes256Gcm;
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, Generate, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use zeroize::Zeroizing;
 
 /// A 32-byte AES-256 session key for in-memory protected-field wrap.
@@ -135,7 +135,7 @@ pub enum ProtectorError {
 pub fn seal_with_key(key: &SessionKey, plaintext: &[u8]) -> Result<Vec<u8>, ProtectorError> {
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
         .map_err(|e| ProtectorError::Seal(e.to_string()))?;
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = Nonce::generate();
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| ProtectorError::Seal(e.to_string()))?;
@@ -164,9 +164,9 @@ pub fn open_with_key(key: &SessionKey, wrapped: &[u8]) -> Result<Vec<u8>, Protec
     let (nonce_bytes, ciphertext) = wrapped.split_at(12);
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
         .map_err(|e| ProtectorError::Open(e.to_string()))?;
-    let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
+    let nonce = Nonce::try_from(nonce_bytes).map_err(|e| ProtectorError::Open(e.to_string()))?;
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| ProtectorError::Open(e.to_string()))
 }
 
