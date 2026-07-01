@@ -1241,7 +1241,12 @@ def gen_pykeepass_recycle_disabled() -> None:
         db_path.unlink()
 
     kp = create_database(str(db_path), password=pw)
-    kp.recyclebin_enabled = False
+    # pykeepass 4.1.1 exposes no `recyclebin_enabled` setter (only
+    # `recyclebin_group` / `recyclebin_uuid`), so assigning it just sets a
+    # stray Python attribute that never reaches the XML — leaving the
+    # create_database default of RecycleBinEnabled=True. Flip the Meta
+    # element on the tree directly so the fixture matches its name.
+    kp.tree.find("Meta/RecycleBinEnabled").text = "False"
     kp.add_entry(kp.root_group, title="Acme Banking", username="alice@example.com",
                  password="p4ss-rbd-01", url="https://bank.acme.example")
     kp.save()
