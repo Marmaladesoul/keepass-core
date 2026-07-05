@@ -1,8 +1,10 @@
 # the design notes — the mutation API for `keepass-core`
 
-Read this before touching anything that edits a `Vault`. This is the
-design contract: every mutation PR must uphold the invariants here, in
-the API shape here.
+_Status: implemented. All nine slices landed (PRs #59–#64, #70–#73).
+This document remains the design contract — every future mutation PR
+must uphold the invariants here, in the API shape here._
+
+Read this before touching anything that edits a `Vault`.
 
 > **Phase 1 closed 2026-04-25.** The original 9-slice rollout plan
 > shipped in PRs #74–#80 and has been archived to
