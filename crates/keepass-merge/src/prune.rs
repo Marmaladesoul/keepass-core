@@ -11,11 +11,12 @@
 //! deliberately keeps out of the library proper (see its
 //! `Cargo.toml` comment — "the library itself stays JSON-free").
 //! Callers who want save-path truncation to write tombstones invoke
-//! [`prune_history_with_tombstones`] *before* save; the save path's
-//! own `truncate_history` then becomes a no-op because history is
-//! already within budget.
+//! [`prune_history_with_tombstones`] *before* save; the truncation
+//! `keepass-core` applies during the save itself then has nothing
+//! left to do, because history is already within budget.
 
 use chrono::{DateTime, Utc};
+use keepass_core::kdbx::compute_history_drop_count;
 use keepass_core::model::{Binary, Entry};
 
 use crate::hash::entry_content_hash;
@@ -29,15 +30,11 @@ use crate::tombstone::{
 /// deletion survives subsequent merges with peers that hadn't yet
 /// truncated.
 ///
-/// Semantics match `keepass-core`'s `truncate_history` (defined in
-/// `kdbx.rs`):
-///
-/// - `max_items < 0` → no item-count cap.
-/// - `max_size < 0` → no size-cap.
-/// - Oldest records (index 0) are dropped first.
-/// - Item-count budget applied first, then size budget.
-/// - Size is measured by the same approximation `keepass-core` uses
-///   (the string-fields sum + a 200-byte wrapper constant).
+/// *Which* records the budgets drop is decided by
+/// [`keepass_core::kdbx::compute_history_drop_count`] — the same
+/// function the save path's own truncation uses, so the set
+/// tombstoned here and the set dropped there cannot diverge. This
+/// function adds only the tombstone layer on top.
 ///
 /// Returns the number of records dropped (and tombstoned). Returns
 /// `Ok(0)` when no records exceed the budgets — idempotent in
@@ -57,7 +54,7 @@ pub fn prune_history_with_tombstones(
     by: Option<[u8; 32]>,
     now: DateTime<Utc>,
 ) -> Result<usize, TombstoneError> {
-    let drop_count = compute_drop_count(&entry.history, max_items, max_size);
+    let drop_count = compute_history_drop_count(&entry.history, max_items, max_size);
     if drop_count == 0 {
         return Ok(0);
     }
@@ -82,62 +79,6 @@ pub fn prune_history_with_tombstones(
 
     entry.history.drain(0..drop_count);
     Ok(drop_count)
-}
-
-/// How many records to drop from the front of `history` to satisfy
-/// the two budgets. Mirrors `keepass-core::kdbx::truncate_history`
-/// closely enough that we can keep them in sync by inspection.
-fn compute_drop_count(history: &[Entry], max_items: i32, max_size: i64) -> usize {
-    let mut drop_count: usize = 0;
-
-    if max_items >= 0 {
-        let cap = usize::try_from(max_items).unwrap_or(usize::MAX);
-        if history.len() > cap {
-            drop_count = history.len() - cap;
-        }
-    }
-
-    if max_size >= 0 {
-        let cap = u64::try_from(max_size).unwrap_or(u64::MAX);
-        let mut total: u64 = history.iter().map(approx_entry_size).sum();
-        // Account for the items already to-be-dropped by the
-        // max_items pass.
-        for h in &history[..drop_count] {
-            total = total.saturating_sub(approx_entry_size(h));
-        }
-        while total > cap && drop_count < history.len() {
-            total = total.saturating_sub(approx_entry_size(&history[drop_count]));
-            drop_count += 1;
-        }
-    }
-
-    drop_count
-}
-
-/// Approximate the byte footprint an entry takes up when serialised
-/// inside a `<History>` block.
-///
-/// **Mirror** of `keepass-core::kdbx::approx_entry_size`. Kept here
-/// rather than `pub`-exposed from keepass-core because (a) it's a
-/// few lines, (b) the algorithm is stable, (c) duplicating avoids
-/// growing keepass-core's public surface for an internal helper.
-/// If the keepass-core version ever changes the heuristic, this
-/// function should be updated to match.
-fn approx_entry_size(e: &Entry) -> u64 {
-    let mut n: u64 = 200;
-    n = n.saturating_add(e.title.len() as u64);
-    n = n.saturating_add(e.username.len() as u64);
-    n = n.saturating_add(e.password.len() as u64);
-    n = n.saturating_add(e.url.len() as u64);
-    n = n.saturating_add(e.notes.len() as u64);
-    for cf in &e.custom_fields {
-        n = n.saturating_add(cf.key.len() as u64);
-        n = n.saturating_add(cf.value.len() as u64);
-    }
-    for t in &e.tags {
-        n = n.saturating_add(t.len() as u64);
-    }
-    n
 }
 
 // ---------------------------------------------------------------------------
