@@ -4,8 +4,12 @@
 //! The [`crate::model`] types are format-agnostic; this module translates
 //! between them and concrete byte streams.
 //!
-//! The [`Version`] enum enumerates supported major versions. Per-version
-//! code lives in the `v3` and `v4` submodules.
+//! The [`Version`] enum enumerates supported major versions. The framing
+//! is organised by concern rather than by version: [`header`] decodes the
+//! outer header (dispatching per-version via [`header::VersionFields`]),
+//! [`inner_header`] the KDBX4 inner header, [`hmac_block_stream`] and
+//! [`hashed_block_stream`] the two block-stream layers, and [`kdf_params`] /
+//! [`var_dictionary`] the KDF-parameter encodings.
 
 pub mod hashed_block_stream;
 pub mod header;
@@ -14,8 +18,6 @@ pub mod hmac_block_stream;
 pub mod inner_header;
 pub mod kdf_params;
 pub mod tlv;
-pub mod v3;
-pub mod v4;
 pub mod var_dictionary;
 
 pub use hashed_block_stream::{
@@ -35,7 +37,7 @@ pub use inner_header::{InnerBinary, InnerHeader, InnerHeaderError, InnerHeaderWr
 pub use header::{
     CipherId, CompressionFlags, END_OF_HEADER_VALUE, EncryptionIv, HeaderError,
     InnerStreamAlgorithm, KnownCipher, MasterSeed, OuterHeader, OuterHeaderWriteError,
-    ProtectedStreamKey, StreamStartBytes, TransformSeed,
+    ProtectedStreamKey, StreamStartBytes, TransformSeed, VersionFields,
 };
 pub use kdf_params::{Argon2Variant, Argon2Version, KdfId, KdfParams, KdfParamsError, KnownKdf};
 pub use tlv::{LengthWidth, TlvField, TlvWriteError, read_header_fields, write_header_fields};

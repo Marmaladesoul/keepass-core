@@ -57,7 +57,7 @@ fn parse_outer_header(path: &Path) -> OuterHeader {
 fn every_kdbx3_fixture_decodes_as_aes_kdf() {
     for path in find_kdbxs(&fixtures_root().join("keepassxc")) {
         let header = parse_outer_header(&path);
-        assert_eq!(header.version, Version::V3);
+        assert_eq!(header.version(), Version::V3);
         let params = header
             .decode_kdf_params()
             .unwrap_or_else(|e| panic!("{path:?}: decode_kdf_params: {e}"));
@@ -83,7 +83,7 @@ fn every_kdbx4_fixture_decodes_as_argon2() {
 
     for path in kdbxs {
         let header = parse_outer_header(&path);
-        assert_eq!(header.version, Version::V4);
+        assert_eq!(header.version(), Version::V4);
         let params = header
             .decode_kdf_params()
             .unwrap_or_else(|e| panic!("{path:?}: decode_kdf_params: {e}"));

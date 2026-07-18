@@ -46,9 +46,10 @@ use crate::format::{
     Argon2Variant, Argon2Version, CipherId, CompressionFlags, EncryptionIv, FileSignature,
     FormatError, HASHED_BLOCK_DEFAULT_SIZE, HMAC_BLOCK_DEFAULT_SIZE, InnerBinary, InnerHeader,
     InnerStreamAlgorithm, KdfId, KdfParams, KnownCipher, MasterSeed, OuterHeader, SIGNATURE_1,
-    SIGNATURE_2, TransformSeed, VarDictionary, VarValue, Version, compute_header_hash,
-    compute_header_hmac, read_hashed_block_stream, read_header_fields, read_hmac_block_stream,
-    verify_header_hash, verify_header_hmac, write_hashed_block_stream, write_hmac_block_stream,
+    SIGNATURE_2, TransformSeed, VarDictionary, VarValue, Version, VersionFields,
+    compute_header_hash, compute_header_hmac, read_hashed_block_stream, read_header_fields,
+    read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hashed_block_stream,
+    write_hmac_block_stream,
 };
 use crate::model::entry_editor::PendingBinaryOps;
 use crate::model::{
@@ -649,21 +650,17 @@ impl Kdbx<Unlocked> {
             derive_transformed_key(composite, &kdf_params).map_err(|_| CryptoError::Kdf)?;
 
         let outer_header = OuterHeader {
-            version: Version::V4,
             cipher_id: CipherId(CipherId::AES256_CBC),
             compression: CompressionFlags::Gzip,
             master_seed: MasterSeed(master_seed),
             encryption_iv: EncryptionIv(encryption_iv),
-            // KDBX3-only fields stay None on KDBX4.
-            transform_seed: None,
-            transform_rounds: None,
-            protected_stream_key: None,
-            stream_start_bytes: None,
-            inner_stream_algorithm: None,
             // KDBX4 keeps KDF + custom-data as VarDictionary blobs in the
-            // outer header.
-            kdf_parameters: Some(kdf_params_blob),
-            public_custom_data: None,
+            // outer header; the KDBX3-only inner-stream fields are absent by
+            // construction (the enum makes them unrepresentable on V4).
+            version_fields: VersionFields::V4 {
+                kdf_parameters: kdf_params_blob,
+                public_custom_data: None,
+            },
         };
 
         // Fresh vault: empty root group named after `database_name`, its id
@@ -704,15 +701,15 @@ impl Kdbx<Unlocked> {
 
     /// The outer-header record preserved from disk through unlock.
     ///
-    /// Read-only view over fields like [`OuterHeader::cipher_id`] and
-    /// [`OuterHeader::kdf_parameters`] — useful for downstream UI that
-    /// wants to surface format-level metadata (cipher choice, KDF
-    /// shape, KDBX version-specific knobs) without reaching for the
-    /// raw byte slice.
+    /// Read-only view over fields like [`OuterHeader::cipher_id`] and the
+    /// version-specific [`OuterHeader::version_fields`] (KDF parameters,
+    /// inner-stream knobs) — useful for downstream UI that wants to surface
+    /// format-level metadata (cipher choice, KDF shape, KDBX version-specific
+    /// knobs) without reaching for the raw byte slice.
     ///
     /// The header is captured at unlock time and not refreshed by
     /// mutations; KDBX4 saves regenerate the relevant fields
-    /// (`master_seed`, `encryption_iv`, `kdf_parameters` salt) under
+    /// (`master_seed`, `encryption_iv`, KDF-parameters salt) under
     /// the hood on the way out.
     #[must_use]
     pub fn outer_header(&self) -> &OuterHeader {
@@ -2562,28 +2559,20 @@ impl Kdbx<Unlocked> {
         self.state.outer_header.master_seed = MasterSeed(new_master_seed);
         self.state.outer_header.encryption_iv = EncryptionIv(new_iv);
 
-        match self.version {
-            Version::V3 => {
+        match &mut self.state.outer_header.version_fields {
+            VersionFields::V3 { transform_seed, .. } => {
                 // KDBX3 keeps the AES-KDF transform seed in the outer
                 // header. Refresh it; rounds are unchanged.
                 let mut new_transform_seed = [0u8; 32];
                 getrandom::fill(&mut new_transform_seed)
                     .map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
-                self.state.outer_header.transform_seed = Some(TransformSeed(new_transform_seed));
+                *transform_seed = TransformSeed(new_transform_seed);
             }
-            Version::V4 => {
+            VersionFields::V4 { kdf_parameters, .. } => {
                 // KDBX4 keeps KDF parameters as a VarDictionary blob.
                 // Reparse, replace the `S` value (Argon2 salt or
                 // AES-KDF seed — same key in both shapes), reserialise.
-                let blob = self
-                    .state
-                    .outer_header
-                    .kdf_parameters
-                    .as_ref()
-                    .ok_or(Error::Format(FormatError::MalformedHeader(
-                        "KDBX4 missing KdfParameters",
-                    )))?;
-                let mut dict = VarDictionary::parse(blob)
+                let mut dict = VarDictionary::parse(kdf_parameters)
                     .map_err(|_| FormatError::MalformedHeader("malformed KDF parameters"))?;
                 let salt_len = match dict.get("S") {
                     Some(VarValue::Bytes(b)) => b.len(),
@@ -2597,10 +2586,9 @@ impl Kdbx<Unlocked> {
                 getrandom::fill(&mut new_salt).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
                 dict.entries
                     .insert("S".to_owned(), VarValue::Bytes(new_salt));
-                let new_blob = dict
+                *kdf_parameters = dict
                     .write()
                     .map_err(|_| FormatError::MalformedHeader("failed to encode KDF parameters"))?;
-                self.state.outer_header.kdf_parameters = Some(new_blob);
             }
         }
 
@@ -3174,7 +3162,7 @@ fn do_unlock(
     let header_bytes = &bytes[..header_state.header_end];
     let payload = &bytes[header_state.header_end..];
 
-    let ciphertext: Vec<u8> = match header.version {
+    let ciphertext: Vec<u8> = match header.version() {
         Version::V4 => {
             // Layout: [32-byte header SHA-256][32-byte header HMAC][HMAC blocks].
             if payload.len() < 64 {
@@ -3224,47 +3212,33 @@ fn do_unlock(
     // by `decode_vault_with_cipher` — the V3 arm leaves the local empty.
     let mut binaries: Vec<Binary> = Vec::new();
     let (xml_bytes, inner_stream_algorithm, inner_stream_key): (Vec<u8>, _, Vec<u8>) =
-        match header.version {
-            Version::V3 => {
-                let sentinel =
-                    header
-                        .stream_start_bytes
-                        .as_ref()
-                        .ok_or(FormatError::MalformedHeader(
-                            "KDBX3 missing StreamStartBytes",
-                        ))?;
+        match &header.version_fields {
+            VersionFields::V3 {
+                stream_start_bytes,
+                inner_stream_algorithm,
+                protected_stream_key,
+                ..
+            } => {
                 if plaintext.len() < 32 {
                     return Err(CryptoError::Decrypt.into());
                 }
                 let (got_sentinel, rest) = plaintext.split_at(32);
                 // Constant-time compare avoids leaking the "password correct,
                 // but ciphertext after this point is garbled" partial oracle.
-                if got_sentinel.ct_eq(&sentinel.0).unwrap_u8() == 0 {
+                if got_sentinel.ct_eq(&stream_start_bytes.0).unwrap_u8() == 0 {
                     return Err(CryptoError::Decrypt.into());
                 }
                 let framed = read_hashed_block_stream(rest).map_err(FormatError::from)?;
                 let decompressed = decompress(header.compression, &framed)
                     .map_err(|_| FormatError::MalformedHeader("payload failed to decompress"))?;
-                let algo = header
-                    .inner_stream_algorithm
-                    .ok_or(FormatError::MalformedHeader(
-                        "KDBX3 missing InnerRandomStreamID",
-                    ))?;
-                let raw = &header
-                    .protected_stream_key
-                    .as_ref()
-                    .ok_or(FormatError::MalformedHeader(
-                        "KDBX3 missing ProtectedStreamKey",
-                    ))?
-                    .0;
                 // KDBX3 quirk: the inner-stream key on disk is hashed with
                 // SHA-256 before it becomes the Salsa20 key. KDBX4 skips
                 // this step (ChaCha20's SHA-512 derivation in
                 // InnerStreamCipher::new does the equivalent internally).
-                let hashed = Sha256::digest(raw);
-                (decompressed, algo, hashed.to_vec())
+                let hashed = Sha256::digest(protected_stream_key.0);
+                (decompressed, *inner_stream_algorithm, hashed.to_vec())
             }
-            Version::V4 => {
+            VersionFields::V4 { .. } => {
                 let decompressed = decompress(header.compression, &plaintext)
                     .map_err(|_| FormatError::MalformedHeader("payload failed to decompress"))?;
                 let inner = InnerHeader::parse(&decompressed)
@@ -3698,13 +3672,14 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
         }
     }
 
-    let stream_start_bytes =
-        header
-            .stream_start_bytes
-            .as_ref()
-            .ok_or(FormatError::MalformedHeader(
-                "KDBX3 save_to_bytes requires StreamStartBytes in the outer header",
-            ))?;
+    let VersionFields::V3 {
+        stream_start_bytes, ..
+    } = &header.version_fields
+    else {
+        return Err(Error::Format(FormatError::MalformedHeader(
+            "KDBX3 save_to_bytes requires a KDBX3 outer header",
+        )));
+    };
 
     // --- Build outer header bytes (signature + TLVs) ---------------------
     // We compute these *before* the XML encode so the SHA-256 of the
@@ -3764,8 +3739,8 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
 // VarDictionary encoding for fresh-vault KDF parameters
 // ---------------------------------------------------------------------------
 
-/// Encode an Argon2 `KdfParams` as a VarDictionary blob suitable for
-/// [`OuterHeader::kdf_parameters`]. The inverse of
+/// Encode an Argon2 `KdfParams` as a VarDictionary blob suitable for the
+/// KDBX4 [`VersionFields::V4`] `kdf_parameters` field. The inverse of
 /// `KdfParams::from_var_dictionary` on the decode side.
 ///
 /// Currently only the Argon2 family is wired up — fresh-vault creation

@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use keepass_core::format::Version;
+use keepass_core::format::{Version, VersionFields};
 use keepass_core::kdbx::{HeaderRead, Kdbx, Sealed};
 
 fn fixtures_root() -> PathBuf {
@@ -67,29 +67,26 @@ fn every_valid_fixture_passes_sealed_and_header() {
 
         // Mandatory invariants on every valid header.
         let h = kdbx.header();
-        assert_eq!(h.version, version);
+        assert_eq!(h.version(), version);
         assert_eq!(h.master_seed.0.len(), 32);
         assert!(!h.encryption_iv.0.is_empty());
 
         // KDBX4 must expose KDF parameters; KDBX3 must expose the legacy
-        // transform seed + rounds in the raw field set.
+        // transform seed + rounds. The `VersionFields` enum guarantees the
+        // right field-set is present for each version by construction; assert
+        // the arm matches the classified version.
         match version {
             Version::V4 => {
                 assert!(
-                    h.kdf_parameters.is_some(),
+                    matches!(&h.version_fields, VersionFields::V4 { kdf_parameters, .. } if !kdf_parameters.is_empty()),
                     "KDBX4 fixture {} missing KDF params",
                     path.display()
                 );
             }
             Version::V3 => {
                 assert!(
-                    h.transform_seed.is_some(),
-                    "KDBX3 fixture {} missing transform seed",
-                    path.display()
-                );
-                assert!(
-                    h.transform_rounds.is_some(),
-                    "KDBX3 fixture {} missing transform rounds",
+                    matches!(&h.version_fields, VersionFields::V3 { .. }),
+                    "KDBX3 fixture {} missing transform seed/rounds",
                     path.display()
                 );
             }

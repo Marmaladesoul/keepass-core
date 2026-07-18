@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use keepass_core::format::{
-    FileSignature, OuterHeader, VarDictionary, Version, read_header_fields,
+    FileSignature, OuterHeader, VarDictionary, Version, VersionFields, read_header_fields,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -72,10 +72,10 @@ fn every_kdbx4_fixture_kdf_parameters_round_trips() {
                 .unwrap_or_else(|e| panic!("{path:?}: TLV read: {e}"));
         let header = OuterHeader::parse(&fields, Version::V4)
             .unwrap_or_else(|e| panic!("{path:?}: typed parse: {e}"));
-        let blob = header
-            .kdf_parameters
-            .as_ref()
-            .unwrap_or_else(|| panic!("{path:?}: v4 must have KdfParameters"));
+        let VersionFields::V4 { kdf_parameters, .. } = &header.version_fields else {
+            panic!("{path:?}: v4 must have KdfParameters");
+        };
+        let blob = kdf_parameters;
 
         let dict = VarDictionary::parse_consuming(blob)
             .unwrap_or_else(|e| panic!("{path:?}: VarDictionary parse: {e}"));

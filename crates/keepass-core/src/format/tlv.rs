@@ -40,7 +40,7 @@ use crate::format::FormatError;
 pub struct TlvField<'a> {
     /// The tag byte identifying which header field this record represents.
     /// Known tag values are specified by the KDBX format; see
-    /// [`crate::format::v3`] and [`crate::format::v4`] for per-version tables.
+    /// [`crate::format::header::tag`] for the per-version tag table.
     pub tag: u8,
     /// The raw value bytes, borrowed from the caller's input.
     pub value: &'a [u8],

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use keepass_core::format::{
     CompressionFlags, FileSignature, InnerStreamAlgorithm, KnownCipher, OuterHeader, Version,
-    read_header_fields,
+    VersionFields, read_header_fields,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -73,7 +73,7 @@ fn every_well_formed_fixture_parses_a_complete_outer_header() {
 
     for path in &kdbxs {
         let (version, h) = parse_outer_header(path);
-        assert_eq!(h.version, version);
+        assert_eq!(h.version(), version);
         // Every fixture should identify its cipher as one of the three known.
         assert!(
             h.cipher_id.well_known().is_some(),
@@ -101,35 +101,24 @@ fn kdbx3_fixtures_have_v3_only_fields_populated() {
         if version != Version::V3 {
             continue;
         }
-        assert!(
-            h.transform_seed.is_some(),
-            "{path:?}: expected TransformSeed"
-        );
-        assert!(
-            h.transform_rounds.is_some(),
-            "{path:?}: expected TransformRounds"
-        );
-        assert!(
-            h.protected_stream_key.is_some(),
-            "{path:?}: expected ProtectedStreamKey"
-        );
-        assert!(
-            h.stream_start_bytes.is_some(),
-            "{path:?}: expected StreamStartBytes"
-        );
-        assert!(
-            matches!(
-                h.inner_stream_algorithm,
-                Some(InnerStreamAlgorithm::Salsa20 | InnerStreamAlgorithm::ChaCha20)
-            ),
-            "{path:?}: expected a known inner-stream algorithm, got {:?}",
-            h.inner_stream_algorithm
-        );
-        // KDBX3 fixtures should NOT have the KDBX4 VarDictionary fields.
-        assert!(
-            h.kdf_parameters.is_none(),
-            "{path:?}: v3 should not have KdfParameters"
-        );
+        // A V3 fixture parses into the V3 arm, which carries all five
+        // KDBX3-only fields by construction (and, being the V3 arm, cannot
+        // carry the KDBX4 VarDictionary fields).
+        match &h.version_fields {
+            VersionFields::V3 {
+                inner_stream_algorithm,
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        inner_stream_algorithm,
+                        InnerStreamAlgorithm::Salsa20 | InnerStreamAlgorithm::ChaCha20
+                    ),
+                    "{path:?}: expected a known inner-stream algorithm, got {inner_stream_algorithm:?}"
+                );
+            }
+            VersionFields::V4 { .. } => panic!("{path:?}: v3 fixture parsed as V4 fields"),
+        }
     }
 }
 
@@ -140,23 +129,18 @@ fn kdbx4_fixtures_have_kdf_parameters_populated() {
     for path in kdbxs {
         let (version, h) = parse_outer_header(&path);
         assert_eq!(version, Version::V4);
-        assert!(
-            h.kdf_parameters.is_some(),
-            "{path:?}: expected KdfParameters (tag 11)"
-        );
-        // KDBX4 should NOT populate any of the KDBX3-only transform fields.
-        assert!(
-            h.transform_seed.is_none(),
-            "{path:?}: v4 leaked v3 TransformSeed"
-        );
-        assert!(
-            h.transform_rounds.is_none(),
-            "{path:?}: v4 leaked v3 TransformRounds"
-        );
-        assert!(
-            h.protected_stream_key.is_none(),
-            "{path:?}: v4 leaked v3 ProtectedStreamKey"
-        );
+        // A V4 fixture parses into the V4 arm, which carries KdfParameters by
+        // construction and (being the V4 arm) cannot leak any KDBX3-only
+        // transform fields.
+        match &h.version_fields {
+            VersionFields::V4 { kdf_parameters, .. } => {
+                assert!(
+                    !kdf_parameters.is_empty(),
+                    "{path:?}: expected KdfParameters (tag 11)"
+                );
+            }
+            VersionFields::V3 { .. } => panic!("{path:?}: v4 fixture parsed as V3 fields"),
+        }
     }
 }
 

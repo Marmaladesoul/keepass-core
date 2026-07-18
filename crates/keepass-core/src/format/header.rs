@@ -5,10 +5,10 @@
 //! values — [`CipherId`], [`MasterSeed`], [`EncryptionIv`], and so on —
 //! which [`OuterHeader`] collects into a single struct per file.
 //!
-//! The TLV tag numbers are format-version-specific but overlap; the `v3`
-//! and `v4` submodules of [`super`] list which tags apply per version.
-//! [`OuterHeader::parse`] dispatches on [`Version`] to pick up the right
-//! set of fields.
+//! The TLV tag numbers are format-version-specific but overlap; the [`tag`]
+//! module documents which tags apply per version. [`OuterHeader::parse`]
+//! dispatches on [`Version`] to collect the right set of fields into a
+//! [`VersionFields`] enum.
 
 use std::fmt;
 
@@ -238,8 +238,6 @@ impl InnerStreamAlgorithm {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct OuterHeader {
-    /// The KDBX major version this header is for.
-    pub version: Version,
     /// Outer cipher identifier.
     pub cipher_id: CipherId,
     /// Payload compression flags.
@@ -248,30 +246,60 @@ pub struct OuterHeader {
     pub master_seed: MasterSeed,
     /// Outer-cipher initialisation vector.
     pub encryption_iv: EncryptionIv,
+    /// The version-specific fields (KDBX3 KDF/inner-stream set, or KDBX4 KDF set).
+    pub version_fields: VersionFields,
+}
 
-    // --- KDBX3-only fields -----------------------------------------------
-    /// AES-KDF transform seed. Populated on KDBX3 only.
-    pub transform_seed: Option<TransformSeed>,
-    /// AES-KDF round count. Populated on KDBX3 only.
-    pub transform_rounds: Option<u64>,
-    /// Inner-stream cipher key. Populated on KDBX3 only.
-    pub protected_stream_key: Option<ProtectedStreamKey>,
-    /// Plaintext sentinel at the start of the decrypted stream. Populated on
-    /// KDBX3 only.
-    pub stream_start_bytes: Option<StreamStartBytes>,
-    /// Inner-stream algorithm. Populated on KDBX3 only.
-    pub inner_stream_algorithm: Option<InnerStreamAlgorithm>,
+/// The version-specific outer-header fields. KDBX3 and KDBX4 carry disjoint
+/// KDF / inner-stream fields in the outer header; modelling them as one enum
+/// makes an illegal mix (a V4 header carrying `stream_start_bytes`, or a V3
+/// header carrying `kdf_parameters`) unrepresentable — the parse-time
+/// coherence check is then the only enforcement point, and downstream code
+/// matches once and reads the fields directly instead of re-validating Options.
+#[derive(Debug, Clone)]
+pub enum VersionFields {
+    /// KDBX 3.1 outer-header fields (AES-KDF + inner-stream key/algorithm, all mandatory).
+    V3 {
+        /// AES-KDF transform seed.
+        transform_seed: TransformSeed,
+        /// AES-KDF round count.
+        transform_rounds: u64,
+        /// Inner-stream cipher key.
+        protected_stream_key: ProtectedStreamKey,
+        /// Plaintext sentinel at the start of the decrypted stream.
+        stream_start_bytes: StreamStartBytes,
+        /// Inner-stream algorithm.
+        inner_stream_algorithm: InnerStreamAlgorithm,
+    },
+    /// KDBX 4.x outer-header fields (KDF params as a VarDictionary; inner-stream fields move to the inner header).
+    V4 {
+        /// Raw KDF-parameter bytes (an encoded VarDictionary). Use
+        /// [`OuterHeader::decode_kdf_params`] for the typed form.
+        kdf_parameters: Vec<u8>,
+        /// Optional public custom data as a VarDictionary (raw bytes). May
+        /// appear on KDBX4 but is rarely present.
+        public_custom_data: Option<Vec<u8>>,
+    },
+}
 
-    // --- KDBX4-only fields -----------------------------------------------
-    /// Raw KDF-parameter bytes (an encoded VarDictionary). Populated on
-    /// KDBX4 only. Use [`Self::decode_kdf_params`] for the typed form.
-    pub kdf_parameters: Option<Vec<u8>>,
-    /// Optional public custom data as a VarDictionary (raw bytes). May appear
-    /// on KDBX4 but is rarely present.
-    pub public_custom_data: Option<Vec<u8>>,
+impl VersionFields {
+    /// The KDBX major version this field-set is for.
+    #[must_use]
+    pub fn version(&self) -> Version {
+        match self {
+            VersionFields::V3 { .. } => Version::V3,
+            VersionFields::V4 { .. } => Version::V4,
+        }
+    }
 }
 
 impl OuterHeader {
+    /// The KDBX major version this header is for.
+    #[must_use]
+    pub fn version(&self) -> Version {
+        self.version_fields.version()
+    }
+
     /// Build an [`OuterHeader`] from a list of TLV records.
     ///
     /// # Errors
@@ -400,52 +428,43 @@ impl OuterHeader {
         let encryption_iv = encryption_iv.ok_or(HeaderError::Missing(tag::ENCRYPTION_IV))?;
 
         // --- Version-specific mandatory fields --------------------------------
-        match version {
-            Version::V3 => {
-                if transform_seed.is_none() {
-                    return Err(HeaderError::Missing(tag::TRANSFORM_SEED));
-                }
-                if transform_rounds.is_none() {
-                    return Err(HeaderError::Missing(tag::TRANSFORM_ROUNDS));
-                }
-                if protected_stream_key.is_none() {
-                    return Err(HeaderError::Missing(tag::PROTECTED_STREAM_KEY));
-                }
-                if stream_start_bytes.is_none() {
-                    return Err(HeaderError::Missing(tag::STREAM_START_BYTES));
-                }
-                if inner_stream_algorithm.is_none() {
-                    return Err(HeaderError::Missing(tag::INNER_RANDOM_STREAM_ID));
-                }
-            }
-            Version::V4 => {
-                if kdf_parameters.is_none() {
-                    return Err(HeaderError::Missing(tag::KDF_PARAMETERS));
-                }
-            }
-        }
+        // Unwrapping each validated Option into the enum *is* the
+        // mandatory-field check: `.ok_or(Missing(...))?` fires the same error
+        // the old dedicated validation block did. Cross-version stray fields
+        // (e.g. a stray kdf_parameters on a V3 header) are dropped, exactly as
+        // before — they were stored but never written.
+        let version_fields = match version {
+            Version::V3 => VersionFields::V3 {
+                transform_seed: transform_seed.ok_or(HeaderError::Missing(tag::TRANSFORM_SEED))?,
+                transform_rounds: transform_rounds
+                    .ok_or(HeaderError::Missing(tag::TRANSFORM_ROUNDS))?,
+                protected_stream_key: protected_stream_key
+                    .ok_or(HeaderError::Missing(tag::PROTECTED_STREAM_KEY))?,
+                stream_start_bytes: stream_start_bytes
+                    .ok_or(HeaderError::Missing(tag::STREAM_START_BYTES))?,
+                inner_stream_algorithm: inner_stream_algorithm
+                    .ok_or(HeaderError::Missing(tag::INNER_RANDOM_STREAM_ID))?,
+            },
+            Version::V4 => VersionFields::V4 {
+                kdf_parameters: kdf_parameters.ok_or(HeaderError::Missing(tag::KDF_PARAMETERS))?,
+                public_custom_data,
+            },
+        };
 
         Ok(Self {
-            version,
             cipher_id,
             compression,
             master_seed,
             encryption_iv,
-            transform_seed,
-            transform_rounds,
-            protected_stream_key,
-            stream_start_bytes,
-            inner_stream_algorithm,
-            kdf_parameters,
-            public_custom_data,
+            version_fields,
         })
     }
 
     /// Decode the KDF parameters into their typed form.
     ///
-    /// For KDBX4 headers, parses the raw [`Self::kdf_parameters`] blob as a
-    /// [`VarDictionary`][super::var_dictionary::VarDictionary] then extracts
-    /// a typed [`KdfParams`][super::kdf_params::KdfParams].
+    /// For KDBX4 headers, parses the raw [`VersionFields::V4`] `kdf_parameters`
+    /// blob as a [`VarDictionary`][super::var_dictionary::VarDictionary] then
+    /// extracts a typed [`KdfParams`][super::kdf_params::KdfParams].
     ///
     /// For KDBX3 headers, constructs [`super::kdf_params::KdfParams::AesKdf`]
     /// directly from the `TransformSeed` / `TransformRounds` outer-header
@@ -454,31 +473,23 @@ impl OuterHeader {
     /// # Errors
     ///
     /// Returns [`KdfDecodeError`] with a wrapped inner error describing
-    /// which stage failed (VarDictionary parse, typed-params parse, or a
-    /// missing-v3-field problem).
+    /// which stage failed (VarDictionary parse or typed-params parse).
     pub fn decode_kdf_params(&self) -> Result<super::kdf_params::KdfParams, KdfDecodeError> {
-        match self.version {
-            Version::V3 => {
+        match &self.version_fields {
+            VersionFields::V3 {
+                transform_seed,
+                transform_rounds,
+                ..
+            } => {
                 // KDBX3: assemble from the fields we already parsed.
-                let seed = self
-                    .transform_seed
-                    .as_ref()
-                    .ok_or(KdfDecodeError::MissingV3Field("TransformSeed"))?;
-                let rounds = self
-                    .transform_rounds
-                    .ok_or(KdfDecodeError::MissingV3Field("TransformRounds"))?;
                 Ok(super::kdf_params::KdfParams::AesKdf {
-                    seed: seed.0,
-                    rounds,
+                    seed: transform_seed.0,
+                    rounds: *transform_rounds,
                 })
             }
-            Version::V4 => {
+            VersionFields::V4 { kdf_parameters, .. } => {
                 // KDBX4: decode the VarDictionary blob, then the typed params.
-                let blob = self
-                    .kdf_parameters
-                    .as_ref()
-                    .ok_or(KdfDecodeError::MissingV4KdfParameters)?;
-                let dict = super::var_dictionary::VarDictionary::parse(blob)?;
+                let dict = super::var_dictionary::VarDictionary::parse(kdf_parameters)?;
                 let params = super::kdf_params::KdfParams::from_var_dictionary(&dict)?;
                 Ok(params)
             }
@@ -500,12 +511,6 @@ impl OuterHeader {
     /// [`END_OF_HEADER_VALUE`] (`\r\n\r\n`).
     ///
     /// # Errors
-    ///
-    /// Returns [`OuterHeaderWriteError::MissingField`] if any
-    /// version-mandatory `Option<T>` field is `None`. This can only
-    /// happen when an [`OuterHeader`] was constructed manually and
-    /// incompletely; a header produced by [`Self::parse`] always
-    /// satisfies its version's mandatory set.
     ///
     /// Returns [`OuterHeaderWriteError::Tlv`] if a variable-length
     /// field (KDF parameters, public custom data, encryption IV) is
@@ -545,30 +550,16 @@ impl OuterHeader {
             value: &self.encryption_iv.0,
         });
 
-        match self.version {
-            Version::V3 => {
-                let transform_seed = self
-                    .transform_seed
-                    .as_ref()
-                    .ok_or(OuterHeaderWriteError::MissingField(tag::TRANSFORM_SEED))?;
-                let rounds = self
-                    .transform_rounds
-                    .ok_or(OuterHeaderWriteError::MissingField(tag::TRANSFORM_ROUNDS))?;
-                let protected_stream_key = self.protected_stream_key.as_ref().ok_or(
-                    OuterHeaderWriteError::MissingField(tag::PROTECTED_STREAM_KEY),
-                )?;
-                let stream_start_bytes = self
-                    .stream_start_bytes
-                    .as_ref()
-                    .ok_or(OuterHeaderWriteError::MissingField(tag::STREAM_START_BYTES))?;
-                let inner_stream =
-                    self.inner_stream_algorithm
-                        .ok_or(OuterHeaderWriteError::MissingField(
-                            tag::INNER_RANDOM_STREAM_ID,
-                        ))?;
-
-                transform_rounds_bytes = rounds.to_le_bytes();
-                inner_stream_id_bytes = match inner_stream {
+        match &self.version_fields {
+            VersionFields::V3 {
+                transform_seed,
+                transform_rounds,
+                protected_stream_key,
+                stream_start_bytes,
+                inner_stream_algorithm,
+            } => {
+                transform_rounds_bytes = transform_rounds.to_le_bytes();
+                inner_stream_id_bytes = match inner_stream_algorithm {
                     InnerStreamAlgorithm::None => 0u32,
                     InnerStreamAlgorithm::Salsa20 => 2u32,
                     InnerStreamAlgorithm::ChaCha20 => 3u32,
@@ -596,16 +587,15 @@ impl OuterHeader {
                     value: &inner_stream_id_bytes,
                 });
             }
-            Version::V4 => {
-                let kdf = self
-                    .kdf_parameters
-                    .as_ref()
-                    .ok_or(OuterHeaderWriteError::MissingField(tag::KDF_PARAMETERS))?;
+            VersionFields::V4 {
+                kdf_parameters,
+                public_custom_data,
+            } => {
                 fields.push(TlvField {
                     tag: tag::KDF_PARAMETERS,
-                    value: kdf,
+                    value: kdf_parameters,
                 });
-                if let Some(pcd) = self.public_custom_data.as_ref() {
+                if let Some(pcd) = public_custom_data.as_ref() {
                     fields.push(TlvField {
                         tag: tag::PUBLIC_CUSTOM_DATA,
                         value: pcd,
@@ -618,7 +608,7 @@ impl OuterHeader {
             tag: tag::END_OF_HEADER,
             value: END_OF_HEADER_VALUE,
         };
-        write_header_fields(&fields, end, self.version.header_length_width())
+        write_header_fields(&fields, end, self.version().header_length_width())
             .map_err(OuterHeaderWriteError::Tlv)
     }
 }
@@ -627,14 +617,6 @@ impl OuterHeader {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OuterHeaderWriteError {
-    /// A version-mandatory field was absent from the typed header.
-    ///
-    /// Only reachable when an [`OuterHeader`] was constructed by hand
-    /// (e.g. in tests) without populating every field its version
-    /// requires. Parsed headers always satisfy this invariant.
-    #[error("outer header is missing mandatory field (tag {0})")]
-    MissingField(u8),
-
     /// A variable-length field exceeded the length prefix width for
     /// this KDBX version. Effectively unreachable for well-formed
     /// headers.
@@ -646,18 +628,6 @@ pub enum OuterHeaderWriteError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum KdfDecodeError {
-    /// KDBX3 header was missing one of the AES-KDF fields
-    /// (TransformSeed / TransformRounds). Shouldn't happen after a
-    /// successful [`OuterHeader::parse`]; indicates the header was built
-    /// manually and incompletely.
-    #[error("KDBX3 header is missing {0}")]
-    MissingV3Field(&'static str),
-
-    /// KDBX4 header had no KdfParameters blob. Shouldn't happen after a
-    /// successful [`OuterHeader::parse`] either.
-    #[error("KDBX4 header is missing KdfParameters")]
-    MissingV4KdfParameters,
-
     /// Error propagated from the VarDictionary decoder.
     #[error(transparent)]
     VarDictionary(#[from] super::var_dictionary::VarDictionaryError),
@@ -863,15 +833,20 @@ mod tests {
             f(tag::INNER_RANDOM_STREAM_ID, &innerid),
         ];
         let h = OuterHeader::parse(&fields, Version::V3).unwrap();
-        assert_eq!(h.version, Version::V3);
+        assert_eq!(h.version(), Version::V3);
         assert_eq!(h.cipher_id.well_known(), Some(KnownCipher::Aes256Cbc));
         assert_eq!(h.compression, CompressionFlags::None);
-        assert_eq!(h.transform_rounds, Some(6_000_000));
-        assert_eq!(
-            h.inner_stream_algorithm,
-            Some(InnerStreamAlgorithm::Salsa20)
-        );
-        assert!(h.kdf_parameters.is_none());
+        match &h.version_fields {
+            VersionFields::V3 {
+                transform_rounds,
+                inner_stream_algorithm,
+                ..
+            } => {
+                assert_eq!(*transform_rounds, 6_000_000);
+                assert_eq!(*inner_stream_algorithm, InnerStreamAlgorithm::Salsa20);
+            }
+            VersionFields::V4 { .. } => panic!("expected V3 version fields"),
+        }
     }
 
     #[test]
@@ -886,12 +861,16 @@ mod tests {
             f(tag::KDF_PARAMETERS, &s.kdf),
         ];
         let h = OuterHeader::parse(&fields, Version::V4).unwrap();
-        assert_eq!(h.version, Version::V4);
+        assert_eq!(h.version(), Version::V4);
         assert_eq!(h.cipher_id.well_known(), Some(KnownCipher::ChaCha20));
         assert_eq!(h.compression, CompressionFlags::Gzip);
         assert_eq!(h.encryption_iv.0.len(), 12);
-        assert!(h.kdf_parameters.is_some());
-        assert!(h.transform_seed.is_none(), "v4 should not carry v3 fields");
+        // A V4 header carries the V4 field-set; the enum makes carrying V3
+        // fields (transform_seed, etc.) structurally impossible.
+        assert!(
+            matches!(h.version_fields, VersionFields::V4 { .. }),
+            "v4 header should carry V4 version fields"
+        );
     }
 
     #[test]
@@ -1035,61 +1014,89 @@ mod tests {
 
     fn minimal_v4_header() -> OuterHeader {
         OuterHeader {
-            version: Version::V4,
             cipher_id: CipherId(Uuid::from_bytes(aes_cipher_id())),
             compression: CompressionFlags::Gzip,
             master_seed: MasterSeed([0x11; 32]),
             encryption_iv: EncryptionIv(vec![0x22; 16]),
-            transform_seed: None,
-            transform_rounds: None,
-            protected_stream_key: None,
-            stream_start_bytes: None,
-            inner_stream_algorithm: None,
-            kdf_parameters: Some(vec![0xAA; 24]),
-            public_custom_data: None,
+            version_fields: VersionFields::V4 {
+                kdf_parameters: vec![0xAA; 24],
+                public_custom_data: None,
+            },
         }
     }
 
     fn minimal_v3_header() -> OuterHeader {
         OuterHeader {
-            version: Version::V3,
             cipher_id: CipherId(Uuid::from_bytes(aes_cipher_id())),
             compression: CompressionFlags::None,
             master_seed: MasterSeed([0x01; 32]),
             encryption_iv: EncryptionIv(vec![0x02; 16]),
-            transform_seed: Some(TransformSeed([0x03; 32])),
-            transform_rounds: Some(6_000_000),
-            protected_stream_key: Some(ProtectedStreamKey([0x04; 32])),
-            stream_start_bytes: Some(StreamStartBytes([0x05; 32])),
-            inner_stream_algorithm: Some(InnerStreamAlgorithm::Salsa20),
-            kdf_parameters: None,
-            public_custom_data: None,
+            version_fields: VersionFields::V3 {
+                transform_seed: TransformSeed([0x03; 32]),
+                transform_rounds: 6_000_000,
+                protected_stream_key: ProtectedStreamKey([0x04; 32]),
+                stream_start_bytes: StreamStartBytes([0x05; 32]),
+                inner_stream_algorithm: InnerStreamAlgorithm::Salsa20,
+            },
         }
     }
 
     /// Round-trip an `OuterHeader` through `write` + `read_header_fields` +
-    /// `parse` and assert field-level equality.
+    /// `parse` and assert field-level equality. This is the byte-identity
+    /// guard: the re-parsed header's version-specific fields must match the
+    /// original bit for bit.
     fn assert_roundtrip(h: &OuterHeader) {
         let bytes = h.write().expect("write succeeds");
         let mut cursor: &[u8] = &bytes;
-        let (fields, end) = read_header_fields(&mut cursor, h.version.header_length_width())
+        let (fields, end) = read_header_fields(&mut cursor, h.version().header_length_width())
             .expect("re-parse succeeds");
         assert!(cursor.is_empty(), "writer should emit exactly the header");
         assert_eq!(end.tag, tag::END_OF_HEADER);
         assert_eq!(end.value, END_OF_HEADER_VALUE);
-        let re = OuterHeader::parse(&fields, h.version).expect("typed parse succeeds");
-        assert_eq!(re.version, h.version);
+        let re = OuterHeader::parse(&fields, h.version()).expect("typed parse succeeds");
+        assert_eq!(re.version(), h.version());
         assert_eq!(re.cipher_id, h.cipher_id);
         assert_eq!(re.compression, h.compression);
         assert_eq!(re.master_seed, h.master_seed);
         assert_eq!(re.encryption_iv, h.encryption_iv);
-        assert_eq!(re.transform_seed, h.transform_seed);
-        assert_eq!(re.transform_rounds, h.transform_rounds);
-        assert_eq!(re.protected_stream_key, h.protected_stream_key);
-        assert_eq!(re.stream_start_bytes, h.stream_start_bytes);
-        assert_eq!(re.inner_stream_algorithm, h.inner_stream_algorithm);
-        assert_eq!(re.kdf_parameters, h.kdf_parameters);
-        assert_eq!(re.public_custom_data, h.public_custom_data);
+        match (&re.version_fields, &h.version_fields) {
+            (
+                VersionFields::V3 {
+                    transform_seed: rts,
+                    transform_rounds: rtr,
+                    protected_stream_key: rpsk,
+                    stream_start_bytes: rssb,
+                    inner_stream_algorithm: risa,
+                },
+                VersionFields::V3 {
+                    transform_seed: hts,
+                    transform_rounds: htr,
+                    protected_stream_key: hpsk,
+                    stream_start_bytes: hssb,
+                    inner_stream_algorithm: hisa,
+                },
+            ) => {
+                assert_eq!(rts, hts);
+                assert_eq!(rtr, htr);
+                assert_eq!(rpsk, hpsk);
+                assert_eq!(rssb, hssb);
+                assert_eq!(risa, hisa);
+            }
+            (
+                VersionFields::V4 {
+                    kdf_parameters: rkdf,
+                    public_custom_data: rpcd,
+                },
+                VersionFields::V4 {
+                    kdf_parameters: hkdf,
+                    public_custom_data: hpcd,
+                },
+            ) => {
+                assert_eq!(rkdf, hkdf);
+                assert_eq!(rpcd, hpcd);
+            }
+            _ => panic!("version-fields arm mismatch across round-trip"),
+        }
     }
 
     #[test]
@@ -1105,7 +1112,12 @@ mod tests {
     #[test]
     fn v4_with_public_custom_data_round_trips() {
         let mut h = minimal_v4_header();
-        h.public_custom_data = Some(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        if let VersionFields::V4 {
+            public_custom_data, ..
+        } = &mut h.version_fields
+        {
+            *public_custom_data = Some(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        }
         assert_roundtrip(&h);
     }
 
@@ -1119,65 +1131,13 @@ mod tests {
         assert!(!tags.contains(&tag::PUBLIC_CUSTOM_DATA));
     }
 
-    #[test]
-    fn v3_missing_transform_seed_errors() {
-        let mut h = minimal_v3_header();
-        h.transform_seed = None;
-        assert!(matches!(
-            h.write().unwrap_err(),
-            OuterHeaderWriteError::MissingField(tag::TRANSFORM_SEED)
-        ));
-    }
-
-    #[test]
-    fn v3_missing_transform_rounds_errors() {
-        let mut h = minimal_v3_header();
-        h.transform_rounds = None;
-        assert!(matches!(
-            h.write().unwrap_err(),
-            OuterHeaderWriteError::MissingField(tag::TRANSFORM_ROUNDS)
-        ));
-    }
-
-    #[test]
-    fn v3_missing_protected_stream_key_errors() {
-        let mut h = minimal_v3_header();
-        h.protected_stream_key = None;
-        assert!(matches!(
-            h.write().unwrap_err(),
-            OuterHeaderWriteError::MissingField(tag::PROTECTED_STREAM_KEY)
-        ));
-    }
-
-    #[test]
-    fn v3_missing_stream_start_bytes_errors() {
-        let mut h = minimal_v3_header();
-        h.stream_start_bytes = None;
-        assert!(matches!(
-            h.write().unwrap_err(),
-            OuterHeaderWriteError::MissingField(tag::STREAM_START_BYTES)
-        ));
-    }
-
-    #[test]
-    fn v3_missing_inner_stream_algorithm_errors() {
-        let mut h = minimal_v3_header();
-        h.inner_stream_algorithm = None;
-        assert!(matches!(
-            h.write().unwrap_err(),
-            OuterHeaderWriteError::MissingField(tag::INNER_RANDOM_STREAM_ID)
-        ));
-    }
-
-    #[test]
-    fn v4_missing_kdf_parameters_errors() {
-        let mut h = minimal_v4_header();
-        h.kdf_parameters = None;
-        assert!(matches!(
-            h.write().unwrap_err(),
-            OuterHeaderWriteError::MissingField(tag::KDF_PARAMETERS)
-        ));
-    }
+    // The former "write fails when field X is None" cluster
+    // (`v3_missing_transform_seed_errors` and siblings, plus
+    // `v4_missing_kdf_parameters_errors`) tested a state that the
+    // `VersionFields` enum now makes unrepresentable: a V3 arm always carries
+    // all five V3 fields, and a V4 arm always carries kdf_parameters. There is
+    // no `None` to construct, so those tests were deleted — the type system is
+    // the enforcement point now.
 
     #[test]
     fn writes_tags_in_ascending_numeric_order() {
@@ -1210,14 +1170,26 @@ mod tests {
     #[test]
     fn inner_stream_algorithm_chacha20_round_trips() {
         let mut h = minimal_v3_header();
-        h.inner_stream_algorithm = Some(InnerStreamAlgorithm::ChaCha20);
+        if let VersionFields::V3 {
+            inner_stream_algorithm,
+            ..
+        } = &mut h.version_fields
+        {
+            *inner_stream_algorithm = InnerStreamAlgorithm::ChaCha20;
+        }
         assert_roundtrip(&h);
     }
 
     #[test]
     fn inner_stream_algorithm_none_round_trips() {
         let mut h = minimal_v3_header();
-        h.inner_stream_algorithm = Some(InnerStreamAlgorithm::None);
+        if let VersionFields::V3 {
+            inner_stream_algorithm,
+            ..
+        } = &mut h.version_fields
+        {
+            *inner_stream_algorithm = InnerStreamAlgorithm::None;
+        }
         assert_roundtrip(&h);
     }
 }
