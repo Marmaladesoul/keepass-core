@@ -95,11 +95,7 @@ fn move_entry_updates_location_and_previous_parent_and_round_trips() {
         .expect("add_entry");
 
     // Sanity: add_entry stamped location_changed from the clock.
-    let before = kdbx
-        .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("added entry");
+    let before = kdbx.vault().entry(id).expect("added entry");
     assert_eq!(before.previous_parent_group, None);
     assert_eq!(before.times.location_changed, Some(add_at));
 
@@ -113,8 +109,7 @@ fn move_entry_updates_location_and_previous_parent_and_round_trips() {
 
     let after = kdbx
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
+        .entry(id)
         .expect("entry still findable after move");
     assert_eq!(
         after.previous_parent_group,
@@ -139,8 +134,7 @@ fn move_entry_updates_location_and_previous_parent_and_round_trips() {
         .unwrap();
     let round_tripped = reopened
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
+        .entry(id)
         .expect("moved entry survives save/re-open");
     assert_eq!(
         round_tripped.previous_parent_group,
@@ -181,8 +175,7 @@ fn move_entry_rejects_missing_destination_without_removing() {
     // The entry must still be in its original home, untouched.
     let still_here = kdbx
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
+        .entry(id)
         .expect("entry not removed on failed move");
     assert_eq!(
         still_here.previous_parent_group, None,

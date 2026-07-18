@@ -96,11 +96,7 @@ fn edit_entry_snapshot_policy_records_pre_edit_state_and_round_trips() {
     })
     .unwrap();
 
-    let edited = kdbx
-        .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("entry findable after edit");
+    let edited = kdbx.vault().entry(id).expect("entry findable after edit");
 
     // New values applied.
     assert_eq!(edited.password, "hunter3");
@@ -125,8 +121,7 @@ fn edit_entry_snapshot_policy_records_pre_edit_state_and_round_trips() {
         .unwrap();
     let after = reopened
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
+        .entry(id)
         .expect("entry survives round-trip");
     assert_eq!(after.password, "hunter3");
     assert_eq!(after.title, "Gmail Work");
@@ -163,11 +158,7 @@ fn edit_entry_no_snapshot_policy_skips_history_and_still_stamps_last_modified() 
     })
     .unwrap();
 
-    let edited = kdbx
-        .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("entry");
+    let edited = kdbx.vault().entry(id).expect("entry");
     assert_eq!(edited.title, "Fixed");
     assert_eq!(edited.times.last_modification_time, Some(t1));
     assert!(
@@ -212,12 +203,7 @@ fn snapshot_if_older_than_coalesces_within_the_window() {
     )
     .unwrap();
     assert_eq!(
-        kdbx.vault()
-            .iter_entries()
-            .find(|e| e.id == id)
-            .unwrap()
-            .history
-            .len(),
+        kdbx.vault().entry(id).unwrap().history.len(),
         1,
         "first edit with empty history must snapshot"
     );
@@ -235,11 +221,7 @@ fn snapshot_if_older_than_coalesces_within_the_window() {
         },
     )
     .unwrap();
-    let after = kdbx
-        .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("entry");
+    let after = kdbx.vault().entry(id).expect("entry");
     assert_eq!(after.title, "Coalesce v2");
     assert_eq!(
         after.history.len(),
@@ -284,15 +266,7 @@ fn snapshot_if_older_than_takes_new_snapshot_past_the_window() {
         },
     )
     .unwrap();
-    assert_eq!(
-        kdbx.vault()
-            .iter_entries()
-            .find(|e| e.id == id)
-            .unwrap()
-            .history
-            .len(),
-        1
-    );
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 1);
 
     handle.set(t2);
     kdbx.edit_entry(
@@ -303,11 +277,7 @@ fn snapshot_if_older_than_takes_new_snapshot_past_the_window() {
         },
     )
     .unwrap();
-    let after = kdbx
-        .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("entry");
+    let after = kdbx.vault().entry(id).expect("entry");
     assert_eq!(after.title, "WindowedV v2");
     assert_eq!(
         after.history.len(),
@@ -354,7 +324,7 @@ fn assert_truncates_to(cap: usize, edits: usize) {
         .unwrap();
     }
 
-    let e = kdbx.vault().iter_entries().find(|e| e.id == id).unwrap();
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(
         e.history.len(),
         cap,

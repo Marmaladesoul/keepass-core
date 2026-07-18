@@ -142,13 +142,6 @@ fn reopen_with_clock(bytes: Vec<u8>, at: DateTime<Utc>) -> Kdbx<Unlocked> {
         .unwrap()
 }
 
-fn find_entry(kdbx: &Kdbx<Unlocked>, id: EntryId) -> &keepass_core::model::Entry {
-    kdbx.vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("entry present")
-}
-
 // ---------------------------------------------------------------------
 // EntryEditor::remove_history_at / clear_history
 // ---------------------------------------------------------------------
@@ -159,7 +152,7 @@ fn remove_history_at_valid_index_drops_that_entry_and_shifts_the_rest() {
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4"]);
     // history now carries [v1, v2, v3]; live password is v4.
-    assert_eq!(find_entry(&kdbx, id).history.len(), 3);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 3);
 
     clock.set(t0 + Duration::minutes(10));
     let removed = kdbx
@@ -167,7 +160,7 @@ fn remove_history_at_valid_index_drops_that_entry_and_shifts_the_rest() {
         .unwrap();
     assert!(removed);
 
-    let hist = &find_entry(&kdbx, id).history;
+    let hist = &kdbx.vault().entry(id).unwrap().history;
     assert_eq!(hist.len(), 2);
     assert_eq!(hist[0].password, "v1");
     assert_eq!(hist[1].password, "v3");
@@ -178,14 +171,14 @@ fn remove_history_at_out_of_range_returns_false_and_preserves_history() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2"]);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 1);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 1);
 
     clock.set(t0 + Duration::minutes(5));
     let removed = kdbx
         .edit_entry(id, HistoryPolicy::NoSnapshot, |e| e.remove_history_at(99))
         .unwrap();
     assert!(!removed);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 1);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 1);
 }
 
 #[test]
@@ -193,7 +186,7 @@ fn clear_history_drops_all_entries_and_returns_count() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4"]);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 3);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 3);
 
     clock.set(t0 + Duration::minutes(10));
     let dropped = kdbx
@@ -206,7 +199,7 @@ fn clear_history_drops_all_entries_and_returns_count() {
         })
         .unwrap();
     assert_eq!(dropped, 3);
-    assert!(find_entry(&kdbx, id).history.is_empty());
+    assert!(kdbx.vault().entry(id).unwrap().history.is_empty());
 }
 
 #[test]
@@ -214,7 +207,7 @@ fn clear_history_on_empty_returns_zero_without_side_effects() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1"]);
-    assert!(find_entry(&kdbx, id).history.is_empty());
+    assert!(kdbx.vault().entry(id).unwrap().history.is_empty());
 
     let dropped = kdbx
         // `clear_history` as a method pointer doesn't bridge the
@@ -226,7 +219,7 @@ fn clear_history_on_empty_returns_zero_without_side_effects() {
         })
         .unwrap();
     assert_eq!(dropped, 0);
-    assert!(find_entry(&kdbx, id).history.is_empty());
+    assert!(kdbx.vault().entry(id).unwrap().history.is_empty());
 }
 
 // ---------------------------------------------------------------------
@@ -248,7 +241,7 @@ fn restore_with_snapshot_policy_pushes_pre_restore_and_restores_content() {
     kdbx.restore_entry_from_history(id, 0, HistoryPolicy::Snapshot)
         .unwrap();
 
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(e.password, "v1", "live content restored from snapshot");
     // history now carries v1, v2, AND the pre-restore v3 snapshot.
     assert_eq!(e.history.len(), 3);
@@ -356,7 +349,7 @@ fn restore_copies_every_content_field_from_snapshot() {
         .unwrap();
 
     // --- One assertion per restored field ---------------------------
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(e.title, "v1-title");
     assert_eq!(e.username, "v1-user");
     assert_eq!(e.password, "v1-pass");
@@ -392,7 +385,7 @@ fn restore_with_no_snapshot_policy_leaves_history_length_unchanged() {
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3"]);
     // history = [v1, v2]; live = v3.
-    let hist_len_before = find_entry(&kdbx, id).history.len();
+    let hist_len_before = kdbx.vault().entry(id).unwrap().history.len();
     assert_eq!(hist_len_before, 2);
 
     let t_restore = t0 + Duration::hours(1);
@@ -400,7 +393,7 @@ fn restore_with_no_snapshot_policy_leaves_history_length_unchanged() {
     kdbx.restore_entry_from_history(id, 1, HistoryPolicy::NoSnapshot)
         .unwrap();
 
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(e.password, "v2", "live content restored from snapshot");
     assert_eq!(e.history.len(), hist_len_before);
     assert_eq!(e.times.last_modification_time, Some(t_restore));
@@ -431,7 +424,7 @@ fn restore_with_out_of_range_index_rejects_with_typed_error() {
     }
 
     // No mutation: content is still v2, history is still [v1].
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(e.password, "v2");
     assert_eq!(e.history.len(), 1);
 }
@@ -451,7 +444,7 @@ fn restore_keeps_live_unknown_xml_and_does_not_roll_back_to_snapshot_unknown_xml
     // Sanity on the fixture shape before we do anything.
     let id = kdbx.vault().iter_entries().next().unwrap().id;
     {
-        let e = find_entry(&kdbx, id);
+        let e = kdbx.vault().entry(id).unwrap();
         assert_eq!(e.title, "Current");
         assert_eq!(e.history.len(), 1);
         let live_tags: Vec<_> = e.unknown_xml.iter().map(|u| &u.tag).collect();
@@ -468,7 +461,7 @@ fn restore_keeps_live_unknown_xml_and_does_not_roll_back_to_snapshot_unknown_xml
     kdbx.restore_entry_from_history(id, 0, HistoryPolicy::Snapshot)
         .unwrap();
 
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     // Content came from the snapshot.
     assert_eq!(e.title, "Original");
     // Unknown XML stayed on the live entry — NOT rolled back from snap.
@@ -523,7 +516,7 @@ fn restore_preserves_attachment_refs_through_save_and_reopen() {
     })
     .unwrap();
     {
-        let e = find_entry(&kdbx, id);
+        let e = kdbx.vault().entry(id).unwrap();
         assert!(e.attachments.is_empty(), "live entry detached");
         assert_eq!(e.history.len(), 1);
         assert_eq!(
@@ -537,12 +530,12 @@ fn restore_preserves_attachment_refs_through_save_and_reopen() {
     clock.set(t0 + Duration::minutes(3));
     kdbx.restore_entry_from_history(id, 0, HistoryPolicy::NoSnapshot)
         .unwrap();
-    assert_eq!(find_entry(&kdbx, id).attachments.len(), 1);
+    assert_eq!(kdbx.vault().entry(id).unwrap().attachments.len(), 1);
 
     // Save and re-open; the binary bytes must still be there.
     let bytes = kdbx.save_to_bytes().unwrap();
     let reopened = reopen_with_clock(bytes, t0 + Duration::minutes(4));
-    let e = find_entry(&reopened, id);
+    let e = reopened.vault().entry(id).unwrap();
     assert_eq!(e.attachments.len(), 1);
     assert_eq!(e.attachments[0].name, "old-file.txt");
     let bin = &reopened.vault().binaries[e.attachments[0].ref_id as usize];
@@ -563,7 +556,7 @@ fn restore_under_snapshot_policy_truncates_per_history_max_items() {
 
     // Restore would have produced [v1, v2, pre-restore v3] = 3 entries;
     // max_items = 2 means the oldest (v1) is dropped post-push.
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(e.history.len(), 2);
     assert_eq!(e.history[0].password, "v2");
     assert_eq!(e.history[1].password, "v3");
@@ -583,7 +576,7 @@ fn restore_round_trips_through_save_and_reopen() {
 
     let bytes = kdbx.save_to_bytes().unwrap();
     let reopened = reopen_with_clock(bytes, t_restore + Duration::minutes(1));
-    let e = find_entry(&reopened, id);
+    let e = reopened.vault().entry(id).unwrap();
     assert_eq!(e.password, "v1");
     assert_eq!(e.history.len(), 3);
     assert_eq!(e.history[2].password, "v3");
@@ -601,14 +594,14 @@ fn prune_history_older_than_drops_only_snapshots_older_than_cutoff() {
     // Snapshots end up with last_modification_time at t0, t0+1m, t0+2m,
     // t0+3m (each pre-edit live state inherits the *current* clock).
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4", "v5"]);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 4);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 4);
 
     // Cutoff between t0+1m and t0+2m drops the two oldest (t0, t0+1m).
     let cutoff = t0 + Duration::seconds(90);
     let removed = kdbx.prune_history_older_than(cutoff);
     assert_eq!(removed, 2);
 
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(e.history.len(), 2);
     // Surviving snapshots are the two newest.
     assert_eq!(e.history[0].password, "v3");
@@ -620,14 +613,14 @@ fn prune_history_older_than_does_not_stamp_last_modification_time() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3"]);
-    let last_mod_before = find_entry(&kdbx, id).times.last_modification_time;
+    let last_mod_before = kdbx.vault().entry(id).unwrap().times.last_modification_time;
 
     // Advance the clock so that *if* prune incorrectly stamped, we'd see
     // the new value rather than the seed-time value.
     clock.set(t0 + Duration::hours(5));
     let _ = kdbx.prune_history_older_than(t0 + Duration::hours(1));
 
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(
         e.times.last_modification_time, last_mod_before,
         "pruning is bookkeeping, not a content edit — must not stamp last_modification_time"
@@ -649,12 +642,12 @@ fn prune_history_older_than_uses_strict_cutoff() {
     // Cutoff equal to the oldest snapshot's mtime: it survives.
     let removed = kdbx.prune_history_older_than(t0);
     assert_eq!(removed, 0, "mtime == cutoff is not 'older than'");
-    assert_eq!(find_entry(&kdbx, id).history.len(), 2);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 2);
 
     // Cutoff between the two snapshots' mtimes drops exactly one.
     let removed = kdbx.prune_history_older_than(t0 + Duration::seconds(30));
     assert_eq!(removed, 1);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 1);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 1);
 }
 
 #[test]
@@ -667,7 +660,7 @@ fn prune_history_older_than_round_trips_through_save_and_reopen() {
 
     let bytes = kdbx.save_to_bytes().unwrap();
     let reopened = reopen_with_clock(bytes, t0 + Duration::hours(2));
-    let e = find_entry(&reopened, id);
+    let e = reopened.vault().entry(id).unwrap();
     assert_eq!(e.history.len(), 1);
     assert_eq!(e.history[0].password, "v3");
     assert_eq!(e.password, "v4");
@@ -709,8 +702,8 @@ fn prune_history_older_than_walks_into_subgroups() {
     let removed = kdbx.prune_history_older_than(cutoff);
     assert_eq!(removed, 3, "2 from root entry + 1 from subgroup entry");
 
-    assert_eq!(find_entry(&kdbx, root_id).history.len(), 0);
-    assert_eq!(find_entry(&kdbx, sub_id).history.len(), 1);
+    assert_eq!(kdbx.vault().entry(root_id).unwrap().history.len(), 0);
+    assert_eq!(kdbx.vault().entry(sub_id).unwrap().history.len(), 1);
 }
 
 #[test]
@@ -738,7 +731,7 @@ fn trim_entry_history_applies_current_item_limit() {
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     // Build five snapshots (history.len() == 4 after the seed).
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4", "v5"]);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 4);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 4);
 
     // Lower the item cap; existing entry's history exceeds it.
     kdbx.set_history_max_items(2);
@@ -746,7 +739,7 @@ fn trim_entry_history_applies_current_item_limit() {
     let removed = kdbx.trim_entry_history(id).unwrap();
     assert_eq!(removed, 2);
 
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(e.history.len(), 2);
     // Oldest-first drop: surviving snapshots are the two newest.
     assert_eq!(e.history[0].password, "v3");
@@ -759,11 +752,11 @@ fn trim_entry_history_returns_zero_when_within_limits() {
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3"]);
     // history.len() == 2; default cap (10) is well above that.
-    assert_eq!(find_entry(&kdbx, id).history.len(), 2);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 2);
 
     let removed = kdbx.trim_entry_history(id).unwrap();
     assert_eq!(removed, 0);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 2);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 2);
 }
 
 #[test]
@@ -771,7 +764,7 @@ fn trim_entry_history_respects_size_limit() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4", "v5"]);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 4);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 4);
 
     // Disable the item budget so size is the only constraint, then set
     // a size cap small enough that only one snapshot can fit. Each
@@ -785,7 +778,7 @@ fn trim_entry_history_respects_size_limit() {
         removed >= 3,
         "expected at least 3 snapshots dropped, got {removed}"
     );
-    let surviving = find_entry(&kdbx, id).history.len();
+    let surviving = kdbx.vault().entry(id).unwrap().history.len();
     assert!(
         surviving <= 1,
         "size cap left {surviving} snapshots; expected <= 1"
@@ -797,14 +790,14 @@ fn trim_entry_history_does_not_stamp_last_modification_time() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1", "v2", "v3", "v4"]);
-    let last_mod_before = find_entry(&kdbx, id).times.last_modification_time;
+    let last_mod_before = kdbx.vault().entry(id).unwrap().times.last_modification_time;
 
     kdbx.set_history_max_items(1);
     // Advance the clock so an erroneous stamp would be visible.
     clock.set(t0 + Duration::hours(5));
     let _ = kdbx.trim_entry_history(id).unwrap();
 
-    let e = find_entry(&kdbx, id);
+    let e = kdbx.vault().entry(id).unwrap();
     assert_eq!(
         e.times.last_modification_time, last_mod_before,
         "trim is bookkeeping, not a content edit — must not stamp last_modification_time"

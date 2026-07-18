@@ -78,8 +78,7 @@ fn add_entry_round_trips_through_save_and_reopen_with_pinned_timestamps() {
     assert_eq!(kdbx.vault().total_entries(), entries_before + 1);
     let added = kdbx
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
+        .entry(id)
         .expect("added entry visible in vault");
     assert_eq!(added.title, "Gmail");
     assert_eq!(added.username, "alice@example.com");
@@ -106,8 +105,7 @@ fn add_entry_round_trips_through_save_and_reopen_with_pinned_timestamps() {
 
     let after = reopened
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
+        .entry(id)
         .expect("added entry still present after save/re-open");
     assert_eq!(after.title, "Gmail");
     assert_eq!(after.username, "alice@example.com");

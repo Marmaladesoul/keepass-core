@@ -28,8 +28,6 @@ use crate::tombstone::{
 };
 use crate::{MergeError, MergeOutcome, Resolution};
 
-use super::{remove_entry, replace_entry};
-
 /// Read-only walk of the resolution against the outcome. Returns the
 /// first violation found (single-pass, first-violation-wins).
 #[allow(clippy::too_many_lines)]
@@ -220,7 +218,7 @@ pub(super) fn apply_delete_edit_resolutions(
                 // Symmetric: restore from remote. Insert under the
                 // remote-mirrored parent if it exists locally; fall
                 // back to root.
-                match super::find_group_mut(local_root, *remote_parent) {
+                match local_root.group_mut(*remote_parent) {
                     Some(parent) => parent.entries.push(remote_entry.clone()),
                     None => local_root.entries.push(remote_entry.clone()),
                 }
@@ -231,7 +229,7 @@ pub(super) fn apply_delete_edit_resolutions(
             (DeleteEditChoice::AcceptRemoteDelete, None) => {
                 // Asymmetric: drop local's entry; tombstone propagates
                 // from remote via the standard tombstone-union path.
-                remove_entry(local_root, *id);
+                let _ = local_root.detach_entry(*id);
             }
             (DeleteEditChoice::AcceptRemoteDelete, Some(_)) => {
                 // Symmetric: the deletion is already in place on local;
@@ -294,7 +292,9 @@ pub(super) fn apply_entry_conflict_resolutions(
             &conflict.remote,
             remap.local_binaries(),
         );
-        replace_entry(local_root, conflict.entry_id, merged);
+        if let Some(slot) = local_root.entry_mut(conflict.entry_id) {
+            *slot = merged;
+        }
     }
 }
 

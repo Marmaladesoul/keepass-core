@@ -788,7 +788,12 @@ impl Kdbx<Unlocked> {
     /// the protector fails or the wrapped bytes can't be opened /
     /// produce non-UTF-8 output.
     pub fn reveal_password(&self, id: EntryId) -> Result<String, Error> {
-        let entry = find_entry(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let entry = self
+            .state
+            .vault
+            .root
+            .entry(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
         match (
             self.state.protector.as_ref(),
             self.state.protected_fields.get(&id),
@@ -819,7 +824,12 @@ impl Kdbx<Unlocked> {
     /// [`ProtectorError::Open`] (wrapped in [`Error::Protector`]) on
     /// protector failure or non-UTF-8 output.
     pub fn reveal_custom_field(&self, id: EntryId, key: &str) -> Result<Option<String>, Error> {
-        let entry = find_entry(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let entry = self
+            .state
+            .vault
+            .root
+            .entry(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
         let Some(cf) = entry.custom_fields.iter().find(|c| c.key == key) else {
             return Ok(None);
         };
@@ -892,7 +902,7 @@ impl Kdbx<Unlocked> {
     ///
     /// # Panics
     ///
-    /// Does not panic under any input. The second `find_group_mut`
+    /// Does not panic under any input. The second `group_mut`
     /// call is `.expect()`ed because the first call has already
     /// proved the group exists.
     pub fn add_entry(
@@ -911,7 +921,7 @@ impl Kdbx<Unlocked> {
         };
 
         // Locate the target parent up front so we fail early.
-        if find_group_mut(&mut self.state.vault.root, parent).is_none() {
+        if self.state.vault.root.group(parent).is_none() {
             return Err(ModelError::GroupNotFound(parent));
         }
 
@@ -949,7 +959,11 @@ impl Kdbx<Unlocked> {
         };
 
         // Re-locate under &mut; infallible because we just checked.
-        let target = find_group_mut(&mut self.state.vault.root, parent)
+        let target = self
+            .state
+            .vault
+            .root
+            .group_mut(parent)
             .expect("group existence checked above");
         target.entries.push(entry);
         Ok(EntryId(uuid))
@@ -965,7 +979,11 @@ impl Kdbx<Unlocked> {
     /// - [`ModelError::EntryNotFound`] if no entry with that id exists
     ///   anywhere in the vault.
     pub fn delete_entry(&mut self, id: EntryId) -> Result<(), ModelError> {
-        let (removed, _old_parent) = remove_entry_with_parent(&mut self.state.vault.root, id)
+        let (removed, _old_parent) = self
+            .state
+            .vault
+            .root
+            .detach_entry(id)
             .ok_or(ModelError::EntryNotFound(id))?;
         let now = self.state.clock.now();
         self.state.vault.deleted_objects.push(DeletedObject {
@@ -1003,24 +1021,32 @@ impl Kdbx<Unlocked> {
     ///
     /// # Panics
     ///
-    /// Does not panic under any input. The second `find_group_mut`
+    /// Does not panic under any input. The second `group_mut`
     /// call is `.expect()`ed because the first call has already
     /// proved the destination exists.
     pub fn move_entry(&mut self, id: EntryId, new_parent: GroupId) -> Result<(), ModelError> {
         // Check the destination first so a failure leaves the entry
         // where it was.
-        if find_group_mut(&mut self.state.vault.root, new_parent).is_none() {
+        if self.state.vault.root.group(new_parent).is_none() {
             return Err(ModelError::GroupNotFound(new_parent));
         }
 
-        let (mut entry, old_parent) = remove_entry_with_parent(&mut self.state.vault.root, id)
+        let (mut entry, old_parent) = self
+            .state
+            .vault
+            .root
+            .detach_entry(id)
             .ok_or(ModelError::EntryNotFound(id))?;
 
         entry.previous_parent_group = Some(old_parent);
         let now = self.state.clock.now();
         entry.times.location_changed = Some(now);
 
-        let target = find_group_mut(&mut self.state.vault.root, new_parent)
+        let target = self
+            .state
+            .vault
+            .root
+            .group_mut(new_parent)
             .expect("destination existence checked above");
         target.entries.push(entry);
         Ok(())
@@ -1085,8 +1111,12 @@ impl Kdbx<Unlocked> {
             .as_ref()
             .and_then(|_| self.state.protected_fields.get(&id).cloned());
 
-        let entry =
-            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let entry = self
+            .state
+            .vault
+            .root
+            .entry_mut(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
 
         // Restore plaintext on the entry from the side-table so the
         // editor closure reads "current" values from `entry.password`
@@ -1202,8 +1232,12 @@ impl Kdbx<Unlocked> {
     /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
     pub fn touch_entry(&mut self, id: EntryId) -> Result<(), ModelError> {
         let now = self.state.clock.now();
-        let entry =
-            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let entry = self
+            .state
+            .vault
+            .root
+            .entry_mut(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
         entry.times.last_access_time = Some(now);
         Ok(())
     }
@@ -1228,8 +1262,12 @@ impl Kdbx<Unlocked> {
     ///
     /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
     pub fn clear_entry_last_access(&mut self, id: EntryId) -> Result<(), ModelError> {
-        let entry =
-            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let entry = self
+            .state
+            .vault
+            .root
+            .entry_mut(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
         entry.times.last_access_time = None;
         Ok(())
     }
@@ -1303,8 +1341,12 @@ impl Kdbx<Unlocked> {
         let history_max_items = self.state.vault.meta.history_max_items;
         let history_max_size = self.state.vault.meta.history_max_size;
 
-        let entry =
-            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let entry = self
+            .state
+            .vault
+            .root
+            .entry_mut(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
 
         if history_index >= entry.history.len() {
             return Err(ModelError::HistoryIndexOutOfRange {
@@ -1398,8 +1440,12 @@ impl Kdbx<Unlocked> {
     pub fn trim_entry_history(&mut self, id: EntryId) -> Result<u32, ModelError> {
         let history_max_items = self.state.vault.meta.history_max_items;
         let history_max_size = self.state.vault.meta.history_max_size;
-        let entry =
-            find_entry_mut(&mut self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let entry = self
+            .state
+            .vault
+            .root
+            .entry_mut(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
         let before = entry.history.len();
         truncate_history(&mut entry.history, history_max_items, history_max_size);
         let removed = before - entry.history.len();
@@ -1430,23 +1476,17 @@ impl Kdbx<Unlocked> {
     /// records are written: history snapshots are a per-entry
     /// implementation detail, not first-class vault objects.
     pub fn prune_history_older_than(&mut self, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
-        fn walk(group: &mut Group, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
-            let mut removed = 0;
-            for entry in &mut group.entries {
-                let before = entry.history.len();
-                entry.history.retain(|snap| {
-                    snap.times
-                        .last_modification_time
-                        .is_some_and(|t| t >= cutoff)
-                });
-                removed += before - entry.history.len();
-            }
-            for child in &mut group.groups {
-                removed += walk(child, cutoff);
-            }
-            removed
+        let mut removed = 0;
+        for entry in self.state.vault.root.iter_entries_mut() {
+            let before = entry.history.len();
+            entry.history.retain(|snap| {
+                snap.times
+                    .last_modification_time
+                    .is_some_and(|t| t >= cutoff)
+            });
+            removed += before - entry.history.len();
         }
-        walk(&mut self.state.vault.root, cutoff)
+        removed
     }
 
     // -----------------------------------------------------------------
@@ -1545,11 +1585,16 @@ impl Kdbx<Unlocked> {
     ///
     /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
     pub fn export_entry(&self, id: EntryId) -> Result<PortableEntry, ModelError> {
-        let entry = find_entry(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let entry = self
+            .state
+            .vault
+            .root
+            .entry(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
 
         // Collect the set of binary ref_ids referenced by the entry
-        // or any of its history snapshots. Same live+history walk
-        // as `collect_attachment_refs` (defined for pool GC).
+        // or any of its history snapshots. Same live+history walk the
+        // binary-pool GC (`gc_binaries_pool`) does over the whole tree.
         let mut binary_refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for a in &entry.attachments {
             binary_refs.insert(a.ref_id);
@@ -1656,7 +1701,7 @@ impl Kdbx<Unlocked> {
     ///
     /// # Panics
     ///
-    /// Does not panic under any input. The second `find_group_mut`
+    /// Does not panic under any input. The second `group_mut`
     /// call after UUID validation is `.expect()`ed because the
     /// first call has already proved the parent exists.
     pub fn import_entry(
@@ -1665,7 +1710,7 @@ impl Kdbx<Unlocked> {
         mut entry: PortableEntry,
         mint_new_uuid: bool,
     ) -> Result<EntryId, ModelError> {
-        if find_group(&self.state.vault.root, parent).is_none() {
+        if self.state.vault.root.group(parent).is_none() {
             return Err(ModelError::GroupNotFound(parent));
         }
 
@@ -1741,7 +1786,11 @@ impl Kdbx<Unlocked> {
         entry.entry.previous_parent_group = None;
 
         let new_id = entry.entry.id;
-        let target = find_group_mut(&mut self.state.vault.root, parent)
+        let target = self
+            .state
+            .vault
+            .root
+            .group_mut(parent)
             .expect("parent existence checked at the top of this method");
         target.entries.push(entry.entry);
         Ok(new_id)
@@ -1866,8 +1915,12 @@ impl Kdbx<Unlocked> {
     /// - [`ModelError::EntryNotFound`] if `id` is absent.
     pub fn recycle_entry(&mut self, id: EntryId) -> Result<Option<GroupId>, ModelError> {
         // Validate existence + get the entry's current parent group.
-        let parent =
-            entry_parent_group(&self.state.vault.root, id).ok_or(ModelError::EntryNotFound(id))?;
+        let parent = self
+            .state
+            .vault
+            .root
+            .entry_parent(id)
+            .ok_or(ModelError::EntryNotFound(id))?;
 
         // `recycle_bin_enabled = false` → hard delete, no bin.
         if !self.state.vault.meta.recycle_bin_enabled
@@ -1884,8 +1937,12 @@ impl Kdbx<Unlocked> {
         // Already inside the bin? Walk ancestors from the parent
         // group up to root; any ancestor == bin → no-op.
         if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
-            if find_group(&self.state.vault.root, bin_id).is_some()
-                && group_is_descendant_of(&self.state.vault.root, parent, bin_id)
+            if self
+                .state
+                .vault
+                .root
+                .group(bin_id)
+                .is_some_and(|bin| bin.group(parent).is_some())
             {
                 return Ok(None);
             }
@@ -1907,7 +1964,7 @@ impl Kdbx<Unlocked> {
     ///   itself — "group can't be its own ancestor" is the wire
     ///   invariant, and recycling the bin into itself trips it.
     pub fn recycle_group(&mut self, id: GroupId) -> Result<Option<GroupId>, ModelError> {
-        if find_group(&self.state.vault.root, id).is_none() {
+        if self.state.vault.root.group(id).is_none() {
             return Err(ModelError::GroupNotFound(id));
         }
         if id == self.state.vault.root.id {
@@ -1924,15 +1981,19 @@ impl Kdbx<Unlocked> {
 
         // Is `id` the bin itself? → CircularMove.
         if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
-            if bin_id == id && find_group(&self.state.vault.root, bin_id).is_some() {
+            if bin_id == id && self.state.vault.root.group(bin_id).is_some() {
                 return Err(ModelError::CircularMove {
                     moving: id,
                     new_parent: bin_id,
                 });
             }
             // Already inside the bin?
-            if find_group(&self.state.vault.root, bin_id).is_some()
-                && group_is_descendant_of(&self.state.vault.root, id, bin_id)
+            if self
+                .state
+                .vault
+                .root
+                .group(bin_id)
+                .is_some_and(|bin| bin.group(id).is_some())
             {
                 return Ok(None);
             }
@@ -1966,7 +2027,7 @@ impl Kdbx<Unlocked> {
         // `&mut Vec` while calling `&mut self` delete methods. A
         // dangling `recycle_bin_uuid` resolves to `None` here and
         // we early-return 0.
-        let Some(bin) = find_group(&self.state.vault.root, bin_id) else {
+        let Some(bin) = self.state.vault.root.group(bin_id) else {
             return Ok(0);
         };
         let entry_ids: Vec<EntryId> = bin.entries.iter().map(|e| e.id).collect();
@@ -1988,7 +2049,7 @@ impl Kdbx<Unlocked> {
     /// the lazy-creation invariants.
     fn find_or_create_recycle_bin(&mut self) -> Result<GroupId, ModelError> {
         if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
-            if find_group(&self.state.vault.root, bin_id).is_some() {
+            if self.state.vault.root.group(bin_id).is_some() {
                 return Ok(bin_id);
             }
             // Dangling — fall through and mint a fresh bin. The
@@ -2094,7 +2155,7 @@ impl Kdbx<Unlocked> {
     ///
     /// # Panics
     ///
-    /// Does not panic under any input. The second `find_group_mut`
+    /// Does not panic under any input. The second `group_mut`
     /// call is `.expect()`ed because the first call has already
     /// proved the parent exists.
     pub fn add_group(
@@ -2112,7 +2173,7 @@ impl Kdbx<Unlocked> {
             None => fresh_uuid(&self.state.vault),
         };
 
-        if find_group_mut(&mut self.state.vault.root, parent).is_none() {
+        if self.state.vault.root.group(parent).is_none() {
             return Err(ModelError::GroupNotFound(parent));
         }
 
@@ -2144,7 +2205,11 @@ impl Kdbx<Unlocked> {
             unknown_xml: Vec::new(),
         };
 
-        let target = find_group_mut(&mut self.state.vault.root, parent)
+        let target = self
+            .state
+            .vault
+            .root
+            .group_mut(parent)
             .expect("parent existence checked above");
         target.groups.push(group);
         Ok(GroupId(uuid))
@@ -2167,7 +2232,12 @@ impl Kdbx<Unlocked> {
             return Err(ModelError::CannotDeleteRoot);
         }
         let now = self.state.clock.now();
-        let removed = remove_group_with_parent(&mut self.state.vault.root, id)
+        let removed = self
+            .state
+            .vault
+            .root
+            .detach_group(id)
+            .map(|(g, _)| g)
             .ok_or(ModelError::GroupNotFound(id))?;
         // Tombstone every entry and subgroup recursively, in addition
         // to the group itself.
@@ -2202,7 +2272,7 @@ impl Kdbx<Unlocked> {
     ///
     /// # Panics
     ///
-    /// Does not panic under any input. The final `find_group_mut`
+    /// Does not panic under any input. The final `group_mut`
     /// call is `.expect()`ed because the destination's existence was
     /// already proved earlier in the function.
     pub fn move_group(&mut self, id: GroupId, new_parent: GroupId) -> Result<(), ModelError> {
@@ -2213,29 +2283,37 @@ impl Kdbx<Unlocked> {
         }
 
         // Check the destination exists before touching anything.
-        if find_group(&self.state.vault.root, new_parent).is_none() {
+        if self.state.vault.root.group(new_parent).is_none() {
             return Err(ModelError::GroupNotFound(new_parent));
         }
 
         // Cycle check: walk `id`'s subtree (including `id` itself)
         // and reject if `new_parent` lives inside it.
-        let Some(source_subtree) = find_group(&self.state.vault.root, id) else {
+        let Some(source_subtree) = self.state.vault.root.group(id) else {
             return Err(ModelError::GroupNotFound(id));
         };
-        if subtree_contains(source_subtree, new_parent) {
+        if source_subtree.group(new_parent).is_some() {
             return Err(ModelError::CircularMove {
                 moving: id,
                 new_parent,
             });
         }
 
-        let (mut group, old_parent) = remove_group_with_parent_pair(&mut self.state.vault.root, id)
+        let (mut group, old_parent) = self
+            .state
+            .vault
+            .root
+            .detach_group(id)
             .ok_or(ModelError::GroupNotFound(id))?;
         let now = self.state.clock.now();
         group.previous_parent_group = Some(old_parent);
         group.times.location_changed = Some(now);
 
-        let target = find_group_mut(&mut self.state.vault.root, new_parent)
+        let target = self
+            .state
+            .vault
+            .root
+            .group_mut(new_parent)
             .expect("destination existence checked above");
         target.groups.push(group);
         Ok(())
@@ -2266,7 +2344,7 @@ impl Kdbx<Unlocked> {
     ///
     /// # Panics
     ///
-    /// Does not panic under any input. The final `find_group_mut`
+    /// Does not panic under any input. The final `group_mut`
     /// call is `.expect()`ed because the destination's existence was
     /// already proved earlier in the function.
     pub fn move_group_to_position(
@@ -2279,27 +2357,35 @@ impl Kdbx<Unlocked> {
             return Err(ModelError::CannotDeleteRoot);
         }
 
-        if find_group(&self.state.vault.root, new_parent).is_none() {
+        if self.state.vault.root.group(new_parent).is_none() {
             return Err(ModelError::GroupNotFound(new_parent));
         }
 
-        let Some(source_subtree) = find_group(&self.state.vault.root, id) else {
+        let Some(source_subtree) = self.state.vault.root.group(id) else {
             return Err(ModelError::GroupNotFound(id));
         };
-        if subtree_contains(source_subtree, new_parent) {
+        if source_subtree.group(new_parent).is_some() {
             return Err(ModelError::CircularMove {
                 moving: id,
                 new_parent,
             });
         }
 
-        let (mut group, old_parent) = remove_group_with_parent_pair(&mut self.state.vault.root, id)
+        let (mut group, old_parent) = self
+            .state
+            .vault
+            .root
+            .detach_group(id)
             .ok_or(ModelError::GroupNotFound(id))?;
         let now = self.state.clock.now();
         group.previous_parent_group = Some(old_parent);
         group.times.location_changed = Some(now);
 
-        let target = find_group_mut(&mut self.state.vault.root, new_parent)
+        let target = self
+            .state
+            .vault
+            .root
+            .group_mut(new_parent)
             .expect("destination existence checked above");
         let clamped = position.min(target.groups.len());
         target.groups.insert(clamped, group);
@@ -2323,8 +2409,12 @@ impl Kdbx<Unlocked> {
         f: impl FnOnce(&mut GroupEditor<'_>) -> R,
     ) -> Result<R, ModelError> {
         let now = self.state.clock.now();
-        let group =
-            find_group_mut(&mut self.state.vault.root, id).ok_or(ModelError::GroupNotFound(id))?;
+        let group = self
+            .state
+            .vault
+            .root
+            .group_mut(id)
+            .ok_or(ModelError::GroupNotFound(id))?;
         let result = {
             let mut editor = GroupEditor::new(group);
             f(&mut editor)
@@ -2537,62 +2627,6 @@ impl Kdbx<Unlocked> {
 // Vault-tree helpers used by the mutation API.
 // ---------------------------------------------------------------------------
 
-/// Read-only sibling of [`find_group_mut`] used by `move_group`'s
-/// cycle check, where mutating the source subtree before the check
-/// passes would be wrong.
-fn find_group(root: &Group, id: GroupId) -> Option<&Group> {
-    if root.id == id {
-        return Some(root);
-    }
-    for child in &root.groups {
-        if let Some(hit) = find_group(child, id) {
-            return Some(hit);
-        }
-    }
-    None
-}
-
-/// Whether `target` exists anywhere in the subtree rooted at `root`,
-/// including at `root` itself. Used by `move_group` to reject moves
-/// that would make a group a descendant of itself.
-fn subtree_contains(root: &Group, target: GroupId) -> bool {
-    if root.id == target {
-        return true;
-    }
-    root.groups.iter().any(|g| subtree_contains(g, target))
-}
-
-/// Remove the group with the given id from wherever it lives in the
-/// tree rooted at `root`, returning the removed subtree. Used by
-/// `delete_group`. The root group cannot be removed this way — its
-/// id check happens before this is called.
-fn remove_group_with_parent(root: &mut Group, id: GroupId) -> Option<Group> {
-    if let Some(pos) = root.groups.iter().position(|g| g.id == id) {
-        return Some(root.groups.remove(pos));
-    }
-    for child in &mut root.groups {
-        if let Some(g) = remove_group_with_parent(child, id) {
-            return Some(g);
-        }
-    }
-    None
-}
-
-/// Variant of [`remove_group_with_parent`] that also returns the
-/// [`GroupId`] of the parent the removed subtree came out of, used by
-/// `move_group` to populate `previous_parent_group`.
-fn remove_group_with_parent_pair(root: &mut Group, id: GroupId) -> Option<(Group, GroupId)> {
-    if let Some(pos) = root.groups.iter().position(|g| g.id == id) {
-        return Some((root.groups.remove(pos), root.id));
-    }
-    for child in &mut root.groups {
-        if let Some(pair) = remove_group_with_parent_pair(child, id) {
-            return Some(pair);
-        }
-    }
-    None
-}
-
 /// Build a [`DeletedObject`] tombstone (stamped `at`) for the group
 /// itself plus every entry and every subgroup recursively under it,
 /// in depth-first order. Used by `delete_group` so a peer replica
@@ -2625,39 +2659,6 @@ fn push_subtree_tombstones(
         uuid: group.id.0,
         deleted_at: Some(at),
     });
-}
-
-/// Walk the tree rooted at `root` looking for a group with the given id.
-/// Returns a mutable reference to the first match, or `None`.
-fn find_group_mut(root: &mut Group, id: GroupId) -> Option<&mut Group> {
-    if root.id == id {
-        return Some(root);
-    }
-    for child in &mut root.groups {
-        if let Some(hit) = find_group_mut(child, id) {
-            return Some(hit);
-        }
-    }
-    None
-}
-
-/// Remove the entry with the given id from wherever it lives in the
-/// tree rooted at `root`. Returns the removed entry paired with the
-/// [`GroupId`] of the parent group it came out of, or `None` if no
-/// entry with that id exists anywhere in the subtree.
-///
-/// The parent id is what `move_entry` records in
-/// `entry.previous_parent_group` and what `delete_entry` ignores.
-fn remove_entry_with_parent(root: &mut Group, id: EntryId) -> Option<(Entry, GroupId)> {
-    if let Some(pos) = root.entries.iter().position(|e| e.id == id) {
-        return Some((root.entries.remove(pos), root.id));
-    }
-    for child in &mut root.groups {
-        if let Some(pair) = remove_entry_with_parent(child, id) {
-            return Some(pair);
-        }
-    }
-    None
 }
 
 /// `true` if `candidate` matches any existing entry id, group id, or
@@ -2794,7 +2795,7 @@ fn apply_pending_attaches(vault: &mut Vault, id: EntryId, pending: PendingBinary
         });
     }
 
-    if let Some(e) = find_entry_mut(&mut vault.root, id) {
+    if let Some(e) = vault.entry_mut(id) {
         e.attachments.extend(new_attachments);
     }
 }
@@ -2814,7 +2815,19 @@ fn apply_pending_attaches(vault: &mut Vault, id: EntryId, pending: PendingBinary
 /// shared between two entries survives a detach from one of them.
 fn gc_binaries_pool(vault: &mut Vault) {
     let mut in_use: HashSet<u32> = HashSet::new();
-    collect_attachment_refs(&vault.root, &mut in_use);
+    for e in vault.iter_entries() {
+        for a in &e.attachments {
+            in_use.insert(a.ref_id);
+        }
+        // History snapshots are themselves `Entry` values that carry
+        // their own attachment lists; dropping a pool entry a snapshot
+        // still references would corrupt the saved file.
+        for snap in &e.history {
+            for a in &snap.attachments {
+                in_use.insert(a.ref_id);
+            }
+        }
+    }
 
     let n = vault.binaries.len();
     let n_u32 = u32::try_from(n).expect("pool size fits u32");
@@ -2843,27 +2856,21 @@ fn gc_binaries_pool(vault: &mut Vault) {
         .collect();
     vault.binaries = kept;
 
-    renumber_attachments(&mut vault.root, &remap);
-}
-
-/// Collect every attachment `ref_id` referenced anywhere under
-/// `group`, including inside history snapshots — those are themselves
-/// `Entry` values that carry their own attachment lists, and
-/// dropping a pool entry a snapshot still references would corrupt
-/// the saved file.
-fn collect_attachment_refs(group: &Group, out: &mut HashSet<u32>) {
-    for e in &group.entries {
-        for a in &e.attachments {
-            out.insert(a.ref_id);
-        }
-        for snap in &e.history {
-            for a in &snap.attachments {
-                out.insert(a.ref_id);
+    // Rewrite every attachment ref_id (live + history) through the
+    // old->new index remap so the surviving references stay contiguous.
+    for e in vault.iter_entries_mut() {
+        for a in &mut e.attachments {
+            if let Some(Some(new)) = remap.get(a.ref_id as usize) {
+                a.ref_id = *new;
             }
         }
-    }
-    for child in &group.groups {
-        collect_attachment_refs(child, out);
+        for snap in &mut e.history {
+            for a in &mut snap.attachments {
+                if let Some(Some(new)) = remap.get(a.ref_id as usize) {
+                    a.ref_id = *new;
+                }
+            }
+        }
     }
 }
 
@@ -2891,7 +2898,24 @@ fn collect_attachment_refs(group: &Group, out: &mut HashSet<u32>) {
 /// walk it doesn't need.
 fn gc_custom_icons_pool(vault: &mut Vault) {
     let mut in_use: HashSet<uuid::Uuid> = HashSet::new();
-    collect_custom_icon_refs(&vault.root, &mut in_use);
+    // Group icons come from every group; entry icons come from every
+    // entry plus each of its history snapshots (a snapshot carries its
+    // own `custom_icon_uuid` that must keep its icon alive in the pool).
+    for g in vault.iter_groups() {
+        if let Some(u) = g.custom_icon_uuid {
+            in_use.insert(u);
+        }
+    }
+    for e in vault.iter_entries() {
+        if let Some(u) = e.custom_icon_uuid {
+            in_use.insert(u);
+        }
+        for snap in &e.history {
+            if let Some(u) = snap.custom_icon_uuid {
+                in_use.insert(u);
+            }
+        }
+    }
     vault.meta.custom_icons.retain(|c| in_use.contains(&c.uuid));
 
     // Dangling-ref sweep: any entry/group custom_icon_uuid that
@@ -2899,132 +2923,27 @@ fn gc_custom_icons_pool(vault: &mut Vault) {
     // Without this the wire format would carry an unresolvable
     // reference.
     let pool: HashSet<uuid::Uuid> = vault.meta.custom_icons.iter().map(|c| c.uuid).collect();
-    clear_dangling_custom_icons(&mut vault.root, &pool);
-}
-
-/// Collect every `custom_icon_uuid` referenced anywhere under
-/// `group`, including inside history snapshots — a snapshot carries
-/// its own `custom_icon_uuid` that must keep the referenced icon
-/// alive in the pool, same discipline as attachment refs.
-fn collect_custom_icon_refs(group: &Group, out: &mut HashSet<uuid::Uuid>) {
-    if let Some(u) = group.custom_icon_uuid {
-        out.insert(u);
-    }
-    for e in &group.entries {
-        if let Some(u) = e.custom_icon_uuid {
-            out.insert(u);
-        }
-        for snap in &e.history {
-            if let Some(u) = snap.custom_icon_uuid {
-                out.insert(u);
-            }
-        }
-    }
-    for child in &group.groups {
-        collect_custom_icon_refs(child, out);
-    }
-}
-
-/// Walk the tree and reset any `custom_icon_uuid` whose target is no
-/// longer in `pool`. Runs after the prune pass in
-/// [`gc_custom_icons_pool`].
-fn clear_dangling_custom_icons(group: &mut Group, pool: &HashSet<uuid::Uuid>) {
-    if let Some(u) = group.custom_icon_uuid {
-        if !pool.contains(&u) {
-            group.custom_icon_uuid = None;
-        }
-    }
-    for e in &mut group.entries {
-        if let Some(u) = e.custom_icon_uuid {
+    vault.for_each_group_mut(&mut |g| {
+        if let Some(u) = g.custom_icon_uuid {
             if !pool.contains(&u) {
-                e.custom_icon_uuid = None;
+                g.custom_icon_uuid = None;
             }
         }
-        for snap in &mut e.history {
-            if let Some(u) = snap.custom_icon_uuid {
+        for e in &mut g.entries {
+            if let Some(u) = e.custom_icon_uuid {
                 if !pool.contains(&u) {
-                    snap.custom_icon_uuid = None;
+                    e.custom_icon_uuid = None;
+                }
+            }
+            for snap in &mut e.history {
+                if let Some(u) = snap.custom_icon_uuid {
+                    if !pool.contains(&u) {
+                        snap.custom_icon_uuid = None;
+                    }
                 }
             }
         }
-    }
-    for child in &mut group.groups {
-        clear_dangling_custom_icons(child, pool);
-    }
-}
-
-fn renumber_attachments(group: &mut Group, remap: &[Option<u32>]) {
-    for e in &mut group.entries {
-        for a in &mut e.attachments {
-            if let Some(Some(new)) = remap.get(a.ref_id as usize) {
-                a.ref_id = *new;
-            }
-        }
-        for snap in &mut e.history {
-            for a in &mut snap.attachments {
-                if let Some(Some(new)) = remap.get(a.ref_id as usize) {
-                    a.ref_id = *new;
-                }
-            }
-        }
-    }
-    for child in &mut group.groups {
-        renumber_attachments(child, remap);
-    }
-}
-
-/// Return the [`GroupId`] of the group that directly contains the
-/// entry identified by `id`, or `None` if the entry isn't in the
-/// tree. Used by the recycle-bin helpers to detect "already inside
-/// the bin" via an ancestor walk.
-fn entry_parent_group(root: &Group, id: EntryId) -> Option<GroupId> {
-    if root.entries.iter().any(|e| e.id == id) {
-        return Some(root.id);
-    }
-    for child in &root.groups {
-        if let Some(p) = entry_parent_group(child, id) {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// `true` if the group identified by `candidate` is `ancestor`
-/// itself OR lives anywhere beneath `ancestor` in the tree rooted
-/// at `root`. Used by [`Kdbx::recycle_entry`] /
-/// [`Kdbx::recycle_group`] to short-circuit when the target is
-/// already inside the recycle bin.
-fn group_is_descendant_of(root: &Group, candidate: GroupId, ancestor: GroupId) -> bool {
-    if let Some(a) = find_group(root, ancestor) {
-        if a.id == candidate {
-            return true;
-        }
-        return group_contains(a, candidate);
-    }
-    false
-}
-
-/// `true` if `group` (or any of its nested subgroups) has id
-/// `candidate`.
-fn group_contains(group: &Group, candidate: GroupId) -> bool {
-    if group.id == candidate {
-        return true;
-    }
-    group.groups.iter().any(|g| group_contains(g, candidate))
-}
-
-/// Read-only counterpart to [`find_entry_mut`]. Used by
-/// [`Kdbx::export_entry`], which is itself `&self`.
-fn find_entry(root: &Group, id: EntryId) -> Option<&Entry> {
-    if let Some(e) = root.entries.iter().find(|e| e.id == id) {
-        return Some(e);
-    }
-    for child in &root.groups {
-        if let Some(entry) = find_entry(child, id) {
-            return Some(entry);
-        }
-    }
-    None
+    });
 }
 
 /// Append `bin` to [`Vault::binaries`] if no existing binary has
@@ -3072,23 +2991,6 @@ fn remap_entry_refs(
             entry.custom_icon_uuid = Some(new);
         }
     }
-}
-
-/// Locate an entry by id anywhere in the tree rooted at `root`,
-/// returning a mutable reference for in-place field edits.
-fn find_entry_mut(root: &mut Group, id: EntryId) -> Option<&mut Entry> {
-    // Manual loop instead of `iter_mut().find(...)` + recursion:
-    // the borrow checker can't prove we don't reborrow through two
-    // different subtrees when we use combinators here.
-    if let Some(pos) = root.entries.iter().position(|e| e.id == id) {
-        return Some(&mut root.entries[pos]);
-    }
-    for child in &mut root.groups {
-        if let Some(entry) = find_entry_mut(child, id) {
-            return Some(entry);
-        }
-    }
-    None
 }
 
 /// Decide whether a mutation that carries `policy` should push a
@@ -3456,23 +3358,11 @@ fn wrap_vault_protected_fields(
     // One key fetch per bulk pass. Key is zeroed when this function returns.
     let key = protector.acquire_session_key()?;
     let mut map = ProtectedFieldMap::new();
-    walk_groups_for_wrap(&mut vault.root, &key, &mut map)?;
-    Ok(map)
-}
-
-fn walk_groups_for_wrap(
-    group: &mut Group,
-    key: &SessionKey,
-    map: &mut ProtectedFieldMap,
-) -> Result<(), ProtectorError> {
-    for entry in &mut group.entries {
-        let wrapped = wrap_entry_with_key(entry, key)?;
+    for entry in vault.iter_entries_mut() {
+        let wrapped = wrap_entry_with_key(entry, &key)?;
         map.insert(entry.id, wrapped);
     }
-    for child in &mut group.groups {
-        walk_groups_for_wrap(child, key, map)?;
-    }
-    Ok(())
+    Ok(map)
 }
 
 /// Wrap an entry's protected fields against a pre-acquired session key.
@@ -3532,21 +3422,10 @@ fn unwrap_vault_protected_fields(
     protector: &dyn FieldProtector,
 ) -> Result<(), ProtectorError> {
     let key = protector.acquire_session_key()?;
-    walk_groups_for_unwrap(&mut vault.root, map, &key)
-}
-
-fn walk_groups_for_unwrap(
-    group: &mut Group,
-    map: &ProtectedFieldMap,
-    key: &SessionKey,
-) -> Result<(), ProtectorError> {
-    for entry in &mut group.entries {
+    for entry in vault.iter_entries_mut() {
         if let Some(record) = map.get(&entry.id) {
-            unwrap_entry_with_key(entry, record, key)?;
+            unwrap_entry_with_key(entry, record, &key)?;
         }
-    }
-    for child in &mut group.groups {
-        walk_groups_for_unwrap(child, map, key)?;
     }
     Ok(())
 }

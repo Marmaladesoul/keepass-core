@@ -20,7 +20,6 @@ use crate::tombstone::{
 };
 
 use super::resolution::{apply_attachment_resolutions, rebind_history};
-use super::{collect_group_ids, collect_groups, find_group_mut};
 use crate::field_access::copy_field;
 
 // ---------------------------------------------------------------------------
@@ -90,10 +89,26 @@ pub(super) fn apply_group_tree(local: &mut Vault, remote: &Vault) {
 /// No cycle check is needed for entries: entries can't contain other
 /// entries, so a move can't induce a tree-shape cycle.
 pub(super) fn apply_concurrent_entry_moves(local: &mut Vault, remote: &Vault) {
-    let remote_parents = collect_entry_parents(&remote.root);
-    let local_parents = collect_entry_parents(&local.root);
-    let remote_loc = collect_entry_location_changed(&remote.root);
-    let local_loc = collect_entry_location_changed(&local.root);
+    let remote_parents: HashMap<EntryId, GroupId> = remote
+        .root
+        .iter_entries_with_parent()
+        .map(|(e, p)| (e.id, p))
+        .collect();
+    let local_parents: HashMap<EntryId, GroupId> = local
+        .root
+        .iter_entries_with_parent()
+        .map(|(e, p)| (e.id, p))
+        .collect();
+    let remote_loc: HashMap<EntryId, Option<chrono::DateTime<chrono::Utc>>> = remote
+        .root
+        .iter_entries()
+        .map(|e| (e.id, e.times.location_changed))
+        .collect();
+    let local_loc: HashMap<EntryId, Option<chrono::DateTime<chrono::Utc>>> = local
+        .root
+        .iter_entries()
+        .map(|e| (e.id, e.times.location_changed))
+        .collect();
 
     let mut moves: Vec<(EntryId, GroupId)> = Vec::new();
     for (id, remote_parent) in &remote_parents {
@@ -112,11 +127,11 @@ pub(super) fn apply_concurrent_entry_moves(local: &mut Vault, remote: &Vault) {
 
     for (id, new_parent_id) in moves {
         let local_parent = local_parents.get(&id).copied();
-        let Some(detached) = detach_entry(&mut local.root, id) else {
+        let Some((detached, _)) = local.root.detach_entry(id) else {
             continue;
         };
         let title = detached.title.clone();
-        match find_group_mut(&mut local.root, new_parent_id) {
+        match local.root.group_mut(new_parent_id) {
             Some(parent) => parent.entries.push(detached),
             None => local.root.entries.push(detached),
         }
@@ -129,56 +144,6 @@ pub(super) fn apply_concurrent_entry_moves(local: &mut Vault, remote: &Vault) {
             });
         }
     }
-}
-
-fn collect_entry_parents(root: &Group) -> HashMap<EntryId, GroupId> {
-    let mut out = HashMap::new();
-    walk_entry_parents(root, &mut out);
-    out
-}
-
-fn walk_entry_parents(group: &Group, out: &mut HashMap<EntryId, GroupId>) {
-    for entry in &group.entries {
-        out.insert(entry.id, group.id);
-    }
-    for sub in &group.groups {
-        walk_entry_parents(sub, out);
-    }
-}
-
-fn collect_entry_location_changed(
-    root: &Group,
-) -> HashMap<EntryId, Option<chrono::DateTime<chrono::Utc>>> {
-    let mut out = HashMap::new();
-    walk_entry_location_changed(root, &mut out);
-    out
-}
-
-fn walk_entry_location_changed(
-    group: &Group,
-    out: &mut HashMap<EntryId, Option<chrono::DateTime<chrono::Utc>>>,
-) {
-    for entry in &group.entries {
-        out.insert(entry.id, entry.times.location_changed);
-    }
-    for sub in &group.groups {
-        walk_entry_location_changed(sub, out);
-    }
-}
-
-/// Detach an entry from `root`'s subtree by removing it from its
-/// owning group's `entries` vector. Returns the removed `Entry`
-/// (intact) when found.
-fn detach_entry(root: &mut Group, id: EntryId) -> Option<Entry> {
-    if let Some(idx) = root.entries.iter().position(|e| e.id == id) {
-        return Some(root.entries.remove(idx));
-    }
-    for sub in &mut root.groups {
-        if let Some(e) = detach_entry(sub, id) {
-            return Some(e);
-        }
-    }
-    None
 }
 
 /// Reparent locally-existing groups whose remote-side parent differs
@@ -195,10 +160,30 @@ fn detach_entry(root: &mut Group, id: EntryId) -> Option<Entry> {
 /// Spec §6 prose templates the activity-log entry; emission is audit
 /// item 10 / future slice.
 pub(super) fn apply_concurrent_group_moves(local: &mut Vault, remote: &Vault) {
-    let remote_parents = collect_parents(&remote.root);
-    let local_parents = collect_parents(&local.root);
-    let remote_loc = collect_location_changed(&remote.root);
-    let local_loc = collect_location_changed(&local.root);
+    // `iter_groups_with_parent` yields `(group, Option<parent>)` self-
+    // first; the root's `None` parent is filtered out so the map holds
+    // only child→parent edges (root has no parent), matching the old
+    // `collect_parents`.
+    let remote_parents: HashMap<GroupId, GroupId> = remote
+        .root
+        .iter_groups_with_parent()
+        .filter_map(|(g, p)| p.map(|pid| (g.id, pid)))
+        .collect();
+    let local_parents: HashMap<GroupId, GroupId> = local
+        .root
+        .iter_groups_with_parent()
+        .filter_map(|(g, p)| p.map(|pid| (g.id, pid)))
+        .collect();
+    let remote_loc: HashMap<GroupId, Option<chrono::DateTime<chrono::Utc>>> = remote
+        .root
+        .iter_groups()
+        .map(|g| (g.id, g.times.location_changed))
+        .collect();
+    let local_loc: HashMap<GroupId, Option<chrono::DateTime<chrono::Utc>>> = local
+        .root
+        .iter_groups()
+        .map(|g| (g.id, g.times.location_changed))
+        .collect();
 
     // Build the move list before mutating; mutating local mid-iteration
     // would invalidate the parent map.
@@ -224,14 +209,14 @@ pub(super) fn apply_concurrent_group_moves(local: &mut Vault, remote: &Vault) {
             continue;
         }
         let local_parent = local_parents.get(&id).copied();
-        let Some(detached) = detach_group(&mut local.root, id) else {
+        let Some((detached, _)) = local.root.detach_group(id) else {
             continue;
         };
         let name = detached.name.clone();
         // Find new parent and insert. If the new parent isn't present
         // locally either (e.g. concurrent restructure on both sides),
         // restore at the root so the group isn't lost.
-        match find_group_mut(&mut local.root, new_parent_id) {
+        match local.root.group_mut(new_parent_id) {
             Some(parent) => parent.groups.push(detached),
             None => local.root.groups.push(detached),
         }
@@ -246,39 +231,6 @@ pub(super) fn apply_concurrent_group_moves(local: &mut Vault, remote: &Vault) {
     }
 }
 
-/// Build a `child_id -> parent_id` map for every group below `root`
-/// (root excluded — it has no parent).
-fn collect_parents(root: &Group) -> HashMap<GroupId, GroupId> {
-    let mut out = HashMap::new();
-    walk_parents(root, &mut out);
-    out
-}
-
-fn walk_parents(group: &Group, out: &mut HashMap<GroupId, GroupId>) {
-    for child in &group.groups {
-        out.insert(child.id, group.id);
-        walk_parents(child, out);
-    }
-}
-
-fn collect_location_changed(
-    root: &Group,
-) -> HashMap<GroupId, Option<chrono::DateTime<chrono::Utc>>> {
-    let mut out = HashMap::new();
-    walk_location_changed(root, &mut out);
-    out
-}
-
-fn walk_location_changed(
-    group: &Group,
-    out: &mut HashMap<GroupId, Option<chrono::DateTime<chrono::Utc>>>,
-) {
-    out.insert(group.id, group.times.location_changed);
-    for child in &group.groups {
-        walk_location_changed(child, out);
-    }
-}
-
 /// `true` iff moving `subject` under `new_parent` preserves a tree
 /// (no cycle): the new parent is neither the subject itself nor any
 /// descendant of it.
@@ -286,89 +238,38 @@ fn is_safe_reparent(root: &Group, subject: GroupId, new_parent: GroupId) -> bool
     if subject == new_parent {
         return false;
     }
-    let Some(subject_group) = find_group_ref(root, subject) else {
+    let Some(subject_group) = root.group(subject) else {
         // Subject isn't even present — bail; the caller's detach will
         // also bail.
         return false;
     };
-    !is_descendant(subject_group, new_parent)
-}
-
-fn find_group_ref(root: &Group, id: GroupId) -> Option<&Group> {
-    if root.id == id {
-        return Some(root);
-    }
-    for sub in &root.groups {
-        if let Some(found) = find_group_ref(sub, id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn is_descendant(group: &Group, candidate: GroupId) -> bool {
-    for child in &group.groups {
-        if child.id == candidate {
-            return true;
-        }
-        if is_descendant(child, candidate) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Detach the group identified by `id` from `root`'s subtree by
-/// removing it from its parent's `groups` vector. Returns the removed
-/// `Group` (with its subtree intact) when found, `None` otherwise.
-/// Never removes the root itself.
-fn detach_group(root: &mut Group, id: GroupId) -> Option<Group> {
-    if root.id == id {
-        return None;
-    }
-    detach_recursive(root, id)
-}
-
-fn detach_recursive(group: &mut Group, id: GroupId) -> Option<Group> {
-    if let Some(idx) = group.groups.iter().position(|g| g.id == id) {
-        return Some(group.groups.remove(idx));
-    }
-    for sub in &mut group.groups {
-        if let Some(detached) = detach_recursive(sub, id) {
-            return Some(detached);
-        }
-    }
-    None
+    // `Group::group` is self-inclusive, but `subject == new_parent` is
+    // already rejected above, so a hit here can only be a *proper*
+    // descendant of `subject` — exactly the cycle-inducing case.
+    subject_group.group(new_parent).is_none()
 }
 
 pub(super) fn take_later_group_metadata(local: &mut Group, remote: &Group) {
-    // Walk both trees in lockstep where ids match.
-    let mut remote_by_id: HashMap<GroupId, &Group> = HashMap::new();
-    collect_groups(remote, &mut remote_by_id);
-    take_later_recursive(local, &remote_by_id);
-}
-
-pub(super) fn take_later_recursive(
-    local_group: &mut Group,
-    remote_by_id: &HashMap<GroupId, &Group>,
-) {
-    if let Some(r) = remote_by_id.get(&local_group.id) {
-        let local_t = local_group.times.last_modification_time;
-        if later_wins(local_t, r.times.last_modification_time) {
-            local_group.name = r.name.clone();
-            local_group.notes = r.notes.clone();
-            local_group.icon_id = r.icon_id;
-            local_group.custom_icon_uuid = r.custom_icon_uuid;
-            local_group.previous_parent_group = r.previous_parent_group;
-            local_group.enable_auto_type = r.enable_auto_type;
-            local_group.enable_searching = r.enable_searching;
-            local_group.default_auto_type_sequence = r.default_auto_type_sequence.clone();
-            local_group.is_expanded = r.is_expanded;
+    // Walk both trees in lockstep where ids match. Each group is
+    // reconciled independently against its remote twin, so visit order
+    // is immaterial.
+    let remote_by_id: HashMap<GroupId, &Group> = remote.iter_groups().map(|g| (g.id, g)).collect();
+    local.for_each_group_mut(&mut |local_group| {
+        if let Some(r) = remote_by_id.get(&local_group.id) {
+            let local_t = local_group.times.last_modification_time;
+            if later_wins(local_t, r.times.last_modification_time) {
+                local_group.name = r.name.clone();
+                local_group.notes = r.notes.clone();
+                local_group.icon_id = r.icon_id;
+                local_group.custom_icon_uuid = r.custom_icon_uuid;
+                local_group.previous_parent_group = r.previous_parent_group;
+                local_group.enable_auto_type = r.enable_auto_type;
+                local_group.enable_searching = r.enable_searching;
+                local_group.default_auto_type_sequence = r.default_auto_type_sequence.clone();
+                local_group.is_expanded = r.is_expanded;
+            }
         }
-    }
-    for sub in &mut local_group.groups {
-        take_later_recursive(sub, remote_by_id);
-    }
+    });
 }
 
 pub(super) fn drop_remotely_tombstoned_groups(
@@ -393,14 +294,17 @@ pub(super) fn add_remote_only_groups(
     remote: &Vault,
     local_tombstones: &HashMap<Uuid, Option<chrono::DateTime<chrono::Utc>>>,
 ) {
-    let local_ids = collect_group_ids(&local.root);
-    let remote_groups: Vec<(GroupId, GroupId, Group)> = {
-        // (id, parent_id, cloned group with no children — children are
-        // handled by their own recursion as we walk remote)
-        let mut out = Vec::new();
-        gather_remote_groups_with_parents(&remote.root, remote.root.id, &mut out);
-        out
-    };
+    let local_ids: HashSet<GroupId> = local.root.iter_groups().map(|g| g.id).collect();
+    // (id, parent_id, cloned group) for every non-root remote group;
+    // each group's children are covered by their own iteration, so the
+    // clone's `groups`/`entries` are cleared before insertion below.
+    // The root is filtered out (its `None` parent) — it's always
+    // present on local by construction.
+    let remote_groups: Vec<(GroupId, GroupId, Group)> = remote
+        .root
+        .iter_groups_with_parent()
+        .filter_map(|(g, p)| p.map(|pid| (g.id, pid, g.clone())))
+        .collect();
     for (id, parent_id, group_meta) in remote_groups {
         if local_ids.contains(&id) {
             continue;
@@ -414,25 +318,10 @@ pub(super) fn add_remote_only_groups(
         let mut child = group_meta;
         child.groups.clear();
         child.entries.clear();
-        match find_group_mut(&mut local.root, parent_id) {
+        match local.root.group_mut(parent_id) {
             Some(parent) => parent.groups.push(child),
             None => local.root.groups.push(child),
         }
-    }
-}
-
-pub(super) fn gather_remote_groups_with_parents(
-    group: &Group,
-    parent_id: GroupId,
-    out: &mut Vec<(GroupId, GroupId, Group)>,
-) {
-    // Skip the root itself — it's always present on local by
-    // construction.
-    if group.id != parent_id {
-        out.push((group.id, parent_id, group.clone()));
-    }
-    for sub in &group.groups {
-        gather_remote_groups_with_parents(sub, group.id, out);
     }
 }
 
@@ -615,13 +504,9 @@ pub(super) fn build_merged_entry(
 /// its merged entry, so the pre-pass's in-place mutation just feeds
 /// it a head start.
 pub(super) fn union_history_tombstones_across_entries(local_root: &mut Group, remote: &Vault) {
-    let mut remote_entries: HashMap<EntryId, &Entry> = HashMap::new();
-    super::collect_entries(&remote.root, &mut remote_entries);
-    union_tombstones_recursive(local_root, &remote_entries);
-}
-
-fn union_tombstones_recursive(group: &mut Group, remote_entries: &HashMap<EntryId, &Entry>) {
-    for entry in &mut group.entries {
+    let remote_entries: HashMap<EntryId, &Entry> =
+        remote.root.iter_entries().map(|e| (e.id, e)).collect();
+    for entry in local_root.iter_entries_mut() {
         let Some(&remote_entry) = remote_entries.get(&entry.id) else {
             continue;
         };
@@ -656,9 +541,6 @@ fn union_tombstones_recursive(group: &mut Group, remote_entries: &HashMap<EntryI
         // last_modified — apply path is pure.
         crate::tombstone::write_tombstones_to_custom_data(&mut entry.custom_data, &unioned, None);
     }
-    for sub in &mut group.groups {
-        union_tombstones_recursive(sub, remote_entries);
-    }
 }
 
 /// Walk every entry present on both sides; union their
@@ -677,17 +559,9 @@ pub(super) fn union_attachment_tombstones_across_entries(
     remote: &Vault,
     local_binaries: &[Binary],
 ) {
-    let mut remote_entries: HashMap<EntryId, &Entry> = HashMap::new();
-    super::collect_entries(&remote.root, &mut remote_entries);
-    union_attachment_tombstones_recursive(local_root, &remote_entries, local_binaries);
-}
-
-fn union_attachment_tombstones_recursive(
-    group: &mut Group,
-    remote_entries: &HashMap<EntryId, &Entry>,
-    local_binaries: &[Binary],
-) {
-    for entry in &mut group.entries {
+    let remote_entries: HashMap<EntryId, &Entry> =
+        remote.root.iter_entries().map(|e| (e.id, e)).collect();
+    for entry in local_root.iter_entries_mut() {
         let Some(&remote_entry) = remote_entries.get(&entry.id) else {
             continue;
         };
@@ -731,9 +605,6 @@ fn union_attachment_tombstones_recursive(
             None,
         );
     }
-    for sub in &mut group.groups {
-        union_attachment_tombstones_recursive(sub, remote_entries, local_binaries);
-    }
 }
 
 /// Walk every entry present on both sides; union their tag-state
@@ -754,13 +625,9 @@ fn union_attachment_tombstones_recursive(
 /// concrete tombstone — same conservative posture as the per-bucket
 /// filter in `apply::resolution::apply_merged_tags`.
 pub(super) fn union_tag_states_across_entries(local_root: &mut Group, remote: &Vault) {
-    let mut remote_entries: HashMap<EntryId, &Entry> = HashMap::new();
-    super::collect_entries(&remote.root, &mut remote_entries);
-    union_tag_states_recursive(local_root, &remote_entries);
-}
-
-fn union_tag_states_recursive(group: &mut Group, remote_entries: &HashMap<EntryId, &Entry>) {
-    for entry in &mut group.entries {
+    let remote_entries: HashMap<EntryId, &Entry> =
+        remote.root.iter_entries().map(|e| (e.id, e)).collect();
+    for entry in local_root.iter_entries_mut() {
         let Some(&remote_entry) = remote_entries.get(&entry.id) else {
             continue;
         };
@@ -779,9 +646,6 @@ fn union_tag_states_recursive(group: &mut Group, remote_entries: &HashMap<EntryI
             Some(rm) => strictly_after(local_mtime, rm.at),
         });
         crate::tombstone::write_tag_state_to_custom_data(&mut entry.custom_data, &unioned, None);
-    }
-    for sub in &mut group.groups {
-        union_tag_states_recursive(sub, remote_entries);
     }
 }
 
@@ -853,7 +717,7 @@ pub(super) fn reconcile_entry_timestamps_recursive(
     group: &mut Group,
     remote_entries: &HashMap<EntryId, &Entry>,
 ) {
-    for entry in &mut group.entries {
+    for entry in group.iter_entries_mut() {
         if let Some(r) = remote_entries.get(&entry.id) {
             // Advancing timestamps — max-of-two.
             take_later_opt(
@@ -869,34 +733,23 @@ pub(super) fn reconcile_entry_timestamps_recursive(
             take_earlier_opt(&mut entry.times.creation_time, r.times.creation_time);
         }
     }
-    for sub in &mut group.groups {
-        reconcile_entry_timestamps_recursive(sub, remote_entries);
-    }
 }
 
 pub(super) fn reconcile_group_timestamps_recursive(group: &mut Group, remote: &Vault) {
-    let mut remote_by_id: HashMap<GroupId, &Group> = HashMap::new();
-    collect_groups(&remote.root, &mut remote_by_id);
-    reconcile_group_timestamps_walk(group, &remote_by_id);
-}
-
-pub(super) fn reconcile_group_timestamps_walk(
-    group: &mut Group,
-    remote_by_id: &HashMap<GroupId, &Group>,
-) {
-    if let Some(r) = remote_by_id.get(&group.id) {
-        take_later_opt(
-            &mut group.times.last_modification_time,
-            r.times.last_modification_time,
-        );
-        take_later_opt(&mut group.times.last_access_time, r.times.last_access_time);
-        take_later_opt(&mut group.times.location_changed, r.times.location_changed);
-        // Identity-bearing (spec §2.2 group row) — min-of-two.
-        take_earlier_opt(&mut group.times.creation_time, r.times.creation_time);
-    }
-    for sub in &mut group.groups {
-        reconcile_group_timestamps_walk(sub, remote_by_id);
-    }
+    let remote_by_id: HashMap<GroupId, &Group> =
+        remote.root.iter_groups().map(|g| (g.id, g)).collect();
+    group.for_each_group_mut(&mut |g| {
+        if let Some(r) = remote_by_id.get(&g.id) {
+            take_later_opt(
+                &mut g.times.last_modification_time,
+                r.times.last_modification_time,
+            );
+            take_later_opt(&mut g.times.last_access_time, r.times.last_access_time);
+            take_later_opt(&mut g.times.location_changed, r.times.location_changed);
+            // Identity-bearing (spec §2.2 group row) — min-of-two.
+            take_earlier_opt(&mut g.times.creation_time, r.times.creation_time);
+        }
+    });
 }
 
 pub(super) fn take_later_opt(

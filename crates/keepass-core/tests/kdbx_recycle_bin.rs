@@ -83,25 +83,6 @@ fn reopen_with_clock(path: &Path, bytes: Vec<u8>, at: DateTime<Utc>) -> Kdbx<Unl
         .unwrap()
 }
 
-fn find_entry(kdbx: &Kdbx<Unlocked>, id: EntryId) -> Option<&keepass_core::model::Entry> {
-    kdbx.vault().iter_entries().find(|e| e.id == id)
-}
-
-fn find_group(
-    root: &keepass_core::model::Group,
-    id: GroupId,
-) -> Option<&keepass_core::model::Group> {
-    if root.id == id {
-        return Some(root);
-    }
-    for child in &root.groups {
-        if let Some(g) = find_group(child, id) {
-            return Some(g);
-        }
-    }
-    None
-}
-
 // ---------------------------------------------------------------------
 // recycle_entry
 // ---------------------------------------------------------------------
@@ -126,7 +107,7 @@ fn first_recycle_entry_creates_bin_canonically_and_stamps_meta() {
     clock.set(t_recycle);
     let bin = kdbx.recycle_entry(id).unwrap().expect("bin minted");
 
-    let bin_group = find_group(&kdbx.vault().root, bin).expect("bin registered at root");
+    let bin_group = kdbx.vault().group(bin).expect("bin registered at root");
     assert_eq!(bin_group.name, "Recycle Bin");
     assert_eq!(bin_group.icon_id, 43);
     assert_eq!(bin_group.enable_auto_type, Some(false));
@@ -147,7 +128,7 @@ fn first_recycle_entry_creates_bin_canonically_and_stamps_meta() {
 
     // Entry is now under the bin; its `times.location_changed` +
     // `previous_parent_group` were set by the composed `move_entry`.
-    let e = find_entry(&kdbx, id).expect("entry still present");
+    let e = kdbx.vault().entry(id).expect("entry still present");
     assert_eq!(e.previous_parent_group, Some(root));
     assert_eq!(e.times.location_changed, Some(t_recycle));
 
@@ -195,13 +176,13 @@ fn recycle_entry_on_entry_already_in_bin_returns_ok_none_without_mutation() {
         .unwrap();
     let bin = kdbx.recycle_entry(id).unwrap().unwrap();
     let changed_before = kdbx.vault().meta.recycle_bin_changed;
-    let entries_in_bin = find_group(&kdbx.vault().root, bin).unwrap().entries.len();
+    let entries_in_bin = kdbx.vault().group(bin).unwrap().entries.len();
 
     // Second recycle: already inside the bin → Ok(None).
     let result = kdbx.recycle_entry(id).unwrap();
     assert!(result.is_none(), "already-in-bin returns Ok(None)");
     assert_eq!(
-        find_group(&kdbx.vault().root, bin).unwrap().entries.len(),
+        kdbx.vault().group(bin).unwrap().entries.len(),
         entries_in_bin,
         "no mutation"
     );
@@ -238,7 +219,7 @@ fn recycle_entry_hard_deletes_when_bin_disabled_and_no_bin_exists() {
     assert!(result.is_none(), "hard-delete fallback returns Ok(None)");
 
     // Entry is gone; `DeletedObject` emitted.
-    assert!(find_entry(&kdbx, id).is_none());
+    assert!(kdbx.vault().entry(id).is_none());
     assert_eq!(
         kdbx.vault().deleted_objects.len(),
         tombstones_before + 1,
@@ -267,14 +248,15 @@ fn recycle_group_moves_subtree_under_bin() {
     let bin = kdbx.recycle_group(work).unwrap().unwrap();
 
     // The whole Work subtree now lives under the bin.
-    let bin_group = find_group(&kdbx.vault().root, bin).unwrap();
+    let bin_group = kdbx.vault().group(bin).unwrap();
     assert!(bin_group.groups.iter().any(|g| g.id == work));
-    let work_under_bin = find_group(bin_group, work).unwrap();
+    let work_under_bin = bin_group.group(work).unwrap();
     assert!(work_under_bin.groups.iter().any(|g| g.id == sub));
     assert!(work_under_bin.entries.iter().any(|e| e.id == entry_a));
     // Subgroup's own entries still travel with it.
     assert!(
-        find_group(bin_group, sub)
+        bin_group
+            .group(sub)
             .unwrap()
             .entries
             .iter()
@@ -311,7 +293,7 @@ fn recycle_group_on_group_already_nested_in_bin_returns_ok_none_without_mutation
     clock.set(t0 + Duration::minutes(1));
     let bin = kdbx.recycle_group(g).unwrap().expect("first recycle moves");
     let changed_after_first = kdbx.vault().meta.recycle_bin_changed;
-    let bin_groups_before_retry = find_group(&kdbx.vault().root, bin).unwrap().groups.len();
+    let bin_groups_before_retry = kdbx.vault().group(bin).unwrap().groups.len();
 
     // Second recycle of the same group — now nested under the bin
     // already. Must short-circuit `Ok(None)`, no mutation.
@@ -324,7 +306,7 @@ fn recycle_group_on_group_already_nested_in_bin_returns_ok_none_without_mutation
         "short-circuit must not re-stamp recycle_bin_changed"
     );
     assert_eq!(
-        find_group(&kdbx.vault().root, bin).unwrap().groups.len(),
+        kdbx.vault().group(bin).unwrap().groups.len(),
         bin_groups_before_retry,
         "short-circuit must not duplicate or re-move"
     );
@@ -388,7 +370,7 @@ fn empty_recycle_bin_returns_direct_child_count_and_emits_tombstones() {
     );
 
     // Bin group survives, empty.
-    let bin_group = find_group(&kdbx.vault().root, bin).expect("bin still present");
+    let bin_group = kdbx.vault().group(bin).expect("bin still present");
     assert!(bin_group.entries.is_empty());
     assert!(bin_group.groups.is_empty());
     assert_eq!(kdbx.vault().meta.recycle_bin_uuid, Some(bin));
@@ -439,7 +421,7 @@ fn dangling_recycle_bin_uuid_is_treated_as_no_bin_and_fresh_bin_minted() {
         Some(minted),
         "meta.recycle_bin_uuid now points at the fresh bin"
     );
-    assert!(find_group(&kdbx.vault().root, minted).is_some());
+    assert!(kdbx.vault().group(minted).is_some());
 }
 
 #[test]
@@ -457,7 +439,7 @@ fn full_round_trip_through_save_and_reopen_preserves_bin_and_contents() {
     );
     assert_eq!(reopened.vault().meta.recycle_bin_uuid, Some(bin));
     assert!(reopened.vault().meta.recycle_bin_enabled);
-    let bin_group = find_group(&reopened.vault().root, bin).expect("bin survives reopen");
+    let bin_group = reopened.vault().group(bin).expect("bin survives reopen");
     assert_eq!(bin_group.name, "Recycle Bin");
     assert_eq!(bin_group.icon_id, 43);
     assert!(bin_group.entries.iter().any(|e| e.id == id));
@@ -483,6 +465,6 @@ fn recycle_against_foreign_writer_fixture_moves_into_existing_bin() {
         returned, existing_bin,
         "reuses the foreign-writer-created bin"
     );
-    let bin_group = find_group(&kdbx.vault().root, existing_bin).unwrap();
+    let bin_group = kdbx.vault().group(existing_bin).unwrap();
     assert!(bin_group.entries.iter().any(|e| e.id == id));
 }

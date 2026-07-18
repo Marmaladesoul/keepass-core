@@ -31,7 +31,7 @@
 //! are held.
 
 use chrono::{DateTime, Utc};
-use keepass_core::model::{EntryId, Group, Vault};
+use keepass_core::model::{EntryId, Vault};
 
 use crate::apply::apply_merge;
 use crate::conflict::{AttachmentDeltaKind, EntryConflict};
@@ -147,7 +147,11 @@ pub fn apply_merge_park_conflicts(
         {
             remote_entry.title.clone()
         } else {
-            find_entry_title(&local.root, *entry_id).unwrap_or_default()
+            local
+                .root
+                .entry(*entry_id)
+                .map(|e| e.title.clone())
+                .unwrap_or_default()
         };
         crate::events::emit(&crate::MergeEvent::EntryRestoredFromDeletion {
             entry: *entry_id,
@@ -354,22 +358,6 @@ fn find_resolution<'a>(
 ) -> Option<&'a ConflictResolution> {
     res.iter()
         .find(|r| r.entry == entry.0 && r.kind == kind && r.key.as_deref() == key)
-}
-
-/// Walk `group` looking for the entry with `id`; returns its title (a
-/// clone) if found. Used by the delete-vs-edit restoration event.
-fn find_entry_title(group: &Group, id: EntryId) -> Option<String> {
-    for entry in &group.entries {
-        if entry.id == id {
-            return Some(entry.title.clone());
-        }
-    }
-    for sub in &group.groups {
-        if let Some(title) = find_entry_title(sub, id) {
-            return Some(title);
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------

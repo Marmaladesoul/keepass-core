@@ -314,8 +314,18 @@ impl Sim {
     }
 
     fn generate_op(&mut self, peer_idx: usize, cfg: &ChaosConfig) -> Op {
-        let existing_entries: Vec<u128> = collect_entry_ids(&self.peers[peer_idx].vault.root);
-        let existing_groups: Vec<u128> = collect_group_ids(&self.peers[peer_idx].vault.root);
+        let existing_entries: Vec<u128> = self.peers[peer_idx]
+            .vault
+            .root
+            .iter_entries()
+            .map(|e| e.id.0.as_u128())
+            .collect();
+        let existing_groups: Vec<u128> = self.peers[peer_idx]
+            .vault
+            .root
+            .iter_groups()
+            .map(|g| g.id.0.as_u128())
+            .collect();
         // Always start with a synthetic root subgroup if there are no
         // groups so AddEntry has somewhere to land.
         let groups: Vec<u128> = if existing_groups.is_empty() {
@@ -499,10 +509,9 @@ fn apply_op_to_vault(idx: usize, v: &mut Vault, op: Op) -> Result<(), SimError> 
             t.location_changed = Some(mtime);
             e.times = t;
             ensure_group(v, group_id);
-            let group = find_group_mut(&mut v.root, group_id).ok_or(SimError::GroupNotFound(
-                GroupId(Uuid::from_u128(group_id)),
-                idx,
-            ))?;
+            let group = v.root.group_mut(GroupId(Uuid::from_u128(group_id))).ok_or(
+                SimError::GroupNotFound(GroupId(Uuid::from_u128(group_id)), idx),
+            )?;
             group.entries.push(e);
             Ok(())
         }
@@ -542,7 +551,7 @@ fn apply_op_to_vault(idx: usize, v: &mut Vault, op: Op) -> Result<(), SimError> 
             entry_id,
             deleted_at,
         } => {
-            remove_entry(&mut v.root, entry_id);
+            let _ = v.root.detach_entry(EntryId(Uuid::from_u128(entry_id)));
             v.deleted_objects.push(DeletedObject::new(
                 Uuid::from_u128(entry_id),
                 Some(deleted_at),
@@ -572,16 +581,21 @@ fn apply_op_to_vault(idx: usize, v: &mut Vault, op: Op) -> Result<(), SimError> 
             location_changed,
         } => {
             ensure_group(v, new_group_id);
-            let Some(mut detached) = detach_entry(&mut v.root, entry_id) else {
+            let Some((mut detached, _)) = v.root.detach_entry(EntryId(Uuid::from_u128(entry_id)))
+            else {
                 return Err(SimError::EntryNotFound(
                     EntryId(Uuid::from_u128(entry_id)),
                     idx,
                 ));
             };
             detached.times.location_changed = Some(location_changed);
-            let group = find_group_mut(&mut v.root, new_group_id).ok_or(
-                SimError::GroupNotFound(GroupId(Uuid::from_u128(new_group_id)), idx),
-            )?;
+            let group = v
+                .root
+                .group_mut(GroupId(Uuid::from_u128(new_group_id)))
+                .ok_or(SimError::GroupNotFound(
+                    GroupId(Uuid::from_u128(new_group_id)),
+                    idx,
+                ))?;
             group.entries.push(detached);
             Ok(())
         }
@@ -632,10 +646,13 @@ fn apply_op_to_vault(idx: usize, v: &mut Vault, op: Op) -> Result<(), SimError> 
             g.times.last_modification_time = Some(mtime);
             g.times.creation_time = Some(creation_time);
             g.times.location_changed = Some(mtime);
-            let parent = find_group_mut(&mut v.root, parent_id).ok_or(SimError::GroupNotFound(
-                GroupId(Uuid::from_u128(parent_id)),
-                idx,
-            ))?;
+            let parent = v
+                .root
+                .group_mut(GroupId(Uuid::from_u128(parent_id)))
+                .ok_or(SimError::GroupNotFound(
+                    GroupId(Uuid::from_u128(parent_id)),
+                    idx,
+                ))?;
             parent.groups.push(g);
             Ok(())
         }
@@ -664,7 +681,7 @@ fn apply_op_to_vault(idx: usize, v: &mut Vault, op: Op) -> Result<(), SimError> 
 // ---------------------------------------------------------------------------
 
 fn ensure_group(v: &mut Vault, group_id: u128) {
-    if find_group(&v.root, group_id).is_some() {
+    if v.root.group(GroupId(Uuid::from_u128(group_id))).is_some() {
         return;
     }
     let mut g = Group::empty(GroupId(Uuid::from_u128(group_id)));
@@ -675,121 +692,19 @@ fn ensure_group(v: &mut Vault, group_id: u128) {
     v.root.groups.push(g);
 }
 
-fn find_group(group: &Group, id: u128) -> Option<&Group> {
-    if group.id.0 == Uuid::from_u128(id) {
-        return Some(group);
-    }
-    for sub in &group.groups {
-        if let Some(found) = find_group(sub, id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn find_group_mut(group: &mut Group, id: u128) -> Option<&mut Group> {
-    if group.id.0 == Uuid::from_u128(id) {
-        return Some(group);
-    }
-    for sub in &mut group.groups {
-        if let Some(found) = find_group_mut(sub, id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn collect_entry_ids(group: &Group) -> Vec<u128> {
-    let mut out = Vec::new();
-    fn walk(g: &Group, out: &mut Vec<u128>) {
-        for e in &g.entries {
-            out.push(e.id.0.as_u128());
-        }
-        for sub in &g.groups {
-            walk(sub, out);
-        }
-    }
-    walk(group, &mut out);
-    out
-}
-
-fn collect_group_ids(group: &Group) -> Vec<u128> {
-    let mut out = Vec::new();
-    fn walk(g: &Group, out: &mut Vec<u128>) {
-        out.push(g.id.0.as_u128());
-        for sub in &g.groups {
-            walk(sub, out);
-        }
-    }
-    walk(group, &mut out);
-    out
-}
-
 fn with_entry_mut<F: FnOnce(&mut Entry)>(
     root: &mut Group,
     id: u128,
     idx: usize,
     f: F,
 ) -> Result<(), SimError> {
-    let mut f = Some(f);
-    let mut applied = false;
-    apply_to_first_entry(root, id, &mut f, &mut applied);
-    if applied {
-        Ok(())
-    } else {
-        Err(SimError::EntryNotFound(EntryId(Uuid::from_u128(id)), idx))
-    }
-}
-
-fn apply_to_first_entry<F: FnOnce(&mut Entry)>(
-    group: &mut Group,
-    id: u128,
-    f: &mut Option<F>,
-    applied: &mut bool,
-) {
-    if *applied {
-        return;
-    }
-    if let Some(e) = group
-        .entries
-        .iter_mut()
-        .find(|e| e.id.0 == Uuid::from_u128(id))
-    {
-        if let Some(func) = f.take() {
-            func(e);
-            *applied = true;
+    match root.entry_mut(EntryId(Uuid::from_u128(id))) {
+        Some(e) => {
+            f(e);
+            Ok(())
         }
-        return;
+        None => Err(SimError::EntryNotFound(EntryId(Uuid::from_u128(id)), idx)),
     }
-    for sub in &mut group.groups {
-        apply_to_first_entry(sub, id, f, applied);
-        if *applied {
-            return;
-        }
-    }
-}
-
-fn remove_entry(group: &mut Group, id: u128) {
-    group.entries.retain(|e| e.id.0 != Uuid::from_u128(id));
-    for sub in &mut group.groups {
-        remove_entry(sub, id);
-    }
-}
-
-fn detach_entry(root: &mut Group, id: u128) -> Option<Entry> {
-    if let Some(pos) = root
-        .entries
-        .iter()
-        .position(|e| e.id.0 == Uuid::from_u128(id))
-    {
-        return Some(root.entries.remove(pos));
-    }
-    for sub in &mut root.groups {
-        if let Some(e) = detach_entry(sub, id) {
-            return Some(e);
-        }
-    }
-    None
 }
 
 fn insert_binary(v: &mut Vault, bytes: &[u8]) -> usize {

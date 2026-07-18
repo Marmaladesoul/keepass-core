@@ -99,13 +99,6 @@ fn reopen_with_clock(bytes: Vec<u8>, at: DateTime<Utc>) -> Kdbx<Unlocked> {
         .unwrap()
 }
 
-fn find_entry(kdbx: &Kdbx<Unlocked>, id: EntryId) -> &keepass_core::model::Entry {
-    kdbx.vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("entry present")
-}
-
 fn add_one_entry(kdbx: &mut Kdbx<Unlocked>) -> EntryId {
     let root = kdbx.vault().root.id;
     kdbx.add_entry(root, NewEntry::new("Gmail")).unwrap()
@@ -130,7 +123,7 @@ fn set_last_access_time_some_round_trips_through_save() {
 
     let reopened = reopen_with_clock(kdbx.save_to_bytes().unwrap(), t0 + Duration::minutes(2));
     assert_eq!(
-        find_entry(&reopened, id).times.last_access_time,
+        reopened.vault().entry(id).unwrap().times.last_access_time,
         Some(pinned)
     );
 }
@@ -142,17 +135,23 @@ fn set_last_access_time_none_clears_and_round_trips_as_absent() {
     let id = add_one_entry(&mut kdbx);
     // `add_entry` stamps `last_access_time = t0`; assert the starting
     // state so the clearing step is meaningful.
-    assert_eq!(find_entry(&kdbx, id).times.last_access_time, Some(t0));
+    assert_eq!(
+        kdbx.vault().entry(id).unwrap().times.last_access_time,
+        Some(t0)
+    );
 
     clock.set(t0 + Duration::minutes(1));
     kdbx.edit_entry(id, HistoryPolicy::NoSnapshot, |e| {
         e.set_last_access_time(None);
     })
     .unwrap();
-    assert_eq!(find_entry(&kdbx, id).times.last_access_time, None);
+    assert_eq!(kdbx.vault().entry(id).unwrap().times.last_access_time, None);
 
     let reopened = reopen_with_clock(kdbx.save_to_bytes().unwrap(), t0 + Duration::minutes(2));
-    assert_eq!(find_entry(&reopened, id).times.last_access_time, None);
+    assert_eq!(
+        reopened.vault().entry(id).unwrap().times.last_access_time,
+        None
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -164,13 +163,13 @@ fn touch_entry_stamps_last_access_time_from_clock() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = add_one_entry(&mut kdbx);
-    let before = find_entry(&kdbx, id).times.clone();
+    let before = kdbx.vault().entry(id).unwrap().times.clone();
 
     let t_touch = t0 + Duration::hours(2);
     clock.set(t_touch);
     kdbx.touch_entry(id).unwrap();
 
-    let after = &find_entry(&kdbx, id).times;
+    let after = &kdbx.vault().entry(id).unwrap().times;
     assert_eq!(after.last_access_time, Some(t_touch));
 
     // Every other `times.*` field must be unchanged — `touch_entry`
@@ -201,12 +200,15 @@ fn touch_entry_does_not_snapshot_history() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = add_one_entry(&mut kdbx);
-    let history_len_before = find_entry(&kdbx, id).history.len();
+    let history_len_before = kdbx.vault().entry(id).unwrap().history.len();
     assert_eq!(history_len_before, 0);
 
     clock.set(t0 + Duration::hours(1));
     kdbx.touch_entry(id).unwrap();
-    assert_eq!(find_entry(&kdbx, id).history.len(), history_len_before);
+    assert_eq!(
+        kdbx.vault().entry(id).unwrap().history.len(),
+        history_len_before
+    );
 }
 
 #[test]
@@ -226,12 +228,12 @@ fn touch_entry_does_not_stamp_last_modification_time() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = add_one_entry(&mut kdbx);
-    let lmt_before = find_entry(&kdbx, id).times.last_modification_time;
+    let lmt_before = kdbx.vault().entry(id).unwrap().times.last_modification_time;
 
     clock.set(t0 + Duration::hours(1));
     kdbx.touch_entry(id).unwrap();
     assert_eq!(
-        find_entry(&kdbx, id).times.last_modification_time,
+        kdbx.vault().entry(id).unwrap().times.last_modification_time,
         lmt_before,
         "touch is a read-access stamp, not a content edit"
     );
@@ -250,10 +252,17 @@ fn clear_entry_last_access_returns_field_to_none() {
     // Touch first so there's something to clear.
     clock.set(t0 + Duration::hours(2));
     kdbx.touch_entry(id).unwrap();
-    assert!(find_entry(&kdbx, id).times.last_access_time.is_some());
+    assert!(
+        kdbx.vault()
+            .entry(id)
+            .unwrap()
+            .times
+            .last_access_time
+            .is_some()
+    );
 
     kdbx.clear_entry_last_access(id).unwrap();
-    assert_eq!(find_entry(&kdbx, id).times.last_access_time, None);
+    assert_eq!(kdbx.vault().entry(id).unwrap().times.last_access_time, None);
 }
 
 #[test]
@@ -276,12 +285,12 @@ fn clear_entry_last_access_leaves_other_times_unchanged() {
     let id = add_one_entry(&mut kdbx);
     clock.set(t0 + Duration::hours(2));
     kdbx.touch_entry(id).unwrap();
-    let before = find_entry(&kdbx, id).times.clone();
+    let before = kdbx.vault().entry(id).unwrap().times.clone();
 
     clock.set(t0 + Duration::hours(3));
     kdbx.clear_entry_last_access(id).unwrap();
 
-    let after = &find_entry(&kdbx, id).times;
+    let after = &kdbx.vault().entry(id).unwrap().times;
     assert_eq!(after.creation_time, before.creation_time);
     assert_eq!(after.last_modification_time, before.last_modification_time);
     assert_eq!(after.location_changed, before.location_changed);
@@ -297,11 +306,14 @@ fn clear_entry_last_access_does_not_snapshot_history() {
     let id = add_one_entry(&mut kdbx);
     clock.set(t0 + Duration::hours(1));
     kdbx.touch_entry(id).unwrap();
-    let history_len_before = find_entry(&kdbx, id).history.len();
+    let history_len_before = kdbx.vault().entry(id).unwrap().history.len();
 
     clock.set(t0 + Duration::hours(2));
     kdbx.clear_entry_last_access(id).unwrap();
-    assert_eq!(find_entry(&kdbx, id).history.len(), history_len_before);
+    assert_eq!(
+        kdbx.vault().entry(id).unwrap().history.len(),
+        history_len_before
+    );
 }
 
 #[test]
@@ -326,15 +338,15 @@ fn clear_entry_last_access_round_trips_through_touch() {
 
     clock.set(t0 + Duration::hours(1));
     kdbx.touch_entry(id).unwrap();
-    let t_touch = find_entry(&kdbx, id).times.last_access_time;
+    let t_touch = kdbx.vault().entry(id).unwrap().times.last_access_time;
     assert!(t_touch.is_some());
 
     kdbx.clear_entry_last_access(id).unwrap();
-    assert_eq!(find_entry(&kdbx, id).times.last_access_time, None);
+    assert_eq!(kdbx.vault().entry(id).unwrap().times.last_access_time, None);
 
     clock.set(t0 + Duration::hours(3));
     kdbx.touch_entry(id).unwrap();
-    let t_retouch = find_entry(&kdbx, id).times.last_access_time;
+    let t_retouch = kdbx.vault().entry(id).unwrap().times.last_access_time;
     assert_eq!(t_retouch, Some(t0 + Duration::hours(3)));
 }
 
@@ -359,7 +371,10 @@ fn edit_entry_does_not_auto_stamp_last_access_time_under_either_policy() {
         e.set_last_access_time(Some(pinned));
     })
     .unwrap();
-    assert_eq!(find_entry(&kdbx, id).times.last_access_time, Some(pinned));
+    assert_eq!(
+        kdbx.vault().entry(id).unwrap().times.last_access_time,
+        Some(pinned)
+    );
 
     // Unrelated edit under NoSnapshot — must not advance last_access.
     clock.set(t0 + Duration::hours(1));
@@ -368,7 +383,7 @@ fn edit_entry_does_not_auto_stamp_last_access_time_under_either_policy() {
     })
     .unwrap();
     assert_eq!(
-        find_entry(&kdbx, id).times.last_access_time,
+        kdbx.vault().entry(id).unwrap().times.last_access_time,
         Some(pinned),
         "edit_entry(NoSnapshot) must not auto-stamp last_access_time"
     );
@@ -380,7 +395,7 @@ fn edit_entry_does_not_auto_stamp_last_access_time_under_either_policy() {
     })
     .unwrap();
     assert_eq!(
-        find_entry(&kdbx, id).times.last_access_time,
+        kdbx.vault().entry(id).unwrap().times.last_access_time,
         Some(pinned),
         "edit_entry(Snapshot) must not auto-stamp last_access_time"
     );
