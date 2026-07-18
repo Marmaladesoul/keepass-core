@@ -24,12 +24,14 @@
 //! resolving side's current value, already present in the merge inputs);
 //! the holding peer adopts that. See the design doc §4.2.
 
-use std::collections::HashMap;
-
 use chrono::{DateTime, Utc};
 use keepass_core::model::CustomDataItem;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::or_set::{
+    OrSetMember, latest_wins, read_custom_data_slot, union_by_key, write_custom_data_slot,
+};
 
 /// `<Meta><CustomData>` key under which the vault's conflict-resolution
 /// list lives. Suffix `.v1` reserves room for schema migration.
@@ -115,10 +117,14 @@ impl ConflictResolution {
             by,
         }
     }
+}
 
-    /// Identity tuple for set-union dedup.
-    fn key_tuple(&self) -> (Uuid, ConflictKind, Option<&str>) {
-        (self.entry, self.kind, self.key.as_deref())
+impl OrSetMember for ConflictResolution {
+    fn issued_at(&self) -> DateTime<Utc> {
+        self.resolved_at
+    }
+    fn origin(&self) -> Option<[u8; 32]> {
+        self.by
     }
 }
 
@@ -135,13 +141,10 @@ pub enum ConflictResolutionError {
 pub fn parse_conflict_resolutions(
     custom_data: &[CustomDataItem],
 ) -> Result<Vec<ConflictResolution>, ConflictResolutionError> {
-    let Some(item) = custom_data
-        .iter()
-        .find(|i| i.key == CONFLICT_RESOLUTION_CUSTOM_DATA_KEY)
-    else {
-        return Ok(Vec::new());
-    };
-    Ok(serde_json::from_str(&item.value)?)
+    Ok(read_custom_data_slot(
+        custom_data,
+        CONFLICT_RESOLUTION_CUSTOM_DATA_KEY,
+    )?)
 }
 
 /// Replace (or, when empty, remove) the resolution list on a vault's Meta
@@ -152,52 +155,36 @@ pub(crate) fn write_conflict_resolutions_to_custom_data(
     resolutions: &[ConflictResolution],
     last_modified: Option<DateTime<Utc>>,
 ) {
-    custom_data.retain(|item| item.key != CONFLICT_RESOLUTION_CUSTOM_DATA_KEY);
-    if resolutions.is_empty() {
-        return;
-    }
-    let json =
-        serde_json::to_string(resolutions).expect("ConflictResolution serialization is infallible");
-    custom_data.push(CustomDataItem::new(
-        CONFLICT_RESOLUTION_CUSTOM_DATA_KEY.to_string(),
-        json,
+    write_custom_data_slot(
+        custom_data,
+        CONFLICT_RESOLUTION_CUSTOM_DATA_KEY,
+        resolutions,
+        resolutions.is_empty(),
         last_modified,
-    ));
+    );
 }
 
 /// Union two resolution lists by `(entry, kind, key)`. When the same
 /// conflict was resolved on two peers, keep the **later** `resolved_at`
-/// (the most recent decision); break an exact tie by the larger `by`
-/// (deterministic). Output is sorted for a stable JSON representation.
+/// (the most recent decision), tie-broken by the larger `by`, via the
+/// shared [`latest_wins`] policy — the mirror of the earliest-wins
+/// tombstone unions. Output is sorted by `(entry, kind, key)` for a
+/// stable JSON representation.
+///
+/// The dedup/sort key uses `kind as u8` (each variant has a distinct
+/// discriminant) so the tuple is `Ord`; grouping and ordering are
+/// identical to keying on [`ConflictKind`] directly.
 #[must_use]
 pub(crate) fn union_conflict_resolutions(
     a: &[ConflictResolution],
     b: &[ConflictResolution],
 ) -> Vec<ConflictResolution> {
-    let mut by_key: HashMap<(Uuid, ConflictKind, Option<String>), ConflictResolution> =
-        HashMap::new();
-    for r in a.iter().chain(b.iter()) {
-        let (entry, kind, key) = r.key_tuple();
-        let map_key = (entry, kind, key.map(str::to_owned));
-        by_key
-            .entry(map_key)
-            .and_modify(|existing| {
-                if r.resolved_at > existing.resolved_at
-                    || (r.resolved_at == existing.resolved_at && r.by > existing.by)
-                {
-                    *existing = r.clone();
-                }
-            })
-            .or_insert_with(|| r.clone());
-    }
-    let mut out: Vec<_> = by_key.into_values().collect();
-    out.sort_by(|x, y| {
-        x.entry
-            .cmp(&y.entry)
-            .then_with(|| (x.kind as u8).cmp(&(y.kind as u8)))
-            .then_with(|| x.key.cmp(&y.key))
-    });
-    out
+    union_by_key(
+        a,
+        b,
+        |r| (r.entry, r.kind as u8, r.key.clone()),
+        latest_wins,
+    )
 }
 
 /// Add (or update) a conflict-resolution record on a vault's Meta

@@ -18,13 +18,16 @@
 //! See `internal design notes` in the Keys repo
 //! for the broader design rationale and use cases.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use keepass_core::model::{Binary, CustomDataItem, Entry};
 use serde::{Deserialize, Serialize};
 
 use crate::hash::entry_content_hash;
+use crate::or_set::{
+    OrSetMember, earliest_wins, read_custom_data_slot, union_by_key, write_custom_data_slot,
+};
 
 /// `<CustomData>` key under which the tombstone list lives on each entry.
 /// Suffix `.v1` reserves room for schema migration.
@@ -109,13 +112,10 @@ pub enum TombstoneError {
 pub fn parse_tombstones(
     custom_data: &[CustomDataItem],
 ) -> Result<Vec<HistoryTombstone>, TombstoneError> {
-    let Some(item) = custom_data
-        .iter()
-        .find(|i| i.key == TOMBSTONE_CUSTOM_DATA_KEY)
-    else {
-        return Ok(Vec::new());
-    };
-    Ok(serde_json::from_str(&item.value)?)
+    Ok(read_custom_data_slot(
+        custom_data,
+        TOMBSTONE_CUSTOM_DATA_KEY,
+    )?)
 }
 
 /// Replace (or, when `tombstones` is empty, remove) the tombstone
@@ -129,17 +129,13 @@ pub(crate) fn write_tombstones_to_custom_data(
     tombstones: &[HistoryTombstone],
     last_modified: Option<DateTime<Utc>>,
 ) {
-    custom_data.retain(|item| item.key != TOMBSTONE_CUSTOM_DATA_KEY);
-    if tombstones.is_empty() {
-        return;
-    }
-    let json =
-        serde_json::to_string(tombstones).expect("HistoryTombstone serialization is infallible");
-    custom_data.push(CustomDataItem::new(
-        TOMBSTONE_CUSTOM_DATA_KEY.to_string(),
-        json,
+    write_custom_data_slot(
+        custom_data,
+        TOMBSTONE_CUSTOM_DATA_KEY,
+        tombstones,
+        tombstones.is_empty(),
         last_modified,
-    ));
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -158,21 +154,16 @@ pub(crate) fn union_history_tombstones(
     a: &[HistoryTombstone],
     b: &[HistoryTombstone],
 ) -> Vec<HistoryTombstone> {
-    let mut by_key: HashMap<(Option<DateTime<Utc>>, [u8; 32]), HistoryTombstone> = HashMap::new();
-    for t in a.iter().chain(b.iter()) {
-        let key = (t.mtime, t.hash);
-        by_key
-            .entry(key)
-            .and_modify(|existing| {
-                if t.at < existing.at || (t.at == existing.at && t.by < existing.by) {
-                    *existing = t.clone();
-                }
-            })
-            .or_insert_with(|| t.clone());
+    union_by_key(a, b, |t| (t.mtime, t.hash), earliest_wins)
+}
+
+impl OrSetMember for HistoryTombstone {
+    fn issued_at(&self) -> DateTime<Utc> {
+        self.at
     }
-    let mut out: Vec<_> = by_key.into_values().collect();
-    out.sort_by_key(|t| (t.mtime, t.hash));
-    out
+    fn origin(&self) -> Option<[u8; 32]> {
+        self.by
+    }
 }
 
 /// Compact a tombstone list into the `(mtime, hash)` lookup set used
@@ -550,13 +541,10 @@ impl TagState {
 /// Returns [`TombstoneError::Parse`] when the value exists but is not
 /// well-formed JSON / doesn't match the schema.
 pub fn parse_tag_state(custom_data: &[CustomDataItem]) -> Result<TagState, TombstoneError> {
-    let Some(item) = custom_data
-        .iter()
-        .find(|i| i.key == TAG_STATE_CUSTOM_DATA_KEY)
-    else {
-        return Ok(TagState::default());
-    };
-    Ok(serde_json::from_str(&item.value)?)
+    Ok(read_custom_data_slot(
+        custom_data,
+        TAG_STATE_CUSTOM_DATA_KEY,
+    )?)
 }
 
 /// Replace (or, when `state` is empty, remove) the tag-state object
@@ -568,28 +556,39 @@ pub(crate) fn write_tag_state_to_custom_data(
     state: &TagState,
     last_modified: Option<DateTime<Utc>>,
 ) {
-    custom_data.retain(|item| item.key != TAG_STATE_CUSTOM_DATA_KEY);
-    if state.is_empty() {
-        return;
-    }
-    let json = serde_json::to_string(state).expect("TagState serialization is infallible");
-    custom_data.push(CustomDataItem::new(
-        TAG_STATE_CUSTOM_DATA_KEY.to_string(),
-        json,
+    write_custom_data_slot(
+        custom_data,
+        TAG_STATE_CUSTOM_DATA_KEY,
+        state,
+        state.is_empty(),
         last_modified,
-    ));
+    );
 }
 
-/// Union two tag-state objects: set union over `remove`, earliest
-/// `at` wins on per-key collision (lex-smallest `by` as the
-/// last-resort tiebreaker — mirrors [`union_history_tombstones`]).
+impl OrSetMember for TagRemoval {
+    fn issued_at(&self) -> DateTime<Utc> {
+        self.at
+    }
+    fn origin(&self) -> Option<[u8; 32]> {
+        self.by
+    }
+}
+
+/// Union two tag-state objects: set union over `remove`, earliest `at`
+/// wins on per-key collision via the shared [`earliest_wins`] policy.
+///
+/// Tag removals live in a `BTreeMap` keyed by the tag string (the
+/// identity is the map key, not a field of the value), so this keeps the
+/// bespoke map-merge skeleton — but the convergence-critical collision
+/// tiebreak is the same single-sourced policy the `Vec`-backed
+/// tombstone/resolution unions use, so it can't drift from them.
 #[must_use]
 pub(crate) fn union_tag_states(a: &TagState, b: &TagState) -> TagState {
     let mut out: BTreeMap<String, TagRemoval> = BTreeMap::new();
     for (tag, rm) in a.remove.iter().chain(b.remove.iter()) {
         out.entry(tag.clone())
             .and_modify(|existing| {
-                if rm.at < existing.at || (rm.at == existing.at && rm.by < existing.by) {
+                if earliest_wins(rm, existing) {
                     *existing = rm.clone();
                 }
             })
@@ -705,13 +704,10 @@ impl AttachmentTombstone {
 pub fn parse_attachment_tombstones(
     custom_data: &[CustomDataItem],
 ) -> Result<Vec<AttachmentTombstone>, TombstoneError> {
-    let Some(item) = custom_data
-        .iter()
-        .find(|i| i.key == ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY)
-    else {
-        return Ok(Vec::new());
-    };
-    Ok(serde_json::from_str(&item.value)?)
+    Ok(read_custom_data_slot(
+        custom_data,
+        ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY,
+    )?)
 }
 
 /// Replace (or, when `tombstones` is empty, remove) the attachment-
@@ -721,46 +717,33 @@ pub(crate) fn write_attachment_tombstones_to_custom_data(
     tombstones: &[AttachmentTombstone],
     last_modified: Option<DateTime<Utc>>,
 ) {
-    custom_data.retain(|item| item.key != ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY);
-    if tombstones.is_empty() {
-        return;
-    }
-    let json =
-        serde_json::to_string(tombstones).expect("AttachmentTombstone serialization is infallible");
-    custom_data.push(CustomDataItem::new(
-        ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY.to_string(),
-        json,
+    write_custom_data_slot(
+        custom_data,
+        ATTACHMENT_TOMBSTONE_CUSTOM_DATA_KEY,
+        tombstones,
+        tombstones.is_empty(),
         last_modified,
-    ));
+    );
 }
 
-/// Union two attachment-tombstone lists by `(filename, hash)`. When
-/// the same pair is present on both sides we keep the one with the
-/// earlier `at`, then the lex-smaller `by` as the deterministic
-/// last-resort tiebreaker (mirrors [`union_history_tombstones`]).
-///
-/// Output is sorted by `(filename, hash)` so the JSON representation
-/// is stable for property tests and visual diffing.
+impl OrSetMember for AttachmentTombstone {
+    fn issued_at(&self) -> DateTime<Utc> {
+        self.at
+    }
+    fn origin(&self) -> Option<[u8; 32]> {
+        self.by
+    }
+}
+
+/// Union two attachment-tombstone lists by `(filename, hash)`, keeping
+/// the earlier-`at` record on collision via the shared [`earliest_wins`]
+/// policy, sorted by `(filename, hash)` for a stable JSON representation.
 #[must_use]
 pub(crate) fn union_attachment_tombstones(
     a: &[AttachmentTombstone],
     b: &[AttachmentTombstone],
 ) -> Vec<AttachmentTombstone> {
-    let mut by_key: HashMap<(String, [u8; 32]), AttachmentTombstone> = HashMap::new();
-    for t in a.iter().chain(b.iter()) {
-        let key = (t.filename.clone(), t.hash);
-        by_key
-            .entry(key)
-            .and_modify(|existing| {
-                if t.at < existing.at || (t.at == existing.at && t.by < existing.by) {
-                    *existing = t.clone();
-                }
-            })
-            .or_insert_with(|| t.clone());
-    }
-    let mut out: Vec<_> = by_key.into_values().collect();
-    out.sort_by(|x, y| (x.filename.as_str(), &x.hash).cmp(&(y.filename.as_str(), &y.hash)));
-    out
+    union_by_key(a, b, |t| (t.filename.clone(), t.hash), earliest_wins)
 }
 
 /// Compact an attachment-tombstone list into a `(filename, hash)`
