@@ -984,10 +984,10 @@ impl Kdbx<Unlocked> {
             .detach_entry(id)
             .ok_or(ModelError::EntryNotFound(id))?;
         let now = self.state.clock.now();
-        self.state.vault.deleted_objects.push(DeletedObject {
-            uuid: removed.id.0,
-            deleted_at: Some(now),
-        });
+        self.state
+            .vault
+            .deleted_objects
+            .push(DeletedObject::new(removed.id.0, Some(now)));
         // The deleted entry may have been the last referent of one or
         // more pool binaries. Reap them now so the post-condition
         // "vault.binaries holds only bytes still reachable from a live
@@ -2636,18 +2636,12 @@ fn push_subtree_tombstones(
     out: &mut Vec<DeletedObject>,
 ) {
     for e in &group.entries {
-        out.push(DeletedObject {
-            uuid: e.id.0,
-            deleted_at: Some(at),
-        });
+        out.push(DeletedObject::new(e.id.0, Some(at)));
     }
     for child in &group.groups {
         push_subtree_tombstones(child, at, out);
     }
-    out.push(DeletedObject {
-        uuid: group.id.0,
-        deleted_at: Some(at),
-    });
+    out.push(DeletedObject::new(group.id.0, Some(at)));
 }
 
 /// `true` if `candidate` matches any existing entry id, group id, or

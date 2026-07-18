@@ -633,7 +633,9 @@ mod tests {
             associations: vec![AutoTypeAssociation {
                 window: "Firefox - *".into(),
                 keystroke_sequence: "{PASSWORD}{ENTER}".into(),
+                unknown_xml: Vec::new(),
             }],
+            unknown_xml: Vec::new(),
         };
         EntryEditor::new(&mut e, &[]).set_auto_type(at.clone());
         assert_eq!(e.auto_type, at);

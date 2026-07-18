@@ -209,6 +209,11 @@ pub struct AutoType {
     pub default_sequence: String,
     /// `<Association>` — per-window override macros, in source order.
     pub associations: Vec<AutoTypeAssociation>,
+    /// Unknown XML children on `<AutoType>` preserved verbatim for
+    /// round-trip — see [`Entry::unknown_xml`] for the full semantics.
+    /// Known `<Association>` children are never captured here; the
+    /// decoder always descends into them.
+    pub unknown_xml: Vec<UnknownElement>,
 }
 
 impl Default for AutoType {
@@ -218,6 +223,7 @@ impl Default for AutoType {
             data_transfer_obfuscation: 0,
             default_sequence: String::new(),
             associations: Vec::new(),
+            unknown_xml: Vec::new(),
         }
     }
 }
@@ -244,6 +250,9 @@ pub struct AutoTypeAssociation {
     pub window: String,
     /// `<KeystrokeSequence>` — macro to play for this window match.
     pub keystroke_sequence: String,
+    /// Unknown XML children on `<Association>` preserved verbatim for
+    /// round-trip — see [`Entry::unknown_xml`] for the full semantics.
+    pub unknown_xml: Vec<UnknownElement>,
 }
 
 impl AutoTypeAssociation {
@@ -257,6 +266,7 @@ impl AutoTypeAssociation {
         Self {
             window: window.into(),
             keystroke_sequence: keystroke_sequence.into(),
+            unknown_xml: Vec::new(),
         }
     }
 }
