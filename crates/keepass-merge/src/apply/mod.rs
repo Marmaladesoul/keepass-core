@@ -144,8 +144,6 @@ pub fn apply_merge(
         remove_entry(local_root, *id);
     }
 
-    let empty_attachment_resolutions: Vec<AttachmentAutoResolution> = Vec::new();
-    let empty_field_resolutions: Vec<(String, Side)> = Vec::new();
     for id in &outcome.disk_only_changes {
         let Some(remote_entry) = find_entry(&remote.root, *id) else {
             continue;
@@ -153,15 +151,11 @@ pub fn apply_merge(
         let Some(local_entry) = find_entry(local_root, *id) else {
             continue;
         };
-        let atts = outcome
-            .attachment_auto_resolutions_per_entry
-            .get(id)
-            .unwrap_or(&empty_attachment_resolutions);
-        let fields = outcome
-            .field_auto_resolutions_per_entry
-            .get(id)
-            .unwrap_or(&empty_field_resolutions);
-        let icon = outcome.icon_auto_resolutions_per_entry.get(id).copied();
+        let plan = outcome.per_entry.get(id);
+        let atts: &[AttachmentAutoResolution] =
+            plan.map_or(&[], |p| p.attachment_auto_resolutions.as_slice());
+        let fields: &[(String, Side)] = plan.map_or(&[], |p| p.field_auto_resolutions.as_slice());
+        let icon = plan.and_then(|p| p.icon_auto_resolution);
         let mut merged = build_merged_entry(
             local_entry,
             remote_entry,
@@ -191,15 +185,11 @@ pub fn apply_merge(
         let Some(local_entry) = find_entry(local_root, *id) else {
             continue;
         };
-        let atts = outcome
-            .attachment_auto_resolutions_per_entry
-            .get(id)
-            .unwrap_or(&empty_attachment_resolutions);
-        let fields = outcome
-            .field_auto_resolutions_per_entry
-            .get(id)
-            .unwrap_or(&empty_field_resolutions);
-        let icon = outcome.icon_auto_resolutions_per_entry.get(id).copied();
+        let plan = outcome.per_entry.get(id);
+        let atts: &[AttachmentAutoResolution] =
+            plan.map_or(&[], |p| p.attachment_auto_resolutions.as_slice());
+        let fields: &[(String, Side)] = plan.map_or(&[], |p| p.field_auto_resolutions.as_slice());
+        let icon = plan.and_then(|p| p.icon_auto_resolution);
         let mut merged = build_merged_entry(
             local_entry,
             remote_entry,

@@ -251,7 +251,6 @@ pub(super) fn apply_entry_conflict_resolutions(
     resolution: &Resolution,
     remap: &mut BinaryPoolRemap<'_>,
 ) {
-    let empty_attachment_auto: Vec<AttachmentAutoResolution> = Vec::new();
     let empty_field_choices: HashMap<String, ConflictSide> = HashMap::new();
     let empty_attachment_choices: HashMap<String, AttachmentChoice> = HashMap::new();
     for conflict in &outcome.entry_conflicts {
@@ -266,10 +265,10 @@ pub(super) fn apply_entry_conflict_resolutions(
             .entry_attachment_choices
             .get(&conflict.entry_id)
             .unwrap_or(&empty_attachment_choices);
-        let atts_auto = outcome
-            .attachment_auto_resolutions_per_entry
+        let atts_auto: &[AttachmentAutoResolution] = outcome
+            .per_entry
             .get(&conflict.entry_id)
-            .unwrap_or(&empty_attachment_auto);
+            .map_or(&[], |p| p.attachment_auto_resolutions.as_slice());
         let icon_choice = resolution
             .entry_icon_choices
             .get(&conflict.entry_id)
@@ -325,7 +324,7 @@ pub(super) fn apply_merged_tags(
     local_entry: &Entry,
     remote_entry: &Entry,
 ) {
-    let Some(set) = outcome.merged_tags_per_entry.get(&id) else {
+    let Some(set) = outcome.per_entry.get(&id).map(|p| &p.merged_tags) else {
         return;
     };
 

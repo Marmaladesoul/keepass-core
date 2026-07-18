@@ -73,36 +73,17 @@ pub struct MergeOutcome {
     /// expected to surface a structured error log entry. Every entry
     /// in this list is also in `lca_missing_entries`.
     pub corruption_signals: Vec<EntryId>,
-    /// Crate-private sidecar: per-entry attachment auto-resolutions
-    /// produced by the classifier in [`crate::entry_merge::merge_entry`].
-    /// Keyed by [`EntryId`] for every entry that ended up in
-    /// `disk_only_changes`, `local_only_changes`, or `entry_conflicts`.
-    /// Apply consumes this to drive per-attachment merge inside the
-    /// entry-level merge. Attachment *conflicts* (where the classifier
-    /// can't auto-decide) surface on
-    /// [`EntryConflict::attachment_deltas`] and consume caller choices
-    /// via [`crate::Resolution::entry_attachment_choices`].
-    pub(crate) attachment_auto_resolutions_per_entry:
-        HashMap<EntryId, Vec<AttachmentAutoResolution>>,
-    /// Crate-private sidecar: per-entry field auto-resolutions produced
-    /// by the classifier in [`crate::entry_merge::merge_entry`]. Keyed
-    /// by [`EntryId`] for every entry that ended up in
-    /// `disk_only_changes` or `local_only_changes`. Apply consumes this
-    /// to overlay per-field winners on the bucket-level clone, so a
-    /// mixed-side auto-resolution (e.g. local wins Title, remote wins
-    /// UserName) doesn't silently lose one side's edit. Field
-    /// *conflicts* (where the classifier can't auto-decide) surface on
-    /// [`EntryConflict::field_deltas`] and consume caller choices via
-    /// [`crate::Resolution::entry_field_choices`].
-    pub(crate) field_auto_resolutions_per_entry: HashMap<EntryId, Vec<(String, Side)>>,
-    /// Crate-private sidecar: per-entry icon auto-resolution produced
-    /// by the classifier in [`crate::entry_merge::merge_entry`]. Keyed
-    /// by [`EntryId`]; only present when the classifier had a clear
-    /// answer against the LCA. Apply consumes this to overlay the
-    /// chosen side's `custom_icon_uuid` on the bucket-winner clone.
-    /// Icon *conflicts* (where the classifier can't auto-decide) will
-    /// surface on [`EntryConflict::icon_delta`] in PR I3.
-    pub(crate) icon_auto_resolutions_per_entry: HashMap<EntryId, Side>,
+    /// Crate-private sidecar: the per-entry auto-resolution facets the
+    /// classifier in [`crate::entry_merge::merge_entry`] produced for
+    /// every both-present entry, keyed by [`EntryId`]. One
+    /// [`PerEntryPlan`] per entry rather than a parallel map per facet:
+    /// the four facets are co-derived from a single `merge_entry` run
+    /// and co-consumed by apply's re-join, so a per-facet map is a
+    /// shredding that let the "mixed-side field wins" data-loss bug slip
+    /// through once (apply overlaid the bucket winner but forgot one
+    /// facet's map). Bundling them makes apply look each entry's decision
+    /// up in one place. See [`PerEntryPlan`] for the per-facet contract.
+    pub(crate) per_entry: HashMap<EntryId, PerEntryPlan>,
     /// Crate-private sidecar: for symmetric edit-vs-delete entries
     /// (local deleted, remote edited), holds the remote-side entry
     /// content and remote's parent-group id. Apply consumes both
@@ -111,14 +92,47 @@ pub struct MergeOutcome {
     /// isn't present locally). Asymmetric delete-vs-edit (the legacy
     /// case where local was the editor) leaves this sidecar empty —
     /// the entry already exists on local.
+    ///
+    /// Kept separate from [`Self::per_entry`] deliberately: it is not a
+    /// `merge_entry` auto-resolution facet — it's produced by the
+    /// delete-vs-edit routing for a *disjoint* set of entries and
+    /// consumed by a different apply path, so it shares neither the
+    /// producer nor the lifecycle of the four bundled facets.
     pub(crate) delete_edit_restore_from_remote: HashMap<EntryId, (Entry, GroupId)>,
-    /// Crate-private sidecar: per-entry merged tag set produced by
-    /// the tag classifier in [`crate::entry_merge::merge_entry`]. Tags
-    /// merge as a pure set (per `internal design notes`)
-    /// with no conflict cases; apply writes the merged set onto the
-    /// merged entry. Stashed for every entry that landed in any
-    /// non-empty bucket, including `entry_conflicts`.
-    pub(crate) merged_tags_per_entry: HashMap<EntryId, std::collections::BTreeSet<String>>,
+}
+
+/// The auto-resolution facets [`crate::entry_merge::merge_entry`]
+/// produced for one both-present entry — a slimmed projection of
+/// `EntryMergeOutput` carrying only what apply needs to re-join.
+///
+/// Populated for every both-present entry (empty facets are the common
+/// case); apply reads the relevant facet(s) for whichever bucket the
+/// entry routed to. `Default` is all-empty.
+#[derive(Debug, Default)]
+pub(crate) struct PerEntryPlan {
+    /// Per-attachment auto-resolutions. Apply drives per-attachment
+    /// merge from these for entries in `disk_only_changes`,
+    /// `local_only_changes`, or `entry_conflicts`. Attachment
+    /// *conflicts* (no auto-decision) surface on
+    /// [`EntryConflict::attachment_deltas`] and consume caller choices
+    /// via [`crate::Resolution::entry_attachment_choices`].
+    pub(crate) attachment_auto_resolutions: Vec<AttachmentAutoResolution>,
+    /// Per-field auto-resolutions. Apply overlays these per-field
+    /// winners on the bucket-level clone for `disk_only_changes` /
+    /// `local_only_changes`, so a mixed-side auto-resolution (e.g. local
+    /// wins Title, remote wins UserName) doesn't silently lose one
+    /// side's edit. Field *conflicts* surface on
+    /// [`EntryConflict::field_deltas`] and consume caller choices via
+    /// [`crate::Resolution::entry_field_choices`].
+    pub(crate) field_auto_resolutions: Vec<(String, Side)>,
+    /// Icon auto-resolution; `Some` only when the classifier had a clear
+    /// answer against the LCA. Apply overlays the chosen side's
+    /// `custom_icon_uuid` on the bucket-winner clone. Icon *conflicts*
+    /// will surface on [`EntryConflict::icon_delta`] in PR I3.
+    pub(crate) icon_auto_resolution: Option<Side>,
+    /// The merged tag set (a pure set merge — no conflict cases, per
+    /// `internal design notes`). Apply writes it onto the merged entry.
+    pub(crate) merged_tags: std::collections::BTreeSet<String>,
 }
 
 #[cfg(test)]
