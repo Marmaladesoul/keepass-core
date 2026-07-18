@@ -17,8 +17,9 @@ use crate::tombstone::{
     parse_tombstones, tombstone_set, union_history_tombstones, write_tombstones_to_custom_data,
 };
 
-use super::resolution::{apply_attachment_resolutions, rebind_history, set_field_from};
+use super::resolution::{apply_attachment_resolutions, rebind_history};
 use super::{collect_group_ids, collect_groups, find_group_mut};
+use crate::field_access::copy_field;
 
 // ---------------------------------------------------------------------------
 // Group-tree LWW reconciliation
@@ -559,7 +560,7 @@ pub(super) fn build_merged_entry(
     // bucket winner. Without this the wholesale clone above would
     // silently lose any field where the per-field classifier picked
     // the other side — the "mixed-side field wins" data-loss class.
-    // `set_field_from` handles both "take value" (source has the
+    // `copy_field` handles both "take value" (source has the
     // field) and "clear field" (source lacks it, for custom keys) the
     // same way `build_resolved_entry` does for the conflict path.
     let winner_side = match winner {
@@ -574,7 +575,7 @@ pub(super) fn build_merged_entry(
             Side::Local => local,
             Side::Remote => remote,
         };
-        set_field_from(&mut merged, source, key);
+        copy_field(&mut merged, source, key);
     }
     // Overlay the icon auto-resolution if the classifier picked a
     // side different from the bucket winner. Mirrors the per-field

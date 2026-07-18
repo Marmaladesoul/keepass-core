@@ -64,6 +64,7 @@ use keepass_core::model::{Binary, Entry};
 use sha2::{Digest, Sha256};
 
 use crate::conflict::{AttachmentDelta, AttachmentDeltaKind, FieldDelta, FieldDeltaKind};
+use crate::field_access::{STANDARD_FIELDS, copy_field, standard_value};
 use crate::hash::{ct_eq, entry_content_hash};
 use crate::time::second_resolution;
 
@@ -204,9 +205,6 @@ impl std::fmt::Debug for AttachmentChange {
         }
     }
 }
-
-/// Names of the standard `<String>` fields on an [`Entry`].
-const STANDARD_FIELDS: &[&str] = &["Title", "UserName", "Password", "URL", "Notes"];
 
 /// Run the 3-way field + attachment merge for one entry pair. See
 /// module docs.
@@ -810,17 +808,6 @@ fn classify_three_way<T: PartialEq>(
     }
 }
 
-fn standard_value<'a>(entry: &'a Entry, name: &str) -> &'a str {
-    match name {
-        "Title" => entry.title.as_str(),
-        "UserName" => entry.username.as_str(),
-        "Password" => entry.password.as_str(),
-        "URL" => entry.url.as_str(),
-        "Notes" => entry.notes.as_str(),
-        _ => unreachable!("STANDARD_FIELDS is fixed"),
-    }
-}
-
 fn custom_map(entry: &Entry) -> HashMap<&str, (&str, bool)> {
     entry
         .custom_fields
@@ -1021,7 +1008,7 @@ pub fn classify(
     let mut merged = local.clone();
     for (key, side) in &out.auto_resolutions {
         if *side == Side::Remote {
-            take_field_from(&mut merged, peer, key);
+            copy_field(&mut merged, peer, key);
         }
     }
     if out.icon_auto_resolution == Some(Side::Remote) {
@@ -1151,38 +1138,6 @@ fn icon_delta_if_differs(local: &Entry, peer: &Entry) -> Option<crate::conflict:
         local_custom_icon_uuid: local.custom_icon_uuid,
         remote_custom_icon_uuid: peer.custom_icon_uuid,
     })
-}
-
-/// Copy field `key`'s value from `source` into `target` — standard field,
-/// custom field (value + `protected` bit), or removal of a custom field the
-/// `source` no longer holds. Mirrors the apply layer's `set_field_from`; kept
-/// local to the classifier so Phase 1 stays additive (no visibility change to
-/// the apply internals). The two are small and stable; a future refactor can
-/// unify them if a third caller appears.
-fn take_field_from(target: &mut Entry, source: &Entry, key: &str) {
-    match key {
-        "Title" => target.title.clone_from(&source.title),
-        "UserName" => target.username.clone_from(&source.username),
-        "Password" => target.password.clone_from(&source.password),
-        "URL" => target.url.clone_from(&source.url),
-        "Notes" => target.notes.clone_from(&source.notes),
-        _ => match source.custom_fields.iter().find(|f| f.key == key) {
-            Some(src) => match target.custom_fields.iter_mut().find(|f| f.key == key) {
-                Some(dst) => {
-                    dst.value.clone_from(&src.value);
-                    dst.protected = src.protected;
-                }
-                None => target
-                    .custom_fields
-                    .push(keepass_core::model::CustomField::new(
-                        src.key.clone(),
-                        src.value.clone(),
-                        src.protected,
-                    )),
-            },
-            None => target.custom_fields.retain(|f| f.key != key),
-        },
-    }
 }
 
 #[cfg(test)]
