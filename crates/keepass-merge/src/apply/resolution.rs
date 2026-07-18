@@ -7,16 +7,18 @@
 //! caller-driven [`AttachmentChoice`] decisions and the
 //! auto-resolution machinery from `entry_merge`) lives here too,
 //! along with the small leaf helpers (`install_side`, `pick_rename`,
-//! `rebind_history`, `remove_field`, `set_field_from`) it relies on.
+//! `rebind_history`) it relies on. Field-level read/copy/clear by KDBX
+//! name lives in [`crate::field_access`].
 
 use std::collections::{HashMap, HashSet};
 
-use keepass_core::model::{Binary, CustomField, DeletedObject, Entry, EntryId, Group};
+use keepass_core::model::{Binary, DeletedObject, Entry, EntryId, Group};
 use uuid::Uuid;
 
 use crate::binary_pool::BinaryPoolRemap;
 use crate::conflict::{AttachmentDelta, AttachmentDeltaKind, EntryConflict, FieldDeltaKind};
 use crate::entry_merge::{AttachmentAutoResolution, Side};
+use crate::field_access::{copy_field, remove_field};
 use crate::hash::entry_content_hash;
 use crate::history_merge::merge_histories;
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice};
@@ -510,7 +512,7 @@ pub(super) fn build_resolved_entry(
             FieldDeltaKind::RemoteOnly | FieldDeltaKind::BothDiffer => {
                 // Take the remote's value (and protected bit for
                 // custom fields).
-                set_field_from(&mut merged, &conflict.remote, &delta.key);
+                copy_field(&mut merged, &conflict.remote, &delta.key);
             }
         }
     }
@@ -812,44 +814,4 @@ pub(super) fn rebind_history(history: &[Entry], remap: &mut BinaryPoolRemap<'_>)
             clone
         })
         .collect()
-}
-
-pub(super) fn remove_field(entry: &mut Entry, key: &str) {
-    match key {
-        "Title" => entry.title.clear(),
-        "UserName" => entry.username.clear(),
-        "Password" => entry.password.clear(),
-        "URL" => entry.url.clear(),
-        "Notes" => entry.notes.clear(),
-        _ => {
-            entry.custom_fields.retain(|f| f.key != key);
-        }
-    }
-}
-
-pub(super) fn set_field_from(entry: &mut Entry, source: &Entry, key: &str) {
-    match key {
-        "Title" => entry.title.clone_from(&source.title),
-        "UserName" => entry.username.clone_from(&source.username),
-        "Password" => entry.password.clone_from(&source.password),
-        "URL" => entry.url.clone_from(&source.url),
-        "Notes" => entry.notes.clone_from(&source.notes),
-        _ => {
-            let from = source.custom_fields.iter().find(|f| f.key == key);
-            match from {
-                Some(src) => match entry.custom_fields.iter_mut().find(|f| f.key == key) {
-                    Some(target) => {
-                        target.value.clone_from(&src.value);
-                        target.protected = src.protected;
-                    }
-                    None => entry.custom_fields.push(CustomField::new(
-                        src.key.clone(),
-                        src.value.clone(),
-                        src.protected,
-                    )),
-                },
-                None => entry.custom_fields.retain(|f| f.key != key),
-            }
-        }
-    }
 }

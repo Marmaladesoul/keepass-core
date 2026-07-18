@@ -52,10 +52,7 @@ use keepass_core::model::{Binary, Entry};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-/// Canonical KDBX names of the standard string fields. The order here
-/// is irrelevant — the hash sorts by name — but matching the KDBX XML
-/// names keeps the canonicalisation human-recognisable.
-const STANDARD_FIELDS: &[&str] = &["Title", "UserName", "Password", "URL", "Notes"];
+use crate::field_access::{STANDARD_FIELDS, standard_value};
 
 /// Domain tags written into the hasher before each section so that
 /// the byte streams for attachments / icon / tags can't collide with
@@ -79,17 +76,9 @@ pub(crate) fn entry_content_hash(entry: &Entry, binaries: &[Binary]) -> [u8; 32]
 
     // Section 1: fields (standard + custom).
     hasher.update([SECTION_FIELDS]);
-    let standard = STANDARD_FIELDS.iter().map(|name| {
-        let value = match *name {
-            "Title" => entry.title.as_str(),
-            "UserName" => entry.username.as_str(),
-            "Password" => entry.password.as_str(),
-            "URL" => entry.url.as_str(),
-            "Notes" => entry.notes.as_str(),
-            _ => unreachable!("STANDARD_FIELDS is fixed"),
-        };
-        (*name, value, false)
-    });
+    let standard = STANDARD_FIELDS
+        .iter()
+        .map(|name| (*name, standard_value(entry, name), false));
     let custom = entry
         .custom_fields
         .iter()

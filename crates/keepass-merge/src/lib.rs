@@ -29,6 +29,7 @@ mod apply;
 mod auto;
 mod binary_pool;
 mod entry_merge;
+mod field_access;
 mod hash;
 mod history_merge;
 mod merge;
