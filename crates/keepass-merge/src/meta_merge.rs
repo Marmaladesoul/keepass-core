@@ -38,8 +38,9 @@
 //! equal or one is `None`; LWW on the `Option<DateTime<Utc>>` value
 //! resolves cleanly.
 
-use chrono::{DateTime, Utc};
 use keepass_core::model::{CustomDataItem, CustomIcon, Meta};
+
+use crate::time::{advance_only_max, later_wins};
 
 /// Apply the spec §2.1 per-field rules to `local.meta`, taking
 /// remote's values where the local-vs-remote arbitration falls to
@@ -83,7 +84,7 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
     // "*_changed" timestamp. The spec calls for activity-log emission
     // when the remote side wins; that surface lands with audit item 10
     // (PR-3.3) — the merge crate just performs the LWW for now.
-    if remote_wins(local.database_name_changed, remote.database_name_changed) {
+    if later_wins(local.database_name_changed, remote.database_name_changed) {
         crate::events::emit(&crate::MergeEvent::VaultMetaFieldLww {
             field: "DatabaseName",
             local_value: local.database_name.clone(),
@@ -92,7 +93,7 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
         local.database_name.clone_from(&remote.database_name);
         local.database_name_changed = remote.database_name_changed;
     }
-    if remote_wins(
+    if later_wins(
         local.database_description_changed,
         remote.database_description_changed,
     ) {
@@ -106,7 +107,7 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
             .clone_from(&remote.database_description);
         local.database_description_changed = remote.database_description_changed;
     }
-    if remote_wins(
+    if later_wins(
         local.default_username_changed,
         remote.default_username_changed,
     ) {
@@ -124,18 +125,19 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
     // pointer move together; otherwise we'd risk
     // `enabled=true, uuid=None` from a partial LWW.
     let recycle_changed_winner_remote =
-        remote_wins(local.recycle_bin_changed, remote.recycle_bin_changed);
+        later_wins(local.recycle_bin_changed, remote.recycle_bin_changed);
     if recycle_changed_winner_remote {
         local.recycle_bin_enabled = remote.recycle_bin_enabled;
         local.recycle_bin_uuid = remote.recycle_bin_uuid;
     }
     // RecycleBinChanged itself is max-of-two: it's a provenance
     // timestamp that should only advance.
-    local.recycle_bin_changed = max_opt(local.recycle_bin_changed, remote.recycle_bin_changed);
+    local.recycle_bin_changed =
+        advance_only_max(local.recycle_bin_changed, remote.recycle_bin_changed);
 
     // --- Settings-arbitrated scalars: LWW on `settings_changed`,
     // which advances every time any other Meta setting is edited.
-    let settings_remote_wins = remote_wins(local.settings_changed, remote.settings_changed);
+    let settings_remote_wins = later_wins(local.settings_changed, remote.settings_changed);
     if settings_remote_wins {
         local.memory_protection = remote.memory_protection;
         local.color.clone_from(&remote.color);
@@ -150,13 +152,14 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
         local.master_key_change_force = remote.master_key_change_force;
     }
     // SettingsChanged itself is max-of-two (advances).
-    local.settings_changed = max_opt(local.settings_changed, remote.settings_changed);
+    local.settings_changed = advance_only_max(local.settings_changed, remote.settings_changed);
 
     // --- MasterKeyChanged: spec §6 hard fault on disagreement is
     // upstream of this. If we got here, the two sides' values are
     // either equal or one is None; max-of-two preserves whichever is
     // concrete.
-    local.master_key_changed = max_opt(local.master_key_changed, remote.master_key_changed);
+    local.master_key_changed =
+        advance_only_max(local.master_key_changed, remote.master_key_changed);
 
     // --- Privacy-conservative caps: min-of-two with the "unlimited"
     // sentinel (`-1`) treated as "infinity". A side that prefers
@@ -179,26 +182,6 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
     // that gets recomputed on write; `unknown_xml` is per-side
     // round-trip ballast. The custom-icon pool and vault-level
     // custom-data are merged by `merge_meta`, not here.
-}
-
-/// `true` when remote's `*_changed` timestamp is strictly newer than
-/// local's. An absent local time loses to any concrete remote time
-/// (the remote side has positively recorded a change; local hasn't).
-/// An absent remote time can't win — no signal to swap on.
-fn remote_wins(local: Option<DateTime<Utc>>, remote: Option<DateTime<Utc>>) -> bool {
-    match (local, remote) {
-        (Some(l), Some(r)) => r > l,
-        (None, Some(_)) => true,
-        _ => false,
-    }
-}
-
-fn max_opt(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.max(y)),
-        (x @ Some(_), None) | (None, x @ Some(_)) => x,
-        (None, None) => None,
-    }
 }
 
 /// `min` with any negative value (`HistoryMaxItems` / `HistoryMaxSize`
@@ -244,13 +227,13 @@ fn merge_meta_custom_data(a: &[CustomDataItem], b: &[CustomDataItem]) -> Vec<Cus
                 // Same value on both sides — pick the entry with the
                 // later (or any concrete) `last_modified` so the
                 // merged timestamp is the freshest one we've seen.
-                if take_later_lm(existing.last_modified, item.last_modified) {
+                if later_wins(existing.last_modified, item.last_modified) {
                     by_key.insert(item.key.as_str(), item);
                 }
             }
             Some(existing) => {
                 // Value disagreement — LWW on `last_modified`.
-                if take_later_lm(existing.last_modified, item.last_modified) {
+                if later_wins(existing.last_modified, item.last_modified) {
                     by_key.insert(item.key.as_str(), item);
                 }
             }
@@ -270,17 +253,6 @@ fn merge_meta_custom_data(a: &[CustomDataItem], b: &[CustomDataItem]) -> Vec<Cus
     out
 }
 
-/// `true` when the candidate's `last_modified` should beat the
-/// incumbent's. Concrete `Some` beats `None`; among two `Some`s the
-/// strictly-later one wins; among two `None`s the incumbent stays.
-fn take_later_lm(incumbent: Option<DateTime<Utc>>, candidate: Option<DateTime<Utc>>) -> bool {
-    match (incumbent, candidate) {
-        (Some(i), Some(c)) => c > i,
-        (None, Some(_)) => true,
-        _ => false,
-    }
-}
-
 /// Grow-only union of two custom-icon pools keyed by `uuid`. On
 /// per-UUID collision the icon with the later `last_modified` wins
 /// (so a user's most recent rename / image-replace propagates).
@@ -293,12 +265,7 @@ fn union_custom_icons(a: &[CustomIcon], b: &[CustomIcon]) -> Vec<CustomIcon> {
         by_uuid
             .entry(icon.uuid)
             .and_modify(|existing| {
-                let take_new = match (existing.last_modified, icon.last_modified) {
-                    (Some(e), Some(i)) => i > e,
-                    (None, Some(_)) => true,
-                    _ => false,
-                };
-                if take_new {
+                if later_wins(existing.last_modified, icon.last_modified) {
                     *existing = icon.clone();
                 }
             })
@@ -312,7 +279,7 @@ fn union_custom_icons(a: &[CustomIcon], b: &[CustomIcon]) -> Vec<CustomIcon> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone as _;
+    use chrono::{DateTime, TimeZone as _, Utc};
 
     fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap()

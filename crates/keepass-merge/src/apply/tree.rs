@@ -12,7 +12,9 @@ use crate::binary_pool::BinaryPoolRemap;
 use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::hash::{entry_content_hash, sha256};
 use crate::history_merge::merge_histories;
-use crate::time::second_resolution;
+use crate::time::{
+    advance_only_max, conservative_edit_wins, later_wins, second_resolution, strictly_after,
+};
 use crate::tombstone::{
     parse_tombstones, tombstone_set, union_history_tombstones, write_tombstones_to_custom_data,
 };
@@ -103,12 +105,7 @@ pub(super) fn apply_concurrent_entry_moves(local: &mut Vault, remote: &Vault) {
         }
         let r_loc = remote_loc.get(id).copied().flatten();
         let l_loc = local_loc.get(id).copied().flatten();
-        let remote_wins = match (l_loc, r_loc) {
-            (Some(l), Some(r)) => r > l,
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        if remote_wins {
+        if later_wins(l_loc, r_loc) {
             moves.push((*id, *remote_parent));
         }
     }
@@ -217,12 +214,7 @@ pub(super) fn apply_concurrent_group_moves(local: &mut Vault, remote: &Vault) {
         }
         let r_loc = remote_loc.get(id).copied().flatten();
         let l_loc = local_loc.get(id).copied().flatten();
-        let remote_wins = match (l_loc, r_loc) {
-            (Some(l), Some(r)) => r > l,
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        if remote_wins {
+        if later_wins(l_loc, r_loc) {
             moves.push((*id, *remote_parent));
         }
     }
@@ -362,18 +354,16 @@ pub(super) fn take_later_recursive(
 ) {
     if let Some(r) = remote_by_id.get(&local_group.id) {
         let local_t = local_group.times.last_modification_time;
-        if let Some(rt) = r.times.last_modification_time {
-            if local_t.is_none_or(|lt| rt > lt) {
-                local_group.name = r.name.clone();
-                local_group.notes = r.notes.clone();
-                local_group.icon_id = r.icon_id;
-                local_group.custom_icon_uuid = r.custom_icon_uuid;
-                local_group.previous_parent_group = r.previous_parent_group;
-                local_group.enable_auto_type = r.enable_auto_type;
-                local_group.enable_searching = r.enable_searching;
-                local_group.default_auto_type_sequence = r.default_auto_type_sequence.clone();
-                local_group.is_expanded = r.is_expanded;
-            }
+        if later_wins(local_t, r.times.last_modification_time) {
+            local_group.name = r.name.clone();
+            local_group.notes = r.notes.clone();
+            local_group.icon_id = r.icon_id;
+            local_group.custom_icon_uuid = r.custom_icon_uuid;
+            local_group.previous_parent_group = r.previous_parent_group;
+            local_group.enable_auto_type = r.enable_auto_type;
+            local_group.enable_searching = r.enable_searching;
+            local_group.default_auto_type_sequence = r.default_auto_type_sequence.clone();
+            local_group.is_expanded = r.is_expanded;
         }
     }
     for sub in &mut local_group.groups {
@@ -391,10 +381,7 @@ pub(super) fn drop_remotely_tombstoned_groups(
         };
         // Conservative keep: if the local group's mtime is later than
         // the tombstone's deleted_at (or either is missing), keep.
-        match (g.times.last_modification_time, *deleted_at) {
-            (Some(local_mt), Some(deleted)) => local_mt > deleted,
-            _ => true,
-        }
+        conservative_edit_wins(g.times.last_modification_time, *deleted_at)
     });
     for sub in &mut group.groups {
         drop_remotely_tombstoned_groups(sub, tombstones);
@@ -733,9 +720,9 @@ fn union_attachment_tombstones_recursive(
                 .iter()
                 .find(|t| t.filename == att.name && t.hash == hash)
                 .map(|t| t.at);
-            match (local_mtime, rm_at) {
-                (Some(m), Some(a)) => m > a,
-                _ => false,
+            match rm_at {
+                Some(a) => strictly_after(local_mtime, a),
+                None => false,
             }
         });
         crate::tombstone::write_attachment_tombstones_to_custom_data(
@@ -789,7 +776,7 @@ fn union_tag_states_recursive(group: &mut Group, remote_entries: &HashMap<EntryI
         let local_mtime = entry.times.last_modification_time;
         entry.tags.retain(|tag| match unioned.remove.get(tag) {
             None => true,
-            Some(rm) => local_mtime.is_some_and(|t| t > rm.at),
+            Some(rm) => strictly_after(local_mtime, rm.at),
         });
         crate::tombstone::write_tag_state_to_custom_data(&mut entry.custom_data, &unioned, None);
     }
@@ -916,11 +903,7 @@ pub(super) fn take_later_opt(
     target: &mut Option<chrono::DateTime<chrono::Utc>>,
     candidate: Option<chrono::DateTime<chrono::Utc>>,
 ) {
-    match (*target, candidate) {
-        (None, Some(c)) => *target = Some(c),
-        (Some(t), Some(c)) if c > t => *target = Some(c),
-        _ => {}
-    }
+    *target = advance_only_max(*target, candidate);
 }
 
 /// Take the earlier of two optional timestamps — the "identity-bearing"

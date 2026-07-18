@@ -37,6 +37,7 @@ use crate::apply::apply_merge;
 use crate::conflict::{AttachmentDeltaKind, EntryConflict};
 use crate::conflict_resolution::{ConflictKind, ConflictResolution, parse_conflict_resolutions};
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice, Resolution};
+use crate::time::strictly_after;
 use crate::{MergeError, MergeOutcome};
 
 /// Standard `<String>` field whose conflicts are flagged `sensitive` in
@@ -327,14 +328,14 @@ fn facet_decision(
     let rr = find_resolution(remote_res, entry, kind, key);
     match (lr, rr) {
         (None, Some(r)) => {
-            if edited_after(local_mtime, r.resolved_at) {
+            if strictly_after(local_mtime, r.resolved_at) {
                 (ConflictSide::Local, true) // local re-edited → re-open
             } else {
                 (ConflictSide::Remote, false) // adopt remote's resolved value
             }
         }
         (Some(l), None) => {
-            if edited_after(remote_mtime, l.resolved_at) {
+            if strictly_after(remote_mtime, l.resolved_at) {
                 (ConflictSide::Local, true) // remote re-edited → re-open
             } else {
                 (ConflictSide::Local, false) // local already holds the resolved value
@@ -343,13 +344,6 @@ fn facet_decision(
         // Both resolved (edge) or no resolution → hold, keep local.
         (Some(_), Some(_)) | (None, None) => (ConflictSide::Local, true),
     }
-}
-
-/// True when `mtime` is strictly after `resolved_at` — i.e. an edit
-/// landed after the resolution and supersedes it. An unknown (`None`)
-/// mtime is treated as not-after (the resolution stands).
-fn edited_after(mtime: Option<DateTime<Utc>>, resolved_at: DateTime<Utc>) -> bool {
-    mtime.is_some_and(|t| t > resolved_at)
 }
 
 fn find_resolution<'a>(

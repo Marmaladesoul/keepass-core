@@ -22,7 +22,7 @@ use crate::field_access::{copy_field, remove_field};
 use crate::hash::{entry_content_hash, sha256};
 use crate::history_merge::merge_histories;
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice};
-use crate::time::second_resolution;
+use crate::time::{second_resolution, strictly_after};
 use crate::tombstone::{
     parse_tombstones, tombstone_set, union_history_tombstones, write_tombstones_to_custom_data,
 };
@@ -363,7 +363,7 @@ pub(super) fn apply_merged_tags(
                 // holding side can't beat a concrete tombstone time —
                 // conservative: don't resurrect a tombstoned tag on
                 // unknown provenance.
-                latest_add.is_some_and(|t| t > rm.at)
+                strictly_after(latest_add, rm.at)
             }
         };
         if kept {
@@ -455,7 +455,7 @@ pub(super) fn apply_attachment_tombstones(
             .filter(|h| **h == hash)
             .and(remote_mtime);
         let latest_add = [local_add, remote_add].into_iter().flatten().max();
-        latest_add.is_some_and(|t| t > rm.at)
+        strictly_after(latest_add, rm.at)
     });
 
     crate::tombstone::write_attachment_tombstones_to_custom_data(

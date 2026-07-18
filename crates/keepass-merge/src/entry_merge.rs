@@ -614,10 +614,7 @@ pub(crate) fn local_edited_after(
     entry: &Entry,
     cutoff: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
-    match (entry.times.last_modification_time, cutoff) {
-        (Some(local_mtime), Some(deleted_at)) => local_mtime > deleted_at,
-        _ => true,
-    }
+    crate::time::conservative_edit_wins(entry.times.last_modification_time, cutoff)
 }
 
 /// Find the most-recent entry version present on both sides — the

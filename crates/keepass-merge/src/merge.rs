@@ -354,19 +354,18 @@ fn route_remote_only(
     outcome.local_deletions_pending_sync.push(id);
 }
 
-/// Mirror of `local_edited_after`: remote's `last_modification_time`
-/// strictly newer than local's `deleted_at`. Both `None` collapses
-/// to "edit wins" (conservative: avoid silently dropping a
-/// remote-side change on absent provenance).
+/// True mirror of `local_edited_after`: shares its
+/// [`conservative_edit_wins`](crate::time::conservative_edit_wins)
+/// policy, with the roles swapped (remote's `last_modification_time`
+/// vs. local's `deleted_at`). Any missing timestamp — including a
+/// remote entry with no mtime facing a concrete local tombstone —
+/// resolves to "edit wins" (keep), so both peers reach the same
+/// keep/drop decision from either direction and the vault converges.
 fn remote_edited_after(
     remote: &Entry,
     local_deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
-    match (remote.times.last_modification_time, local_deleted_at) {
-        (Some(rt), Some(dt)) => rt > dt,
-        (Some(_) | None, None) => true,
-        (None, Some(_)) => false,
-    }
+    crate::time::conservative_edit_wins(remote.times.last_modification_time, local_deleted_at)
 }
 
 /// Build a lookup from [`EntryId`] to its `&Entry` over the entire
