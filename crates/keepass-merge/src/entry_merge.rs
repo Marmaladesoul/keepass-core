@@ -61,7 +61,6 @@
 use std::collections::{BTreeSet, HashMap};
 
 use keepass_core::model::{Binary, Entry};
-use sha2::{Digest, Sha256};
 
 use crate::conflict::{AttachmentDelta, AttachmentDeltaKind, FieldDelta, FieldDeltaKind};
 use crate::field_access::{STANDARD_FIELDS, copy_field, standard_value};
@@ -593,17 +592,11 @@ fn attachment_map<'a>(entry: &'a Entry, binaries: &[Binary]) -> HashMap<&'a str,
             continue;
         };
         out.entry(att.name.as_str()).or_insert(AttachmentSnap {
-            sha256: Some(sha256_of(&bin.data)),
+            sha256: Some(crate::hash::sha256(&bin.data)),
             size: Some(bin.data.len() as u64),
         });
     }
     out
-}
-
-fn sha256_of(bytes: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    h.finalize().into()
 }
 
 /// Detect whether a local entry appears to have been edited after a

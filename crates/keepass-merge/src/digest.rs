@@ -88,8 +88,8 @@ pub fn vault_content_digest(vault: &Vault) -> [u8; 32] {
     for (group, parent) in &groups {
         hasher.update(group.id.0.as_bytes());
         update_optional_uuid(&mut hasher, parent.map(|p| p.0));
-        update_len_prefixed(&mut hasher, group.name.as_bytes());
-        update_len_prefixed(&mut hasher, group.notes.as_bytes());
+        crate::hash::write_len_prefixed(&mut hasher, group.name.as_bytes());
+        crate::hash::write_len_prefixed(&mut hasher, group.notes.as_bytes());
         hasher.update(group.icon_id.to_le_bytes());
         update_optional_uuid(&mut hasher, group.custom_icon_uuid);
     }
@@ -147,19 +147,6 @@ fn update_optional_uuid(hasher: &mut Sha256, uuid: Option<uuid::Uuid>) {
         }
         None => hasher.update([0u8]),
     }
-}
-
-/// Length-prefix (u32 LE) and write a byte slice, mirroring the
-/// convention in `hash`.
-fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
-    debug_assert!(
-        u32::try_from(bytes.len()).is_ok(),
-        "field bytes exceed u32::MAX — refusing to truncate length prefix",
-    );
-    #[allow(clippy::cast_possible_truncation)]
-    let len = bytes.len() as u32;
-    hasher.update(len.to_le_bytes());
-    hasher.update(bytes);
 }
 
 #[cfg(test)]

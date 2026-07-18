@@ -137,7 +137,7 @@ pub(crate) fn entry_content_hash(entry: &Entry, binaries: &[Binary]) -> [u8; 32]
 /// over 4 GiB is implausible for a password-manager record but the
 /// assertion costs nothing and surfaces the bug if `value` ever holds
 /// something it shouldn't.
-fn write_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+pub(crate) fn write_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     debug_assert!(
         u32::try_from(bytes.len()).is_ok(),
         "field bytes exceed u32::MAX — refusing to truncate length prefix",
@@ -146,6 +146,15 @@ fn write_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     let len = bytes.len() as u32;
     hasher.update(len.to_le_bytes());
     hasher.update(bytes);
+}
+
+/// SHA-256 a byte slice into a fixed 32-byte digest. Shared one-shot
+/// helper for the merge paths that hash attachment payloads for
+/// content identity / pool dedup.
+pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().into()
 }
 
 /// Constant-time compare of two SHA-256 digests. Inputs aren't secret

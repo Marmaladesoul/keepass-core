@@ -163,8 +163,7 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
     // shorter retention always wins so the merge can't silently expand
     // a user's chosen quota.
     let prev_max_items = local.history_max_items;
-    local.history_max_items =
-        min_with_unlimited_i32(local.history_max_items, remote.history_max_items);
+    local.history_max_items = min_with_unlimited(local.history_max_items, remote.history_max_items);
     if prev_max_items != remote.history_max_items && prev_max_items != local.history_max_items {
         crate::events::emit(&crate::MergeEvent::HistoryRetentionConverged {
             local_max_items: prev_max_items,
@@ -172,8 +171,7 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
             picked_max_items: local.history_max_items,
         });
     }
-    local.history_max_size =
-        min_with_unlimited_i64(local.history_max_size, remote.history_max_size);
+    local.history_max_size = min_with_unlimited(local.history_max_size, remote.history_max_size);
 
     // NOTE: `generator`, `header_hash`, `unknown_xml` are not merged
     // per the spec. `generator` is overwritten by whichever writer
@@ -203,21 +201,16 @@ fn max_opt(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTim
     }
 }
 
-/// `min` with `-1` (`HistoryMaxItems`'s "unlimited" sentinel) treated
-/// as infinity. So `min(7, -1) = 7`, `min(-1, 30) = 30`, `min(7, 30) = 7`,
-/// `min(-1, -1) = -1`.
-fn min_with_unlimited_i32(a: i32, b: i32) -> i32 {
-    match (a < 0, b < 0) {
-        (true, true) => -1,
-        (true, false) => b,
-        (false, true) => a,
-        (false, false) => a.min(b),
-    }
-}
-
-fn min_with_unlimited_i64(a: i64, b: i64) -> i64 {
-    match (a < 0, b < 0) {
-        (true, true) => -1,
+/// `min` with any negative value (`HistoryMaxItems` / `HistoryMaxSize`
+/// use `-1` as the "unlimited" sentinel) treated as infinity. So
+/// `min(7, -1) = 7`, `min(-1, 30) = 30`, `min(7, 30) = 7`,
+/// `min(-1, -1) = -1`. Generic over the signed integer width so the
+/// `i32` (`HistoryMaxItems`) and `i64` (`HistoryMaxSize`) callers share
+/// one implementation; `From<i8>` supplies the `0`/`-1` constants.
+fn min_with_unlimited<T: Ord + Copy + From<i8>>(a: T, b: T) -> T {
+    let zero = T::from(0);
+    match (a < zero, b < zero) {
+        (true, true) => T::from(-1),
         (true, false) => b,
         (false, true) => a,
         (false, false) => a.min(b),

@@ -19,7 +19,7 @@ use crate::binary_pool::BinaryPoolRemap;
 use crate::conflict::{AttachmentDelta, AttachmentDeltaKind, EntryConflict, FieldDeltaKind};
 use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::field_access::{copy_field, remove_field};
-use crate::hash::entry_content_hash;
+use crate::hash::{entry_content_hash, sha256};
 use crate::history_merge::merge_histories;
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice};
 use crate::time::second_resolution;
@@ -417,7 +417,7 @@ pub(super) fn apply_attachment_tombstones(
         .iter()
         .filter_map(|a| {
             let bin = binaries.get(a.ref_id as usize)?;
-            Some((a.name.as_str(), sha256_bytes(&bin.data)))
+            Some((a.name.as_str(), sha256(&bin.data)))
         })
         .collect();
     let remote_set: std::collections::HashMap<&str, [u8; 32]> = remote_entry
@@ -425,7 +425,7 @@ pub(super) fn apply_attachment_tombstones(
         .iter()
         .filter_map(|a| {
             let bin = binaries.get(a.ref_id as usize)?;
-            Some((a.name.as_str(), sha256_bytes(&bin.data)))
+            Some((a.name.as_str(), sha256(&bin.data)))
         })
         .collect();
     let local_mtime = local_entry.times.last_modification_time;
@@ -437,7 +437,7 @@ pub(super) fn apply_attachment_tombstones(
             // elsewhere in the crate.
             return true;
         };
-        let hash = sha256_bytes(&bin.data);
+        let hash = sha256(&bin.data);
         let key = (att.name.clone(), hash);
         let Some(rm) = lookup.get(&key) else {
             return true;
@@ -463,13 +463,6 @@ pub(super) fn apply_attachment_tombstones(
         &unioned,
         None,
     );
-}
-
-fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    h.finalize().into()
 }
 
 /// Build the post-resolution entry: clone the local side, apply each
