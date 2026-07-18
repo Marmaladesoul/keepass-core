@@ -34,6 +34,7 @@ mod hash;
 mod history_merge;
 mod merge;
 mod meta_merge;
+mod or_set;
 mod time;
 
 pub use crate::apply::{apply_merge, reconcile_timestamps};

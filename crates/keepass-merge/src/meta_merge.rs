@@ -40,6 +40,7 @@
 
 use keepass_core::model::{CustomDataItem, CustomIcon, Meta};
 
+use crate::or_set::union_by_key;
 use crate::time::{advance_only_max, later_wins};
 
 /// Apply the spec §2.1 per-field rules to `local.meta`, taking
@@ -259,21 +260,12 @@ fn merge_meta_custom_data(a: &[CustomDataItem], b: &[CustomDataItem]) -> Vec<Cus
 /// Output is sorted by UUID so the merge is deterministic per
 /// `(local, remote)` pair.
 fn union_custom_icons(a: &[CustomIcon], b: &[CustomIcon]) -> Vec<CustomIcon> {
-    use std::collections::HashMap;
-    let mut by_uuid: HashMap<uuid::Uuid, CustomIcon> = HashMap::new();
-    for icon in a.iter().chain(b.iter()) {
-        by_uuid
-            .entry(icon.uuid)
-            .and_modify(|existing| {
-                if later_wins(existing.last_modified, icon.last_modified) {
-                    *existing = icon.clone();
-                }
-            })
-            .or_insert_with(|| icon.clone());
-    }
-    let mut out: Vec<CustomIcon> = by_uuid.into_values().collect();
-    out.sort_by_key(|i| i.uuid);
-    out
+    union_by_key(
+        a,
+        b,
+        |i| i.uuid,
+        |cand, inc| later_wins(inc.last_modified, cand.last_modified),
+    )
 }
 
 #[cfg(test)]
