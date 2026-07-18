@@ -29,8 +29,9 @@
 //!   unknown-element preservation machinery.
 //! - [`model`] — format-agnostic vault types ([`model::Entry`],
 //!   [`model::Group`], [`model::Vault`]).
-//! - [`format`](mod@format) — version-specific framing: [`format::v3`] and
-//!   [`format::v4`].
+//! - [`format`](mod@format) — version-specific framing (outer/inner headers,
+//!   block streams, KDF parameters), dispatched per KDBX version via
+//!   [`format::VersionFields`].
 //! - [`kdbx`] — the [`kdbx::Kdbx`] typestate machine that ties everything
 //!   together.
 //!

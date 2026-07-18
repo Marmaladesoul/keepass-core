@@ -78,7 +78,7 @@ fn outer_header_accessor_returns_unlock_state_header() {
     // The `outer_header()` getter on Kdbx<Unlocked> exposes the same
     // header the unlock path consumed, so downstream UI can surface
     // cipher / KDF metadata without parsing the raw bytes.
-    use keepass_core::format::KnownCipher;
+    use keepass_core::format::{KnownCipher, VersionFields};
     let composite = CompositeKey::from_password(b"pw");
     let kdbx = Kdbx::<keepass_core::kdbx::Unlocked>::create_empty_v4(&composite, "Header Test")
         .expect("create");
@@ -90,7 +90,10 @@ fn outer_header_accessor_returns_unlock_state_header() {
         "create_empty_v4 defaults to AES-256-CBC",
     );
     assert!(
-        header.kdf_parameters.is_some(),
+        matches!(
+            &header.version_fields,
+            VersionFields::V4 { kdf_parameters, .. } if !kdf_parameters.is_empty()
+        ),
         "KDBX4 outer header always has KdfParameters",
     );
 

@@ -15,7 +15,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use keepass_core::format::{FileSignature, OuterHeader, read_header_fields};
+use keepass_core::format::{FileSignature, OuterHeader, VersionFields, read_header_fields};
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -82,7 +82,7 @@ fn every_well_formed_fixture_round_trips_outer_header() {
         let reparsed = OuterHeader::parse(&fields2, version)
             .unwrap_or_else(|e| panic!("{path:?}: typed re-parse: {e}"));
 
-        assert_eq!(reparsed.version, original.version, "{path:?}: version");
+        assert_eq!(reparsed.version(), original.version(), "{path:?}: version");
         assert_eq!(
             reparsed.cipher_id, original.cipher_id,
             "{path:?}: cipher_id"
@@ -99,33 +99,46 @@ fn every_well_formed_fixture_round_trips_outer_header() {
             reparsed.encryption_iv, original.encryption_iv,
             "{path:?}: encryption_iv"
         );
-        assert_eq!(
-            reparsed.transform_seed, original.transform_seed,
-            "{path:?}: transform_seed"
-        );
-        assert_eq!(
-            reparsed.transform_rounds, original.transform_rounds,
-            "{path:?}: transform_rounds"
-        );
-        assert_eq!(
-            reparsed.protected_stream_key, original.protected_stream_key,
-            "{path:?}: protected_stream_key"
-        );
-        assert_eq!(
-            reparsed.stream_start_bytes, original.stream_start_bytes,
-            "{path:?}: stream_start_bytes"
-        );
-        assert_eq!(
-            reparsed.inner_stream_algorithm, original.inner_stream_algorithm,
-            "{path:?}: inner_stream_algorithm"
-        );
-        assert_eq!(
-            reparsed.kdf_parameters, original.kdf_parameters,
-            "{path:?}: kdf_parameters"
-        );
-        assert_eq!(
-            reparsed.public_custom_data, original.public_custom_data,
-            "{path:?}: public_custom_data"
-        );
+        // Version-specific fields: destructure both arms and compare each
+        // disjoint field. This is the byte-identity guard — the writer must
+        // reproduce every version-specific field the parse yielded.
+        match (&reparsed.version_fields, &original.version_fields) {
+            (
+                VersionFields::V3 {
+                    transform_seed: got_seed,
+                    transform_rounds: got_rounds,
+                    protected_stream_key: got_psk,
+                    stream_start_bytes: got_ssb,
+                    inner_stream_algorithm: got_algo,
+                },
+                VersionFields::V3 {
+                    transform_seed: want_seed,
+                    transform_rounds: want_rounds,
+                    protected_stream_key: want_psk,
+                    stream_start_bytes: want_ssb,
+                    inner_stream_algorithm: want_algo,
+                },
+            ) => {
+                assert_eq!(got_seed, want_seed, "{path:?}: transform_seed");
+                assert_eq!(got_rounds, want_rounds, "{path:?}: transform_rounds");
+                assert_eq!(got_psk, want_psk, "{path:?}: protected_stream_key");
+                assert_eq!(got_ssb, want_ssb, "{path:?}: stream_start_bytes");
+                assert_eq!(got_algo, want_algo, "{path:?}: inner_stream_algorithm");
+            }
+            (
+                VersionFields::V4 {
+                    kdf_parameters: got_kdf,
+                    public_custom_data: got_pcd,
+                },
+                VersionFields::V4 {
+                    kdf_parameters: want_kdf,
+                    public_custom_data: want_pcd,
+                },
+            ) => {
+                assert_eq!(got_kdf, want_kdf, "{path:?}: kdf_parameters");
+                assert_eq!(got_pcd, want_pcd, "{path:?}: public_custom_data");
+            }
+            _ => panic!("{path:?}: version-fields arm mismatch across round-trip"),
+        }
     }
 }

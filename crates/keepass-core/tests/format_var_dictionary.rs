@@ -18,7 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use keepass_core::format::{
-    FileSignature, OuterHeader, VarDictionary, VarValue, Version, read_header_fields,
+    FileSignature, OuterHeader, VarDictionary, VarValue, Version, VersionFields, read_header_fields,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -68,11 +68,11 @@ fn every_kdbx4_fixture_has_a_well_formed_kdf_parameters_dictionary() {
 
     for path in kdbxs {
         let header = parse_outer_header(&path);
-        assert_eq!(header.version, Version::V4);
-        let blob = header
-            .kdf_parameters
-            .as_ref()
-            .unwrap_or_else(|| panic!("{path:?}: KDBX4 header must have KdfParameters"));
+        assert_eq!(header.version(), Version::V4);
+        let VersionFields::V4 { kdf_parameters, .. } = &header.version_fields else {
+            panic!("{path:?}: KDBX4 header must have KdfParameters");
+        };
+        let blob = kdf_parameters;
 
         let dict = VarDictionary::parse(blob)
             .unwrap_or_else(|e| panic!("{path:?}: VarDictionary parse: {e}"));
@@ -134,9 +134,11 @@ fn every_kdbx4_fixture_has_a_well_formed_kdf_parameters_dictionary() {
 fn kdbx3_fixtures_have_no_kdf_parameters() {
     for path in find_kdbxs(&fixtures_root().join("keepassxc")) {
         let header = parse_outer_header(&path);
-        assert_eq!(header.version, Version::V3);
+        assert_eq!(header.version(), Version::V3);
+        // The `VersionFields` enum makes a V3 header carrying KdfParameters
+        // structurally impossible; assert it parsed into the V3 arm.
         assert!(
-            header.kdf_parameters.is_none(),
+            matches!(header.version_fields, VersionFields::V3 { .. }),
             "{path:?}: KDBX3 should not carry KdfParameters"
         );
     }
