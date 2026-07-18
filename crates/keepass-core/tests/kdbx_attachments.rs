@@ -85,15 +85,13 @@ fn shared_binary_survives_one_detach_then_pool_shrinks_after_the_last() {
     assert_eq!(kdbx.vault().binaries.len(), pool_before + 1);
     let ref_a = kdbx
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id_a)
+        .entry(id_a)
         .and_then(|e| e.attachments.first())
         .map(|a| a.ref_id)
         .expect("A has the attachment");
     let ref_b = kdbx
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id_b)
+        .entry(id_b)
         .and_then(|e| e.attachments.first())
         .map(|a| a.ref_id)
         .expect("B has the attachment");
@@ -111,8 +109,7 @@ fn shared_binary_survives_one_detach_then_pool_shrinks_after_the_last() {
     );
     let still_b = kdbx
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id_b)
+        .entry(id_b)
         .and_then(|e| e.attachments.first())
         .map(|a| a.ref_id)
         .expect("B still has its attachment after A detaches");
@@ -167,8 +164,7 @@ fn attach_then_save_round_trips_payload_and_protected_flag() {
 
     let after = reopened
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
+        .entry(id)
         .expect("entry survives round-trip");
     assert_eq!(after.attachments.len(), 2);
 

@@ -92,13 +92,6 @@ fn reopen_with_clock(bytes: Vec<u8>, at: DateTime<Utc>) -> Kdbx<Unlocked> {
         .unwrap()
 }
 
-fn find_entry(kdbx: &Kdbx<Unlocked>, id: EntryId) -> &keepass_core::model::Entry {
-    kdbx.vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("entry present")
-}
-
 fn add_entry_with_icon(
     kdbx: &mut Kdbx<Unlocked>,
     title: &str,
@@ -131,7 +124,7 @@ fn add_custom_icon_returns_uuid_and_custom_icon_accessor_returns_bytes() {
 
     // Reference the icon so the GC on save keeps it alive.
     let id = add_entry_with_icon(&mut kdbx, "With Icon", Some(uuid));
-    assert_eq!(find_entry(&kdbx, id).custom_icon_uuid, Some(uuid));
+    assert_eq!(kdbx.vault().entry(id).unwrap().custom_icon_uuid, Some(uuid));
 
     let reopened = reopen_with_clock(kdbx.save_to_bytes().unwrap(), t0 + Duration::minutes(1));
     assert_eq!(
@@ -220,10 +213,10 @@ fn save_gc_keeps_icon_referenced_only_by_a_history_snapshot() {
         e.set_custom_icon(None);
     })
     .unwrap();
-    assert_eq!(find_entry(&kdbx, id).custom_icon_uuid, None);
-    assert_eq!(find_entry(&kdbx, id).history.len(), 1);
+    assert_eq!(kdbx.vault().entry(id).unwrap().custom_icon_uuid, None);
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 1);
     assert_eq!(
-        find_entry(&kdbx, id).history[0].custom_icon_uuid,
+        kdbx.vault().entry(id).unwrap().history[0].custom_icon_uuid,
         Some(uuid),
         "snapshot preserves the pre-edit reference"
     );
@@ -261,14 +254,14 @@ fn save_gc_clears_dangling_custom_icon_uuid_to_none() {
     // reference — exactly the dangling shape the GC is there to fix.
     assert!(kdbx.remove_custom_icon(uuid));
     assert_eq!(
-        find_entry(&kdbx, id).custom_icon_uuid,
+        kdbx.vault().entry(id).unwrap().custom_icon_uuid,
         Some(uuid),
         "in-memory ref intentionally dangles pre-save"
     );
 
     let reopened = reopen_with_clock(kdbx.save_to_bytes().unwrap(), t0 + Duration::minutes(1));
     assert_eq!(
-        find_entry(&reopened, id).custom_icon_uuid,
+        reopened.vault().entry(id).unwrap().custom_icon_uuid,
         None,
         "dangling custom_icon_uuid must be reset to None on save"
     );

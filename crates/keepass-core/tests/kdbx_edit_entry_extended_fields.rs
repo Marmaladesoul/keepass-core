@@ -129,11 +129,7 @@ fn edit_entry_extended_fields_round_trip_through_save() {
     .unwrap();
 
     // Sanity-check in-memory before round-trip.
-    let edited = kdbx
-        .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
-        .expect("entry findable after edit");
+    let edited = kdbx.vault().entry(id).expect("entry findable after edit");
     assert_eq!(edited.times.last_modification_time, Some(t1));
     assert_eq!(edited.tags, vec!["personal".to_string(), "work".into()]);
     assert!(!edited.quality_check);
@@ -148,8 +144,7 @@ fn edit_entry_extended_fields_round_trip_through_save() {
         .unwrap();
     let after = reopened
         .vault()
-        .iter_entries()
-        .find(|e| e.id == id)
+        .entry(id)
         .expect("entry survives round-trip");
 
     assert_eq!(after.tags, vec!["personal".to_string(), "work".into()]);

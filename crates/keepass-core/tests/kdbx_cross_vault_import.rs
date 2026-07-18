@@ -106,10 +106,6 @@ fn reopen_with_clock(path: &Path, bytes: Vec<u8>, at: DateTime<Utc>) -> Kdbx<Unl
         .unwrap()
 }
 
-fn find_entry(kdbx: &Kdbx<Unlocked>, id: EntryId) -> Option<&keepass_core::model::Entry> {
-    kdbx.vault().iter_entries().find(|e| e.id == id)
-}
-
 fn root_group(kdbx: &Kdbx<Unlocked>) -> GroupId {
     kdbx.vault().root.id
 }
@@ -156,8 +152,8 @@ fn same_vault_round_trip_with_mint_new_uuid() {
     assert_ne!(new_id, src_id, "mint_new_uuid must produce a fresh id");
 
     // Both live on in the source vault; content fields match.
-    let original = find_entry(&src, src_id).expect("original kept");
-    let imported = find_entry(&src, new_id).expect("imported present");
+    let original = src.vault().entry(src_id).expect("original kept");
+    let imported = src.vault().entry(new_id).expect("imported present");
     assert_eq!(original.title, imported.title);
     assert_eq!(original.username, imported.username);
     assert_eq!(original.password, imported.password);
@@ -185,14 +181,14 @@ fn cross_vault_round_trip_with_mint_new_uuid() {
         .unwrap();
 
     assert_ne!(new_id, src_id);
-    let imported = find_entry(&dst, new_id).expect("in destination");
+    let imported = dst.vault().entry(new_id).expect("in destination");
     assert_eq!(imported.title, "Work VPN");
     assert_eq!(imported.username, "bob");
     assert_eq!(imported.password, "hunter2");
 
     // Source still carries the original — export is read-only.
-    assert!(find_entry(&src, src_id).is_some());
-    assert!(find_entry(&dst, src_id).is_none());
+    assert!(src.vault().entry(src_id).is_some());
+    assert!(dst.vault().entry(src_id).is_none());
 }
 
 #[test]
@@ -275,7 +271,7 @@ fn import_false_rejects_collision_with_destination_history_uuid() {
     let portable = src.export_entry(src_with_hist).unwrap();
     let dst_live = dst.import_entry(root_group(&dst), portable, true).unwrap();
     let dst_hist_id = {
-        let dst_entry = find_entry(&dst, dst_live).expect("seeded entry present");
+        let dst_entry = dst.vault().entry(dst_live).expect("seeded entry present");
         assert_eq!(dst_entry.history.len(), 1);
         dst_entry.history[0].id
     };
@@ -349,7 +345,7 @@ fn import_dedups_binaries_against_destination_pool_by_content_hash() {
         "content-hash dedup must not grow the destination pool"
     );
 
-    let imported_entry = find_entry(&dst, imported).unwrap();
+    let imported_entry = dst.vault().entry(imported).unwrap();
     assert_eq!(imported_entry.attachments.len(), 1);
     let ref_id = imported_entry.attachments[0].ref_id;
     assert_eq!(dst.vault().binaries[ref_id as usize].data, b"SHARED");
@@ -373,7 +369,7 @@ fn import_appends_new_binary_when_destination_has_no_match() {
     let imported = dst.import_entry(root_group(&dst), portable, true).unwrap();
 
     assert_eq!(dst.vault().binaries.len(), dst_pool_size_before + 1);
-    let e = find_entry(&dst, imported).unwrap();
+    let e = dst.vault().entry(imported).unwrap();
     let ref_id = e.attachments[0].ref_id;
     assert_eq!(dst.vault().binaries[ref_id as usize].data, b"UNIQUE");
 }
@@ -398,7 +394,7 @@ fn import_preserves_custom_icon_uuid_when_mint_new_uuid_is_false() {
     let portable = src.export_entry(src_id).unwrap();
     let imported = dst.import_entry(root_group(&dst), portable, false).unwrap();
 
-    let e = find_entry(&dst, imported).unwrap();
+    let e = dst.vault().entry(imported).unwrap();
     assert_eq!(
         e.custom_icon_uuid,
         Some(icon_uuid),
@@ -431,7 +427,7 @@ fn import_content_hash_dedups_icons_when_mint_new_uuid_is_true() {
     let portable = src.export_entry(src_id).unwrap();
     let imported = dst.import_entry(root_group(&dst), portable, true).unwrap();
 
-    let e = find_entry(&dst, imported).unwrap();
+    let e = dst.vault().entry(imported).unwrap();
     assert_eq!(
         e.custom_icon_uuid,
         Some(dst_uuid),
@@ -461,7 +457,7 @@ fn import_carries_new_icon_when_destination_has_no_match() {
     let portable = src.export_entry(src_id).unwrap();
     let imported = dst.import_entry(root_group(&dst), portable, true).unwrap();
 
-    let e = find_entry(&dst, imported).unwrap();
+    let e = dst.vault().entry(imported).unwrap();
     let dst_uuid = e.custom_icon_uuid.expect("icon remapped to a UUID");
     assert_eq!(
         dst.vault().meta.custom_icons.len(),
@@ -501,7 +497,7 @@ fn import_carries_history_snapshots_with_verbatim_timestamps() {
     })
     .unwrap();
 
-    let src_entry = find_entry(&src, src_id).unwrap();
+    let src_entry = src.vault().entry(src_id).unwrap();
     assert_eq!(src_entry.history.len(), 2);
     let src_hist_times: Vec<_> = src_entry
         .history
@@ -516,7 +512,7 @@ fn import_carries_history_snapshots_with_verbatim_timestamps() {
     let portable = src.export_entry(src_id).unwrap();
     let imported = dst.import_entry(root_group(&dst), portable, true).unwrap();
 
-    let dst_entry = find_entry(&dst, imported).unwrap();
+    let dst_entry = dst.vault().entry(imported).unwrap();
     assert_eq!(dst_entry.history.len(), 2);
     let dst_hist_times: Vec<_> = dst_entry
         .history
@@ -549,7 +545,7 @@ fn import_carries_binary_referenced_only_by_history_snapshot() {
         e.detach("old.bin");
     })
     .unwrap();
-    let src_entry = find_entry(&src, src_id).unwrap();
+    let src_entry = src.vault().entry(src_id).unwrap();
     assert!(src_entry.attachments.is_empty());
     assert_eq!(src_entry.history[0].attachments.len(), 1);
 
@@ -557,7 +553,7 @@ fn import_carries_binary_referenced_only_by_history_snapshot() {
     let portable = src.export_entry(src_id).unwrap();
     let imported = dst.import_entry(root_group(&dst), portable, true).unwrap();
 
-    let dst_entry = find_entry(&dst, imported).unwrap();
+    let dst_entry = dst.vault().entry(imported).unwrap();
     assert!(dst_entry.attachments.is_empty());
     assert_eq!(dst_entry.history.len(), 1);
     assert_eq!(dst_entry.history[0].attachments.len(), 1);
@@ -581,7 +577,7 @@ fn import_stamps_live_entry_times_from_destination_clock() {
     let portable = src.export_entry(src_id).unwrap();
     let imported = dst.import_entry(root_group(&dst), portable, true).unwrap();
 
-    let e = find_entry(&dst, imported).unwrap();
+    let e = dst.vault().entry(imported).unwrap();
     assert_eq!(e.times.creation_time, Some(t_dst));
     assert_eq!(e.times.last_modification_time, Some(t_dst));
     assert_eq!(e.times.last_access_time, Some(t_dst));
@@ -611,7 +607,7 @@ fn import_preserves_unknown_xml_from_source_entry() {
     let portable = src.export_entry(src_id).unwrap();
     let imported = dst.import_entry(root_group(&dst), portable, true).unwrap();
 
-    let e = find_entry(&dst, imported).unwrap();
+    let e = dst.vault().entry(imported).unwrap();
     let tags: Vec<_> = e.unknown_xml.iter().map(|u| &u.tag).collect();
     assert_eq!(
         tags,
@@ -652,7 +648,7 @@ fn imported_entry_survives_save_and_reopen_with_binaries_and_icons() {
         dst.save_to_bytes().unwrap(),
         t0 + Duration::hours(1),
     );
-    let e = find_entry(&reopened, imported).unwrap();
+    let e = reopened.vault().entry(imported).unwrap();
     assert_eq!(e.title, "Full Shape");
     assert_eq!(e.username, "alice");
     assert_eq!(e.password, "secret");
@@ -690,7 +686,7 @@ fn import_entry_with_uuid_preserves_caller_supplied_id() {
 
     assert_eq!(returned, src_id, "method should return target_uuid");
     assert!(
-        find_entry(&dst, src_id).is_some(),
+        dst.vault().entry(src_id).is_some(),
         "destination should hold the entry under target_uuid",
     );
 }
@@ -727,7 +723,7 @@ fn import_entry_with_uuid_clears_matching_tombstone() {
         .unwrap();
     assert_eq!(restored, src_id);
     assert!(
-        find_entry(&src, src_id).is_some(),
+        src.vault().entry(src_id).is_some(),
         "source should hold the entry alive under the original uuid",
     );
     assert!(
@@ -784,7 +780,9 @@ fn import_entry_with_uuid_mints_fresh_history_snapshot_ids() {
         e.set_title("With history — edited");
     })
     .unwrap();
-    let src_snapshot_ids: Vec<_> = find_entry(&src, src_id)
+    let src_snapshot_ids: Vec<_> = src
+        .vault()
+        .entry(src_id)
         .unwrap()
         .history
         .iter()
@@ -797,7 +795,7 @@ fn import_entry_with_uuid_mints_fresh_history_snapshot_ids() {
     let restored = dst
         .import_entry_with_uuid(root_group(&dst), portable, target_uuid)
         .unwrap();
-    let dst_entry = find_entry(&dst, restored).unwrap();
+    let dst_entry = dst.vault().entry(restored).unwrap();
     let dst_snapshot_ids: Vec<_> = dst_entry.history.iter().map(|s| s.id).collect();
 
     assert_eq!(
