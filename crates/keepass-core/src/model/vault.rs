@@ -83,7 +83,98 @@ impl Vault {
     /// than a field read.
     #[must_use]
     pub fn group_parent(&self, child: GroupId) -> Option<GroupId> {
-        find_parent_group(&self.root, child)
+        self.root.group_parent(child)
+    }
+
+    // ---- Tree-navigation delegates -----------------------------------------
+    //
+    // Thin delegates to the corresponding [`Group`] method on `self.root`,
+    // so consumers holding a `Vault` (FFI surfaces, `kdbx.rs`, tests) reach
+    // the navigation without threading through `.root`. The Group methods
+    // carry the semantics (self-inclusive group lookup, remove-first detach,
+    // depth-first pre-order); see [`Group`].
+
+    /// Find the entry with `id` anywhere in the vault. `None` if absent.
+    /// `entry(id).is_some()` is the contains-entry check.
+    #[must_use]
+    pub fn entry(&self, id: super::EntryId) -> Option<&Entry> {
+        self.root.entry(id)
+    }
+
+    /// Mutable twin of [`Self::entry`].
+    #[must_use]
+    pub fn entry_mut(&mut self, id: super::EntryId) -> Option<&mut Entry> {
+        self.root.entry_mut(id)
+    }
+
+    /// Find the group with `id` anywhere in the vault, **including the
+    /// root** (a match on the root id returns the root). `None` if absent.
+    /// `group(id).is_some()` is the contains-group check.
+    #[must_use]
+    pub fn group(&self, id: GroupId) -> Option<&Group> {
+        self.root.group(id)
+    }
+
+    /// Mutable twin of [`Self::group`], root-inclusive.
+    #[must_use]
+    pub fn group_mut(&mut self, id: GroupId) -> Option<&mut Group> {
+        self.root.group_mut(id)
+    }
+
+    /// Return the id of the group directly holding entry `id`, or `None`
+    /// if `id` is absent. The entry analogue of [`Self::group_parent`].
+    #[must_use]
+    pub fn entry_parent(&self, id: super::EntryId) -> Option<GroupId> {
+        self.root.entry_parent(id)
+    }
+
+    /// Remove the entry with `id` and return it paired with its former
+    /// owning group's id. `None` if absent. See [`Group::detach_entry`].
+    #[must_use]
+    pub fn detach_entry(&mut self, id: super::EntryId) -> Option<(Entry, GroupId)> {
+        self.root.detach_entry(id)
+    }
+
+    /// Remove the subtree rooted at group `id` and return it paired with
+    /// its former parent's id. `None` if absent (or `id` is the root,
+    /// which nothing holds). See [`Group::detach_group`].
+    #[must_use]
+    pub fn detach_group(&mut self, id: GroupId) -> Option<(Group, GroupId)> {
+        self.root.detach_group(id)
+    }
+
+    /// Iterate every entry in the vault, mutably, depth-first pre-order.
+    pub fn iter_entries_mut(&mut self) -> Box<dyn Iterator<Item = &mut Entry> + '_> {
+        self.root.iter_entries_mut()
+    }
+
+    /// Iterate every group in the vault (root included, root first),
+    /// depth-first pre-order.
+    pub fn iter_groups(&self) -> Box<dyn Iterator<Item = &Group> + '_> {
+        self.root.iter_groups()
+    }
+
+    /// Iterate every entry paired with the id of the group directly
+    /// holding it, depth-first pre-order.
+    #[must_use = "returns an iterator and does nothing unless consumed"]
+    pub fn iter_entries_with_parent(&self) -> Box<dyn Iterator<Item = (&Entry, GroupId)> + '_> {
+        self.root.iter_entries_with_parent()
+    }
+
+    /// Iterate every group (root included, root first) paired with its
+    /// parent's id — `None` for the root — depth-first pre-order.
+    #[must_use = "returns an iterator and does nothing unless consumed"]
+    pub fn iter_groups_with_parent(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&Group, Option<GroupId>)> + '_> {
+        self.root.iter_groups_with_parent()
+    }
+
+    /// Visit every group in the vault (root included, root first),
+    /// depth-first pre-order, calling `f` on each. See
+    /// [`Group::for_each_group_mut`].
+    pub fn for_each_group_mut(&mut self, f: &mut impl FnMut(&mut Group)) {
+        self.root.for_each_group_mut(f);
     }
 
     /// Borrow the raw bytes for the custom icon identified by `id`.
@@ -121,22 +212,6 @@ impl Vault {
             deleted_objects: Vec::new(),
         }
     }
-}
-
-/// Walk `root`'s subtree looking for the group with id `child`,
-/// returning the id of its immediate parent group. Returns `None` if
-/// `child == root.id` (the root has no parent) or if `child` is not
-/// present in the tree at all.
-fn find_parent_group(root: &Group, child: GroupId) -> Option<GroupId> {
-    for g in &root.groups {
-        if g.id == child {
-            return Some(root.id);
-        }
-        if let Some(p) = find_parent_group(g, child) {
-            return Some(p);
-        }
-    }
-    None
 }
 
 /// A tombstone for a deleted entry or group, recorded under
