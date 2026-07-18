@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::{Entry, Group, GroupId, Meta};
+use super::{Entry, Group, GroupId, Meta, UnknownElement};
 
 /// The root vault type (format-agnostic).
 ///
@@ -228,6 +228,10 @@ pub struct DeletedObject {
     pub uuid: Uuid,
     /// `<DeletionTime>` — when the deletion was recorded.
     pub deleted_at: Option<DateTime<Utc>>,
+    /// Unknown XML children on `<DeletedObject>` preserved verbatim for
+    /// round-trip — see [`super::Entry::unknown_xml`] for the full
+    /// semantics.
+    pub unknown_xml: Vec<UnknownElement>,
 }
 
 impl DeletedObject {
@@ -241,7 +245,11 @@ impl DeletedObject {
     /// the natural companion to the type's `#[non_exhaustive]` marker.
     #[must_use]
     pub fn new(uuid: Uuid, deleted_at: Option<DateTime<Utc>>) -> Self {
-        Self { uuid, deleted_at }
+        Self {
+            uuid,
+            deleted_at,
+            unknown_xml: Vec::new(),
+        }
     }
 }
 

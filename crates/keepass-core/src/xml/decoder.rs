@@ -1018,9 +1018,11 @@ fn has_protected_attribute(e: &BytesStart<'_>) -> Result<bool, XmlError> {
 /// reads up to and including the matching `</DeletedObjects>`.
 ///
 /// Each child is a `<DeletedObject>` with a `<UUID>` and an optional
-/// `<DeletionTime>`. Unknown children are silently ignored, and a
-/// `<DeletedObject>` missing a UUID is silently skipped — tombstones
-/// with no identity are meaningless.
+/// `<DeletionTime>`. A `<DeletedObject>` missing a UUID is silently
+/// skipped — tombstones with no identity are meaningless. Unknown
+/// children *of a `<DeletedObject>`* are captured verbatim (see
+/// [`read_one_deleted_object`]); unknown children directly under
+/// `<DeletedObjects>` are still ignored.
 fn read_deleted_objects<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
@@ -1057,12 +1059,19 @@ fn read_deleted_objects<R: std::io::BufRead>(
     }
 }
 
+/// Read a single `<DeletedObject>` into an optional [`DeletedObject`].
+///
+/// A tombstone with no `<UUID>` can't round-trip meaningfully and is
+/// dropped (returns `None`). Unknown children are captured verbatim
+/// into [`DeletedObject::unknown_xml`], so a foreign writer's additions
+/// travel with a tombstone that does carry a UUID.
 fn read_one_deleted_object<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
 ) -> Result<Option<DeletedObject>, XmlError> {
     let mut uuid: Option<Uuid> = None;
     let mut deleted_at: Option<DateTime<Utc>> = None;
+    let mut unknown_xml: Vec<UnknownElement> = Vec::new();
     let mut depth: i32 = 0;
     loop {
         match reader.read_event_into(buf) {
@@ -1070,23 +1079,48 @@ fn read_one_deleted_object<R: std::io::BufRead>(
             Ok(Event::Start(e)) => {
                 let name = tag_name(&e)?;
                 if depth == 0 {
-                    let text = read_text(reader, buf)?;
+                    // Match the name *before* consuming text so an
+                    // unknown child can be drained whole by
+                    // `capture_unknown_subtree`.
                     match name.as_str() {
-                        "UUID" => uuid = Some(parse_uuid(&text)?),
+                        "UUID" => {
+                            let text = read_text(reader, buf)?;
+                            uuid = Some(parse_uuid(&text)?);
+                        }
                         "DeletionTime" => {
+                            let text = read_text(reader, buf)?;
                             deleted_at = parse_optional_timestamp(&text, "DeletionTime")?;
                         }
-                        _ => { /* unknown child — ignore */ }
+                        _ => {
+                            // Unknown child of <DeletedObject> — capture
+                            // verbatim for round-trip.
+                            let unknown = capture_unknown_subtree(reader, e)?;
+                            unknown_xml.push(unknown);
+                        }
                     }
                     continue;
                 }
                 depth += 1;
+            }
+            // Self-closing unknown child — capture unless it is a name the
+            // typed encoder ALWAYS writes. `write_deleted_objects` emits
+            // `<UUID>` unconditionally, so a self-closing `<UUID/>` would
+            // double-emit; absorb it as a no-op. `<DeletionTime>` is
+            // written only when present, so its self-closing form is
+            // captured.
+            Ok(Event::Empty(e)) if depth == 0 => {
+                let name = tag_name(&e)?;
+                if name != "UUID" {
+                    let unknown = capture_unknown_empty(e)?;
+                    unknown_xml.push(unknown);
+                }
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
                     return Ok(uuid.map(|u| DeletedObject {
                         uuid: u,
                         deleted_at,
+                        unknown_xml,
                     }));
                 }
                 depth -= 1;
@@ -1188,8 +1222,10 @@ fn read_meta<R: std::io::BufRead>(
 /// opening `<AutoType>` tag has just been consumed; reads up to and
 /// including the matching `</AutoType>`.
 ///
-/// Unknown children are silently ignored; known flags that are absent
-/// keep their default values (see [`AutoType::default`]).
+/// Known flags that are absent keep their default values (see
+/// [`AutoType::default`]). Unknown children are captured verbatim into
+/// [`AutoType::unknown_xml`] so a foreign writer's additions survive a
+/// read → save round-trip.
 fn read_auto_type<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
@@ -1202,25 +1238,54 @@ fn read_auto_type<R: std::io::BufRead>(
             Ok(Event::Start(e)) => {
                 let name = tag_name(&e)?;
                 if depth == 0 {
-                    if name == "Association" {
-                        if let Some(assoc) = read_auto_type_association(reader, buf)? {
-                            at.associations.push(assoc);
-                        }
-                        continue;
-                    }
-                    let text = read_text(reader, buf)?;
+                    // Match the name *before* consuming any text: an
+                    // unknown child is drained whole by
+                    // `capture_unknown_subtree`, so we must not have
+                    // already pulled its `<Value>` out via `read_text`.
                     match name.as_str() {
-                        "Enabled" => at.enabled = parse_bool(&text, "Enabled")?,
+                        "Association" => {
+                            if let Some(assoc) = read_auto_type_association(reader, buf)? {
+                                at.associations.push(assoc);
+                            }
+                        }
+                        "Enabled" => {
+                            let text = read_text(reader, buf)?;
+                            at.enabled = parse_bool(&text, "Enabled")?;
+                        }
                         "DataTransferObfuscation" => {
+                            let text = read_text(reader, buf)?;
                             at.data_transfer_obfuscation =
                                 parse_int::<u32>(&text, "DataTransferObfuscation")?;
                         }
-                        "DefaultSequence" => at.default_sequence = text,
-                        _ => { /* unknown — ignore */ }
+                        "DefaultSequence" => at.default_sequence = read_text(reader, buf)?,
+                        _ => {
+                            // Unknown child of <AutoType> — capture
+                            // verbatim for round-trip. See
+                            // `capture_unknown_subtree`.
+                            let unknown = capture_unknown_subtree(reader, e)?;
+                            at.unknown_xml.push(unknown);
+                        }
                     }
                     continue;
                 }
                 depth += 1;
+            }
+            // Self-closing unknown child at top level — capture unless it
+            // is a name the typed encoder ALWAYS writes. `write_auto_type`
+            // emits `<Enabled>` and `<DataTransferObfuscation>`
+            // unconditionally, so routing a self-closing form of either
+            // into `unknown_xml` would double-emit on save (once typed,
+            // once from the captured stub); absorb them as no-ops.
+            // `<DefaultSequence>` (written only when non-empty) and
+            // `<Association>` (only ever emitted from the typed
+            // `associations` list) carry no double-emit risk, so their
+            // self-closing forms are captured.
+            Ok(Event::Empty(e)) if depth == 0 => {
+                let name = tag_name(&e)?;
+                if !matches!(name.as_str(), "Enabled" | "DataTransferObfuscation") {
+                    let unknown = capture_unknown_empty(e)?;
+                    at.unknown_xml.push(unknown);
+                }
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -1243,6 +1308,7 @@ fn read_auto_type_association<R: std::io::BufRead>(
 ) -> Result<Option<AutoTypeAssociation>, XmlError> {
     let mut window = String::new();
     let mut keystroke_sequence = String::new();
+    let mut unknown_xml: Vec<UnknownElement> = Vec::new();
     let mut saw_any = false;
     let mut depth: i32 = 0;
     loop {
@@ -1251,28 +1317,52 @@ fn read_auto_type_association<R: std::io::BufRead>(
             Ok(Event::Start(e)) => {
                 let name = tag_name(&e)?;
                 if depth == 0 {
-                    let text = read_text(reader, buf)?;
                     match name.as_str() {
                         "Window" => {
-                            window = text;
+                            window = read_text(reader, buf)?;
                             saw_any = true;
                         }
                         "KeystrokeSequence" => {
-                            keystroke_sequence = text;
+                            keystroke_sequence = read_text(reader, buf)?;
                             saw_any = true;
                         }
-                        _ => { /* unknown — ignore */ }
+                        _ => {
+                            // Unknown child of <Association> — capture
+                            // verbatim. A captured unknown is itself
+                            // "worth keeping" (see the End arm), so an
+                            // association carrying only foreign children
+                            // still survives the round-trip.
+                            let unknown = capture_unknown_subtree(reader, e)?;
+                            unknown_xml.push(unknown);
+                        }
                     }
                     continue;
                 }
                 depth += 1;
             }
+            // Self-closing unknown child — capture unless it is a name the
+            // typed encoder ALWAYS writes. `write_auto_type` emits both
+            // `<Window>` and `<KeystrokeSequence>` unconditionally for
+            // every association, so a self-closing form of either would
+            // double-emit on save; absorb those as no-ops.
+            Ok(Event::Empty(e)) if depth == 0 => {
+                let name = tag_name(&e)?;
+                if !matches!(name.as_str(), "Window" | "KeystrokeSequence") {
+                    let unknown = capture_unknown_empty(e)?;
+                    unknown_xml.push(unknown);
+                }
+            }
             Ok(Event::End(_)) => {
                 if depth == 0 {
-                    return Ok(if saw_any {
+                    // Keep the association if it carried any known field
+                    // OR any captured unknown; a genuinely empty
+                    // `<Association></Association>` still collapses to
+                    // None, as before.
+                    return Ok(if saw_any || !unknown_xml.is_empty() {
                         Some(AutoTypeAssociation {
                             window,
                             keystroke_sequence,
+                            unknown_xml,
                         })
                     } else {
                         None
@@ -4184,6 +4274,305 @@ mod tests {
         let entry = vault.iter_entries().next().unwrap();
         let entry_tags: Vec<_> = entry.unknown_xml.iter().map(|u| &u.tag).collect();
         assert_eq!(entry_tags, vec!["EntryFlag"]);
+    }
+
+    // -----------------------------------------------------------------
+    // Unknown-child fidelity for <AutoType>, <Association>, and
+    // <DeletedObject>.
+    //
+    // Regression coverage for the round-trip fidelity FIX: the readers
+    // for these three blocks used to funnel unknown children into a
+    // `_ => {}` catch-all and silently drop them. They now capture into
+    // `unknown_xml`, mirroring `read_group` / `read_meta`, and the
+    // encoders re-emit them — so a foreign client's additions survive a
+    // decode → encode → decode cycle.
+    // -----------------------------------------------------------------
+
+    /// decode → encode → decode. The *second* decode is the honest
+    /// proof: an unknown captured on the first read only "survives" if
+    /// the encoder actually re-emitted it, so the re-parse can find it
+    /// again.
+    fn round_trip_vault(xml: &[u8]) -> Vault {
+        let vault = decode_vault(xml).expect("first decode");
+        let encoded = crate::xml::encoder::encode_vault(&vault).expect("encode");
+        decode_vault(&encoded).expect("second decode")
+    }
+
+    /// Structural assertion: some captured fragment carries `tag` and,
+    /// somewhere in its serialised bytes, `needle`. Byte-exact
+    /// comparison would trip over quick-xml's whitespace /
+    /// empty-shorthand normalisation.
+    fn assert_frag(unknowns: &[UnknownElement], tag: &str, needle: &str) {
+        let hit = unknowns
+            .iter()
+            .find(|u| u.tag == tag)
+            .unwrap_or_else(|| panic!("unknown <{tag}> not captured; got {unknowns:?}"));
+        let xml = std::str::from_utf8(&hit.raw_xml).expect("fragment is UTF-8");
+        assert!(
+            xml.contains(needle),
+            "fragment <{tag}> missing {needle:?}: {xml:?}"
+        );
+    }
+
+    /// ACCEPTANCE TEST for the fix: an unknown Start-subtree child inside
+    /// `<AutoType>` survives decode → encode → decode. Pre-fix,
+    /// `read_auto_type`'s `_ => {}` arm dropped it on the first decode,
+    /// so the re-encoded document no longer carried it.
+    #[test]
+    fn unknown_subtree_inside_auto_type_survives_round_trip() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root><Group>
+    <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>
+    <Entry>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+      <String><Key>Title</Key><Value>T</Value></String>
+      <AutoType>
+        <Enabled>True</Enabled>
+        <DataTransferObfuscation>0</DataTransferObfuscation>
+        <PluginData><X>1</X></PluginData>
+      </AutoType>
+    </Entry>
+  </Group></Root>
+</KeePassFile>";
+        let vault = round_trip_vault(xml);
+        let entry = vault.iter_entries().next().expect("one entry");
+        assert_frag(&entry.auto_type.unknown_xml, "PluginData", "<X>1</X>");
+    }
+
+    /// An unknown child inside `<Association>` survives the round-trip,
+    /// carried on the association's own `unknown_xml`.
+    #[test]
+    fn unknown_child_inside_association_survives_round_trip() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root><Group>
+    <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>
+    <Entry>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+      <String><Key>Title</Key><Value>T</Value></String>
+      <AutoType>
+        <Enabled>True</Enabled>
+        <DataTransferObfuscation>0</DataTransferObfuscation>
+        <Association>
+          <Window>Firefox - *</Window>
+          <KeystrokeSequence>{PASSWORD}</KeystrokeSequence>
+          <AssocExt>xyz</AssocExt>
+        </Association>
+      </AutoType>
+    </Entry>
+  </Group></Root>
+</KeePassFile>";
+        let vault = round_trip_vault(xml);
+        let entry = vault.iter_entries().next().expect("one entry");
+        let assoc = entry
+            .auto_type
+            .associations
+            .first()
+            .expect("one association");
+        assert_eq!(assoc.window, "Firefox - *");
+        assert_frag(&assoc.unknown_xml, "AssocExt", "xyz");
+    }
+
+    /// CRITICAL EDGE CASE: an association whose *only* child is unknown
+    /// must still survive. Pre-fix, `read_auto_type_association`
+    /// returned `None` unless a Window/KeystrokeSequence was seen, so
+    /// such an association was dropped whole — taking its unknown with
+    /// it.
+    #[test]
+    fn association_with_only_an_unknown_child_survives_round_trip() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root><Group>
+    <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>
+    <Entry>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+      <String><Key>Title</Key><Value>T</Value></String>
+      <AutoType>
+        <Enabled>True</Enabled>
+        <DataTransferObfuscation>0</DataTransferObfuscation>
+        <Association><AssocOnly>keep</AssocOnly></Association>
+      </AutoType>
+    </Entry>
+  </Group></Root>
+</KeePassFile>";
+        let vault = round_trip_vault(xml);
+        let entry = vault.iter_entries().next().expect("one entry");
+        let assoc = entry
+            .auto_type
+            .associations
+            .first()
+            .expect("association carrying only an unknown must survive");
+        assert_frag(&assoc.unknown_xml, "AssocOnly", "keep");
+    }
+
+    /// An unknown child inside `<DeletedObject>` survives the round-trip.
+    #[test]
+    fn unknown_child_inside_deleted_object_survives_round_trip() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group><UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name></Group>
+    <DeletedObjects>
+      <DeletedObject>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAg==</UUID>
+        <DeletionTime>2024-03-01T12:34:56Z</DeletionTime>
+        <TombstoneExt>keep-me</TombstoneExt>
+      </DeletedObject>
+    </DeletedObjects>
+  </Root>
+</KeePassFile>";
+        let vault = round_trip_vault(xml);
+        let obj = vault.deleted_objects.first().expect("one tombstone");
+        assert_frag(&obj.unknown_xml, "TombstoneExt", "keep-me");
+    }
+
+    /// An unknown SELF-CLOSING (empty) child inside `<AutoType>` is
+    /// captured via the Empty-event arm and survives the round-trip.
+    #[test]
+    fn unknown_self_closing_child_inside_auto_type_survives_round_trip() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root><Group>
+    <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>
+    <Entry>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+      <String><Key>Title</Key><Value>T</Value></String>
+      <AutoType>
+        <Enabled>True</Enabled>
+        <DataTransferObfuscation>0</DataTransferObfuscation>
+        <AutoTypeFlag/>
+      </AutoType>
+    </Entry>
+  </Group></Root>
+</KeePassFile>";
+        let vault = round_trip_vault(xml);
+        let entry = vault.iter_entries().next().expect("one entry");
+        let tags: Vec<_> = entry
+            .auto_type
+            .unknown_xml
+            .iter()
+            .map(|u| u.tag.as_str())
+            .collect();
+        assert_eq!(tags, vec!["AutoTypeFlag"]);
+    }
+
+    /// An `<AutoType>` that is otherwise fully default (Enabled defaults
+    /// to true, no obfuscation, no default sequence, no associations)
+    /// but carries an unknown child must still round-trip the unknown.
+    /// This guards the `is_default_auto_type` change: without the
+    /// `unknown_xml.is_empty()` clause, the encoder skips a "default"
+    /// AutoType entirely and the captured unknown is silently lost.
+    #[test]
+    fn otherwise_default_auto_type_still_round_trips_its_unknown() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root><Group>
+    <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>
+    <Entry>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+      <String><Key>Title</Key><Value>T</Value></String>
+      <AutoType><PluginConf>on</PluginConf></AutoType>
+    </Entry>
+  </Group></Root>
+</KeePassFile>";
+        // First decode: the AutoType is default on every typed field —
+        // only `unknown_xml` is non-empty. So this fixture genuinely
+        // exercises the `is_default_auto_type` guard.
+        let first = decode_vault(xml).expect("decode");
+        let e0 = first.iter_entries().next().unwrap();
+        assert_eq!(e0.auto_type.enabled, AutoType::default().enabled);
+        assert_eq!(
+            e0.auto_type.data_transfer_obfuscation,
+            AutoType::default().data_transfer_obfuscation
+        );
+        assert!(e0.auto_type.default_sequence.is_empty());
+        assert!(e0.auto_type.associations.is_empty());
+        assert!(!e0.auto_type.unknown_xml.is_empty());
+
+        let vault = round_trip_vault(xml);
+        let entry = vault.iter_entries().next().expect("one entry");
+        assert_frag(&entry.auto_type.unknown_xml, "PluginConf", "on");
+    }
+
+    /// REGRESSION GUARD: a vault with a normal AutoType (Enabled +
+    /// obfuscation + default sequence + a well-formed association) and a
+    /// normal tombstone — NO unknowns anywhere in these blocks — must
+    /// not gain any spurious or duplicated element on save. The capture
+    /// path has to be completely inert when there is nothing to capture:
+    /// no double-emit, no self-closing stub, no reordering. Proven two
+    /// ways: (a) each canonical child appears exactly once in the
+    /// encoded output, and (b) the encoder is a fixed point on the
+    /// re-decoded vault (re-encoding yields identical bytes).
+    #[test]
+    fn no_unknowns_common_case_does_not_perturb_encoding() {
+        let xml = br"<KeePassFile>
+  <Meta><Generator>G</Generator></Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <String><Key>Title</Key><Value>T</Value></String>
+        <AutoType>
+          <Enabled>False</Enabled>
+          <DataTransferObfuscation>1</DataTransferObfuscation>
+          <DefaultSequence>{USERNAME}{TAB}{PASSWORD}</DefaultSequence>
+          <Association>
+            <Window>Firefox - *</Window>
+            <KeystrokeSequence>{PASSWORD}{ENTER}</KeystrokeSequence>
+          </Association>
+        </AutoType>
+      </Entry>
+    </Group>
+    <DeletedObjects>
+      <DeletedObject>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAg==</UUID>
+        <DeletionTime>2024-03-01T12:34:56Z</DeletionTime>
+      </DeletedObject>
+    </DeletedObjects>
+  </Root>
+</KeePassFile>";
+        let vault1 = decode_vault(xml).expect("decode 1");
+
+        // Nothing was captured as unknown anywhere in these blocks.
+        let entry1 = vault1.iter_entries().next().unwrap();
+        assert!(entry1.auto_type.unknown_xml.is_empty());
+        assert!(entry1.auto_type.associations[0].unknown_xml.is_empty());
+        assert!(vault1.deleted_objects[0].unknown_xml.is_empty());
+
+        let encoded1 = crate::xml::encoder::encode_vault(&vault1).expect("encode 1");
+        let s = std::str::from_utf8(&encoded1).expect("utf8");
+
+        // No double-emit: every canonical child that the encoder writes
+        // for this document appears exactly once.
+        for tag in [
+            "<Enabled>",
+            "<DataTransferObfuscation>",
+            "<DefaultSequence>",
+            "<Association>",
+            "<Window>",
+            "<KeystrokeSequence>",
+            "<AutoType>",
+            "<DeletedObject>",
+            "<DeletionTime>",
+        ] {
+            assert_eq!(
+                s.matches(tag).count(),
+                1,
+                "expected exactly one {tag} (no double-emit) in: {s}"
+            );
+        }
+
+        // Encoder fixed point: re-decoding then re-encoding is a no-op on
+        // the bytes, so the capture logic introduced nothing the decoder
+        // would re-ingest differently.
+        let vault2 = decode_vault(&encoded1).expect("decode 2");
+        let encoded2 = crate::xml::encoder::encode_vault(&vault2).expect("encode 2");
+        assert_eq!(
+            encoded1, encoded2,
+            "no-unknowns round-trip perturbed the encoded bytes"
+        );
     }
 
     /// KDBX4 timestamps are base64 of an 8-byte little-endian seconds-

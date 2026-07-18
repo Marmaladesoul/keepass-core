@@ -570,6 +570,14 @@ fn is_default_auto_type(at: &AutoType) -> bool {
         && at.data_transfer_obfuscation == d.data_transfer_obfuscation
         && at.default_sequence == d.default_sequence
         && at.associations.is_empty()
+        // A block carrying captured unknown children (directly, or via an
+        // association that survived only because of its own unknowns) is
+        // NOT default — otherwise `write_auto_type` would be skipped and
+        // the foreign XML silently dropped on save, defeating the
+        // round-trip fix. `associations.is_empty()` already covers the
+        // association-only-unknowns case (the association keeps the list
+        // non-empty), but the direct-unknowns check is load-bearing.
+        && at.unknown_xml.is_empty()
 }
 
 fn write_auto_type<W: std::io::Write>(w: &mut Writer<W>, at: &AutoType) -> Result<(), XmlError> {
@@ -587,8 +595,10 @@ fn write_auto_type<W: std::io::Write>(w: &mut Writer<W>, at: &AutoType) -> Resul
         open(w, "Association")?;
         write_text_element(w, "Window", &assoc.window)?;
         write_text_element(w, "KeystrokeSequence", &assoc.keystroke_sequence)?;
+        write_unknown_xml(w, &assoc.unknown_xml)?;
         close(w, "Association")?;
     }
+    write_unknown_xml(w, &at.unknown_xml)?;
     close(w, "AutoType")
 }
 
@@ -601,6 +611,7 @@ fn write_deleted_objects<W: std::io::Write>(
         open(w, "DeletedObject")?;
         write_text_element(w, "UUID", &uuid_to_base64(obj.uuid))?;
         write_optional_timestamp(w, "DeletionTime", obj.deleted_at)?;
+        write_unknown_xml(w, &obj.unknown_xml)?;
         close(w, "DeletedObject")?;
     }
     close(w, "DeletedObjects")
