@@ -158,7 +158,7 @@ fn route_both_present(
     remote_binaries: &[keepass_core::model::Binary],
     outcome: &mut MergeOutcome,
 ) {
-    let merge_out = merge_entry(local, remote, local_binaries, remote_binaries);
+    let mut merge_out = merge_entry(local, remote, local_binaries, remote_binaries);
 
     // Surface the LCA-mechanics signals. The merge keeps proceeding
     // (conservative parking already covers the data-safety side); these
@@ -179,20 +179,8 @@ fn route_both_present(
         });
     }
 
-    // Stash the attachment auto-resolutions for apply to consume.
-    if !merge_out.attachment_auto_resolutions.is_empty() {
-        outcome
-            .attachment_auto_resolutions_per_entry
-            .insert(id, merge_out.attachment_auto_resolutions.clone());
-    }
-
-    // An entry routes to `entry_conflicts` when *either* field or
-    // attachment conflicts need caller input. Both delta lists ride
-    // through on the same `EntryConflict` record (the resolver UI
-    // walks both).
-    // Tag-merge routing flags. Compute them before stashing because
-    // tags_differ_from_remote requires `remote` and merge_out is
-    // partially consumed below.
+    // Tag-merge routing flags. Compute them before the merged set moves
+    // into the plan below (`tags_differ_from_remote` requires `remote`).
     let tag_work_for_local = merge_out.tags_changed_from_local;
     let merged_set: std::collections::BTreeSet<&str> =
         merge_out.merged_tags.iter().map(String::as_str).collect();
@@ -202,17 +190,27 @@ fn route_both_present(
     drop(merged_set);
     drop(remote_set);
 
-    // Stash the merged tag set so apply can write it onto whichever
-    // bucket the entry routes to (or none, in which case the stash
-    // is harmlessly unused).
-    outcome
-        .merged_tags_per_entry
-        .insert(id, merge_out.merged_tags);
+    // Bundle the four auto-resolution facets `merge_entry` produced for
+    // this entry into one plan (see `PerEntryPlan`) so apply re-joins
+    // them by a single per-entry lookup. Moving them out of `merge_out`
+    // leaves the *conflict* facets (`conflicts`, `attachment_conflicts`,
+    // `icon_conflict`) in place for the entry-conflict push below.
+    let plan = crate::outcome::PerEntryPlan {
+        attachment_auto_resolutions: std::mem::take(&mut merge_out.attachment_auto_resolutions),
+        field_auto_resolutions: std::mem::take(&mut merge_out.auto_resolutions),
+        icon_auto_resolution: merge_out.icon_auto_resolution,
+        merged_tags: std::mem::take(&mut merge_out.merged_tags),
+    };
 
+    // An entry routes to `entry_conflicts` when *either* field or
+    // attachment conflicts (or an icon conflict) need caller input. Both
+    // delta lists ride through on the same `EntryConflict` record (the
+    // resolver UI walks both).
     if !merge_out.conflicts.is_empty()
         || !merge_out.attachment_conflicts.is_empty()
         || merge_out.icon_conflict.is_some()
     {
+        outcome.per_entry.insert(id, plan);
         outcome.entry_conflicts.push(EntryConflict {
             entry_id: id,
             local: local.clone(),
@@ -224,54 +222,46 @@ fn route_both_present(
         return;
     }
 
-    // Truly identical entry — nothing to do; omit so callers
-    // iterating `local_only_changes` to log "unchanged" don't see
-    // false positives. Tag-only and icon-only edits (in either
-    // direction) count as "something to do". Icon-only conflicts
-    // (no auto-resolution) still omit here; PR I3 will route them
-    // through `entry_conflicts` once the public surface lands.
+    // Truly identical entry — nothing to do; omit from every bucket so
+    // callers iterating `local_only_changes` to log "unchanged" don't
+    // see false positives. Tag-only and icon-only edits (in either
+    // direction) count as "something to do". Icon-only conflicts (no
+    // auto-resolution) still omit here; PR I3 will route them through
+    // `entry_conflicts` once the public surface lands. The plan is still
+    // stashed so "every both-present entry has a plan" holds uniformly
+    // (the stash is harmlessly unread for an omitted entry).
     let tag_work_anywhere = tag_work_for_local || tag_work_for_remote;
-    let icon_auto_work = merge_out.icon_auto_resolution.is_some();
-    if merge_out.auto_resolutions.is_empty()
-        && merge_out.attachment_auto_resolutions.is_empty()
+    let icon_auto_work = plan.icon_auto_resolution.is_some();
+    if plan.field_auto_resolutions.is_empty()
+        && plan.attachment_auto_resolutions.is_empty()
         && !tag_work_anywhere
         && !icon_auto_work
     {
+        outcome.per_entry.insert(id, plan);
         return;
     }
 
     // Route by whether any auto-resolution would change the local
     // side's value: if the remote wins on at least one field /
-    // attachment / tag, the local side has work to do →
+    // attachment / tag / icon, the local side has work to do →
     // `disk_only_changes`. Otherwise the local side is up-to-date
     // (but remote might be stale, including for tags) →
-    // `local_only_changes`.
-    let any_remote_wins = merge_out
-        .auto_resolutions
+    // `local_only_changes`. The plan (built above) carries the per-field
+    // and icon winners apply overlays on the bucket-level clone; without
+    // that overlay apply would silently lose any facet whose winning
+    // side differs from the bucket winner — the "mixed-side field wins"
+    // data-loss bug the per-facet maps let through once.
+    let any_remote_wins = plan
+        .field_auto_resolutions
         .iter()
         .any(|(_, side)| matches!(side, Side::Remote))
-        || merge_out
+        || plan
             .attachment_auto_resolutions
             .iter()
             .any(|r| matches!(r.side, Side::Remote))
         || tag_work_for_local
-        || matches!(merge_out.icon_auto_resolution, Some(Side::Remote));
-    // Stash the per-field auto-resolutions so apply can overlay the
-    // chosen side per-key on top of the bucket-level winner clone.
-    // Without this, apply would silently lose any field whose
-    // auto-resolution side differs from the bucket winner — the
-    // "mixed-side field wins" data-loss bug. Empty Vec is harmless;
-    // apply's selective-overlay loop becomes a no-op.
-    if !merge_out.auto_resolutions.is_empty() {
-        outcome
-            .field_auto_resolutions_per_entry
-            .insert(id, merge_out.auto_resolutions);
-    }
-    // Stash the icon auto-resolution similarly so apply can overlay
-    // the chosen side's `custom_icon_uuid` on the bucket-winner clone.
-    if let Some(side) = merge_out.icon_auto_resolution {
-        outcome.icon_auto_resolutions_per_entry.insert(id, side);
-    }
+        || matches!(plan.icon_auto_resolution, Some(Side::Remote));
+    outcome.per_entry.insert(id, plan);
     if any_remote_wins {
         outcome.disk_only_changes.push(id);
     } else {
