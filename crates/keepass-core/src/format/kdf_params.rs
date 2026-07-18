@@ -27,7 +27,9 @@ use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::var_dictionary::{Value as VarValue, VarDictionary, VarDictionaryError};
+use super::var_dictionary::{
+    Value as VarValue, VarDictionary, VarDictionaryError, VarDictionaryWriteError,
+};
 
 // ---------------------------------------------------------------------------
 // UUIDs identifying KDF families
@@ -219,6 +221,71 @@ impl KdfParams {
             Some(KnownKdf::Argon2id) => decode_argon2(dict, Argon2Variant::Argon2id),
             None => Err(KdfParamsError::UnknownKdfUuid(kdf_id.0)),
         }
+    }
+
+    /// Encode these typed KDF parameters into a KDBX4 `KdfParameters`
+    /// VarDictionary blob — the exact inverse of [`Self::from_var_dictionary`].
+    ///
+    /// Both KDF families are handled (AES-KDF: `$UUID`/`S`/`R`; Argon2:
+    /// `$UUID`/`S`/`I`/`M`/`P`/`V`), so every value the decoder can accept can
+    /// be re-encoded. The blob is deterministic — the `VarDictionary` writer
+    /// emits keys in sorted order — which is what makes a round-trip
+    /// byte-stable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VarDictionaryWriteError::LengthOverflow`] if any key or value
+    /// exceeds `i32::MAX` bytes — effectively unreachable for real KDF
+    /// parameters.
+    pub fn to_var_dictionary_blob(&self) -> Result<Vec<u8>, VarDictionaryWriteError> {
+        use std::collections::BTreeMap;
+
+        let mut entries: BTreeMap<String, VarValue> = BTreeMap::new();
+        match self {
+            Self::AesKdf { seed, rounds } => {
+                entries.insert(
+                    "$UUID".to_owned(),
+                    VarValue::Bytes(KdfId::AES_KDF.as_bytes().to_vec()),
+                );
+                entries.insert("S".to_owned(), VarValue::Bytes(seed.to_vec()));
+                entries.insert("R".to_owned(), VarValue::U64(*rounds));
+            }
+            Self::Argon2 {
+                variant,
+                salt,
+                iterations,
+                memory_bytes,
+                parallelism,
+                version,
+            } => {
+                let uuid = match variant {
+                    Argon2Variant::Argon2d => KdfId::ARGON2D,
+                    Argon2Variant::Argon2id => KdfId::ARGON2ID,
+                };
+                // `Argon2Version` is `#[non_exhaustive]`; any future variant
+                // falls back to V13 (current spec default) so the encoder
+                // stays write-able.
+                let version_word: u32 = match version {
+                    Argon2Version::V10 => 0x10,
+                    _ => 0x13,
+                };
+                entries.insert(
+                    "$UUID".to_owned(),
+                    VarValue::Bytes(uuid.as_bytes().to_vec()),
+                );
+                entries.insert("S".to_owned(), VarValue::Bytes(salt.clone()));
+                entries.insert("I".to_owned(), VarValue::U64(*iterations));
+                entries.insert("M".to_owned(), VarValue::U64(*memory_bytes));
+                entries.insert("P".to_owned(), VarValue::U32(*parallelism));
+                entries.insert("V".to_owned(), VarValue::U32(version_word));
+            }
+        }
+        VarDictionary {
+            version_major: 1,
+            version_minor: 0,
+            entries,
+        }
+        .write()
     }
 
     /// Classify this `KdfParams` into the corresponding [`KnownKdf`] family.
@@ -861,5 +928,62 @@ mod tests {
             .family(),
             KnownKdf::Argon2d
         );
+    }
+
+    // --- Encode / decode round-trip (encoder is the decoder's inverse) ---
+
+    #[test]
+    fn argon2_blob_round_trips_through_decode() {
+        let params = KdfParams::Argon2 {
+            variant: Argon2Variant::Argon2id,
+            salt: vec![0xAB; 32],
+            iterations: 3,
+            memory_bytes: 64 * 1024 * 1024,
+            parallelism: 4,
+            version: Argon2Version::V13,
+        };
+        let blob = params.to_var_dictionary_blob().expect("encode");
+        let dict = VarDictionary::parse(&blob).expect("parse");
+        let decoded = KdfParams::from_var_dictionary(&dict).expect("decode");
+        assert_eq!(decoded, params);
+    }
+
+    #[test]
+    fn aes_kdf_blob_round_trips_through_decode() {
+        // The AES-KDF encode arm has no production caller today (fresh
+        // vaults use Argon2), so this round-trip is what proves the arm the
+        // decoder already accepts is encoded correctly rather than left as a
+        // landmine.
+        let params = KdfParams::AesKdf {
+            seed: [0x5A; 32],
+            rounds: 6_000_000,
+        };
+        let blob = params.to_var_dictionary_blob().expect("encode");
+        let dict = VarDictionary::parse(&blob).expect("parse");
+        let decoded = KdfParams::from_var_dictionary(&dict).expect("decode");
+        assert_eq!(decoded, params);
+    }
+
+    #[test]
+    fn argon2_blob_encodes_the_expected_keys() {
+        // Byte-shape guard for the fresh-vault write path: exactly the six
+        // Argon2 keys, with the v10-vs-v13 version word mapped as the spec
+        // requires.
+        let params = KdfParams::Argon2 {
+            variant: Argon2Variant::Argon2d,
+            salt: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            iterations: 2,
+            memory_bytes: 8192,
+            parallelism: 1,
+            version: Argon2Version::V10,
+        };
+        let blob = params.to_var_dictionary_blob().expect("encode");
+        let dict = VarDictionary::parse(&blob).expect("parse");
+        assert_eq!(dict.get_bytes("$UUID"), Some(argon2d_uuid().as_slice()));
+        assert_eq!(dict.get("V"), Some(&VarValue::U32(0x10)));
+        assert!(dict.get("I").is_some() && dict.get("M").is_some() && dict.get("P").is_some());
+        assert!(dict.get_bytes("S").is_some());
+        // No AES-KDF-only key leaked in.
+        assert!(dict.get("R").is_none());
     }
 }

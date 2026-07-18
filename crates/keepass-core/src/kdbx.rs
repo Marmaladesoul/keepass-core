@@ -45,7 +45,7 @@ use crate::error::Error;
 use crate::format::{
     Argon2Variant, Argon2Version, CipherId, CompressionFlags, EncryptionIv, FileSignature,
     FormatError, HASHED_BLOCK_DEFAULT_SIZE, HMAC_BLOCK_DEFAULT_SIZE, InnerBinary, InnerHeader,
-    InnerStreamAlgorithm, KdfId, KdfParams, KnownCipher, MasterSeed, OuterHeader, SIGNATURE_1,
+    InnerStreamAlgorithm, KdfParams, KnownCipher, MasterSeed, OuterHeader, SIGNATURE_1,
     SIGNATURE_2, TransformSeed, VarDictionary, VarValue, Version, VersionFields,
     compute_header_hash, compute_header_hmac, read_hashed_block_stream, read_header_fields,
     read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hashed_block_stream,
@@ -640,7 +640,8 @@ impl Kdbx<Unlocked> {
             parallelism: 8,
             version: Argon2Version::V13,
         };
-        let kdf_params_blob = encode_argon2_kdf_params(&kdf_params)
+        let kdf_params_blob = kdf_params
+            .to_var_dictionary_blob()
             .map_err(|_| FormatError::MalformedHeader("failed to encode KDF parameters"))?;
 
         // Eager-derive the transformed key against the just-generated
@@ -3733,69 +3734,6 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
     out.extend_from_slice(&header_bytes);
     out.extend_from_slice(&ciphertext);
     Ok(out)
-}
-
-// ---------------------------------------------------------------------------
-// VarDictionary encoding for fresh-vault KDF parameters
-// ---------------------------------------------------------------------------
-
-/// Encode an Argon2 `KdfParams` as a VarDictionary blob suitable for the
-/// KDBX4 [`VersionFields::V4`] `kdf_parameters` field. The inverse of
-/// `KdfParams::from_var_dictionary` on the decode side.
-///
-/// Currently only the Argon2 family is wired up — fresh-vault creation
-/// always picks Argon2d defaults, and the AES-KDF path is legacy-only
-/// (KDBX3). If a future caller needs to encode AES-KDF parameters, the
-/// match arm here would extend symmetrically.
-///
-/// # Errors
-///
-/// Returns [`VarDictionaryWriteError::LengthOverflow`] if any key or
-/// value exceeds `i32::MAX` bytes. Effectively unreachable at the
-/// values picked here.
-fn encode_argon2_kdf_params(
-    params: &KdfParams,
-) -> Result<Vec<u8>, crate::format::VarDictionaryWriteError> {
-    use std::collections::BTreeMap;
-    let KdfParams::Argon2 {
-        variant,
-        salt,
-        iterations,
-        memory_bytes,
-        parallelism,
-        version,
-    } = params
-    else {
-        // `encode_argon2_kdf_params` is misnamed if callers pass an
-        // AES-KDF variant — surface as a deliberate format error.
-        return Ok(Vec::new());
-    };
-    let uuid = match variant {
-        Argon2Variant::Argon2d => KdfId::ARGON2D,
-        Argon2Variant::Argon2id => KdfId::ARGON2ID,
-    };
-    // `Argon2Version` is `#[non_exhaustive]`; any future variant falls back to
-    // V13 (current spec default) so the encoder stays write-able.
-    let version_word: u32 = match version {
-        Argon2Version::V10 => 0x10,
-        _ => 0x13,
-    };
-    let mut entries: BTreeMap<String, VarValue> = BTreeMap::new();
-    entries.insert(
-        "$UUID".to_owned(),
-        VarValue::Bytes(uuid.as_bytes().to_vec()),
-    );
-    entries.insert("S".to_owned(), VarValue::Bytes(salt.clone()));
-    entries.insert("I".to_owned(), VarValue::U64(*iterations));
-    entries.insert("M".to_owned(), VarValue::U64(*memory_bytes));
-    entries.insert("P".to_owned(), VarValue::U32(*parallelism));
-    entries.insert("V".to_owned(), VarValue::U32(version_word));
-    let dict = VarDictionary {
-        version_major: 1,
-        version_minor: 0,
-        entries,
-    };
-    dict.write()
 }
 
 // ---------------------------------------------------------------------------
