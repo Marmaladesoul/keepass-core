@@ -78,8 +78,10 @@ const SECTION_META: u8 = 0x12;
 /// Digest a vault's user-visible content. See module docs for scope.
 #[must_use]
 pub fn vault_content_digest(vault: &Vault) -> [u8; 32] {
-    let mut groups: Vec<(&Group, Option<GroupId>)> = Vec::new();
-    collect_groups(&vault.root, None, &mut groups);
+    // `iter_groups_with_parent` yields self-inclusive pre-order pairs
+    // (root carries `None`); the subsequent sort by group id makes the
+    // enumeration order immaterial to the digest.
+    let mut groups: Vec<(&Group, Option<GroupId>)> = vault.root.iter_groups_with_parent().collect();
     groups.sort_by_key(|(g, _)| g.id.0.as_bytes().to_owned());
 
     let mut hasher = Sha256::new();
@@ -121,19 +123,6 @@ pub fn vault_content_digest(vault: &Vault) -> [u8; 32] {
     update_optional_uuid(&mut hasher, vault.meta.recycle_bin_uuid.map(|g| g.0));
 
     hasher.finalize().into()
-}
-
-/// Flatten the group tree into `(group, parent)` pairs, root included
-/// (with `None` for its parent).
-fn collect_groups<'v>(
-    group: &'v Group,
-    parent: Option<GroupId>,
-    out: &mut Vec<(&'v Group, Option<GroupId>)>,
-) {
-    out.push((group, parent));
-    for child in &group.groups {
-        collect_groups(child, Some(group.id), out);
-    }
 }
 
 /// Hash an optional UUID unambiguously: a presence byte, then the 16

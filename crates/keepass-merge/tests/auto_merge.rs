@@ -145,7 +145,7 @@ proptest! {
             .expect("apply");
 
         for (entry_id, local_title) in &expected {
-            let post = find_entry(&local.root, *entry_id).expect("entry survives");
+            let post = local.root.entry(*entry_id).expect("entry survives");
             prop_assert_eq!(
                 &post.title,
                 local_title,
@@ -157,7 +157,7 @@ proptest! {
         // No FieldConflictMarker is written any more: the entry's history
         // must carry no `keys.field_conflict.v1` custom_data.
         for entry_id in &report.entries_with_parked_conflict {
-            let entry = find_entry(&local.root, *entry_id).expect("entry survives");
+            let entry = local.root.entry(*entry_id).expect("entry survives");
             let has_marker = entry.history.iter().any(|h| {
                 h.custom_data
                     .iter()
@@ -209,10 +209,3 @@ proptest! {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn find_entry(group: &keepass_core::model::Group, id: EntryId) -> Option<&Entry> {
-    if let Some(e) = group.entries.iter().find(|e| e.id == id) {
-        return Some(e);
-    }
-    group.groups.iter().find_map(|g| find_entry(g, id))
-}

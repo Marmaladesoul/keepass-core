@@ -93,8 +93,8 @@ fn concurrent_move_with_repeated_sync_converges_on_same_parent() {
         // After each round, both peers should have the entry under
         // group G_B (peer-1's location_changed t2 > peer-0's t1).
         let entry_id_t = EntryId(Uuid::from_u128(entry_id));
-        let p0_parent = find_entry_parent(&peer0.root, entry_id_t);
-        let p1_parent = find_entry_parent(&peer1.root, entry_id_t);
+        let p0_parent = peer0.root.entry_parent(entry_id_t);
+        let p1_parent = peer1.root.entry_parent(entry_id_t);
         assert_eq!(
             p0_parent, p1_parent,
             "round {round}: peers' parent for entry should agree (got peer-0={p0_parent:?}, peer-1={p1_parent:?})"
@@ -160,8 +160,8 @@ fn symmetric_edit_vs_delete_local_deleted_remote_edited_converges() {
 
     // Both peers should have the entry alive with the edited title.
     let entry_id_t = EntryId(Uuid::from_u128(entry_id));
-    let p0_entry = find_entry(&peer0.root, entry_id_t);
-    let p1_entry = find_entry(&peer1.root, entry_id_t);
+    let p0_entry = peer0.root.entry(entry_id_t);
+    let p1_entry = peer1.root.entry(entry_id_t);
     assert!(p0_entry.is_some(), "peer-0 should hold the restored entry");
     assert!(p1_entry.is_some(), "peer-1 should hold the restored entry");
     assert_eq!(p0_entry.unwrap().title, "edited");
@@ -254,37 +254,11 @@ fn symmetric_edit_vs_delete_with_no_edit_provenance_converges() {
     // while peer-1 kept it: silent divergence.
     let entry_id_t = EntryId(Uuid::from_u128(entry_id));
     assert!(
-        find_entry(&peer0.root, entry_id_t).is_some(),
+        peer0.root.entry(entry_id_t).is_some(),
         "peer-0 (deletion-local) must keep the no-provenance edit"
     );
     assert!(
-        find_entry(&peer1.root, entry_id_t).is_some(),
+        peer1.root.entry(entry_id_t).is_some(),
         "peer-1 (alive-local) must keep the no-provenance edit"
     );
-}
-
-fn find_entry(group: &Group, id: EntryId) -> Option<&Entry> {
-    for e in &group.entries {
-        if e.id == id {
-            return Some(e);
-        }
-    }
-    for sub in &group.groups {
-        if let Some(e) = find_entry(sub, id) {
-            return Some(e);
-        }
-    }
-    None
-}
-
-fn find_entry_parent(group: &Group, id: EntryId) -> Option<GroupId> {
-    if group.entries.iter().any(|e| e.id == id) {
-        return Some(group.id);
-    }
-    for sub in &group.groups {
-        if let Some(p) = find_entry_parent(sub, id) {
-            return Some(p);
-        }
-    }
-    None
 }

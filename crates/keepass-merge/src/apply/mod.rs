@@ -39,7 +39,7 @@
 
 use std::collections::HashMap;
 
-use keepass_core::model::{Entry, EntryId, Group, GroupId, Vault};
+use keepass_core::model::{Entry, EntryId, Vault};
 
 use crate::binary_pool::BinaryPoolRemap;
 use crate::entry_merge::{AttachmentAutoResolution, Side};
@@ -141,14 +141,14 @@ pub fn apply_merge(
     // remote-add with the same id as a local-tombstoned entry can't
     // confuse intermediate state.
     for id in &outcome.deleted_on_disk {
-        remove_entry(local_root, *id);
+        let _ = local_root.detach_entry(*id);
     }
 
     for id in &outcome.disk_only_changes {
-        let Some(remote_entry) = find_entry(&remote.root, *id) else {
+        let Some(remote_entry) = remote.root.entry(*id) else {
             continue;
         };
-        let Some(local_entry) = find_entry(local_root, *id) else {
+        let Some(local_entry) = local_root.entry(*id) else {
             continue;
         };
         let plan = outcome.per_entry.get(id);
@@ -172,17 +172,19 @@ pub fn apply_merge(
             remote_entry,
             remap.local_binaries(),
         );
-        replace_entry(local_root, *id, merged);
+        if let Some(slot) = local_root.entry_mut(*id) {
+            *slot = merged;
+        }
     }
 
     for id in &outcome.local_only_changes {
         // History-merge runs even though the local content stays put
         // — that's how a remote's intermediate snapshots reach local
         // when the remote's *current* state matches local's.
-        let Some(remote_entry) = find_entry(&remote.root, *id) else {
+        let Some(remote_entry) = remote.root.entry(*id) else {
             continue;
         };
-        let Some(local_entry) = find_entry(local_root, *id) else {
+        let Some(local_entry) = local_root.entry(*id) else {
             continue;
         };
         let plan = outcome.per_entry.get(id);
@@ -206,11 +208,13 @@ pub fn apply_merge(
             remote_entry,
             remap.local_binaries(),
         );
-        replace_entry(local_root, *id, merged);
+        if let Some(slot) = local_root.entry_mut(*id) {
+            *slot = merged;
+        }
     }
 
     for new_entry in &outcome.added_on_disk {
-        let target_parent = find_remote_parent(&remote.root, new_entry.id);
+        let target_parent = remote.root.entry_parent(new_entry.id);
         let mut to_insert = new_entry.clone();
         // `new_entry` originates from `remote`; its current-state and
         // every history snapshot's `Attachment::ref_id` references
@@ -220,7 +224,7 @@ pub fn apply_merge(
             remap.rebind(&mut hist.attachments);
         }
         let inserted = target_parent
-            .and_then(|gid| find_group_mut(local_root, gid))
+            .and_then(|gid| local_root.group_mut(gid))
             .map(|g| {
                 g.entries.push(to_insert.clone());
             });
@@ -251,93 +255,10 @@ pub fn apply_merge(
 ///
 /// Caller invokes after [`apply_merge`].
 pub fn reconcile_timestamps(local: &mut Vault, remote: &Vault) {
-    let remote_entries: HashMap<EntryId, &Entry> = {
-        let mut out = HashMap::new();
-        collect_entries(&remote.root, &mut out);
-        out
-    };
+    let remote_entries: HashMap<EntryId, &Entry> =
+        remote.root.iter_entries().map(|e| (e.id, e)).collect();
     reconcile_group_timestamps_recursive(&mut local.root, remote);
     reconcile_entry_timestamps_recursive(&mut local.root, &remote_entries);
-}
-
-// ---------------------------------------------------------------------------
-// Tree helpers
-// ---------------------------------------------------------------------------
-
-pub(super) fn find_entry(group: &Group, id: EntryId) -> Option<&Entry> {
-    if let Some(e) = group.entries.iter().find(|e| e.id == id) {
-        return Some(e);
-    }
-    group.groups.iter().find_map(|g| find_entry(g, id))
-}
-
-pub(super) fn replace_entry(group: &mut Group, id: EntryId, new: Entry) {
-    if let Some(pos) = group.entries.iter().position(|e| e.id == id) {
-        group.entries[pos] = new;
-        return;
-    }
-    for sub in &mut group.groups {
-        replace_entry(sub, id, new.clone());
-    }
-}
-
-pub(super) fn remove_entry(group: &mut Group, id: EntryId) -> bool {
-    if let Some(pos) = group.entries.iter().position(|e| e.id == id) {
-        group.entries.remove(pos);
-        return true;
-    }
-    for sub in &mut group.groups {
-        if remove_entry(sub, id) {
-            return true;
-        }
-    }
-    false
-}
-
-pub(super) fn find_remote_parent(group: &Group, entry_id: EntryId) -> Option<GroupId> {
-    if group.entries.iter().any(|e| e.id == entry_id) {
-        return Some(group.id);
-    }
-    group
-        .groups
-        .iter()
-        .find_map(|g| find_remote_parent(g, entry_id))
-}
-
-pub(super) fn find_group_mut(group: &mut Group, id: GroupId) -> Option<&mut Group> {
-    if group.id == id {
-        return Some(group);
-    }
-    group.groups.iter_mut().find_map(|g| find_group_mut(g, id))
-}
-
-pub(super) fn collect_entries<'a>(group: &'a Group, out: &mut HashMap<EntryId, &'a Entry>) {
-    for e in &group.entries {
-        out.insert(e.id, e);
-    }
-    for sub in &group.groups {
-        collect_entries(sub, out);
-    }
-}
-
-pub(super) fn collect_groups<'a>(group: &'a Group, out: &mut HashMap<GroupId, &'a Group>) {
-    out.insert(group.id, group);
-    for sub in &group.groups {
-        collect_groups(sub, out);
-    }
-}
-
-pub(super) fn collect_group_ids_walk(g: &Group, out: &mut std::collections::HashSet<GroupId>) {
-    out.insert(g.id);
-    for sub in &g.groups {
-        collect_group_ids_walk(sub, out);
-    }
-}
-
-pub(super) fn collect_group_ids(group: &Group) -> std::collections::HashSet<GroupId> {
-    let mut out = std::collections::HashSet::new();
-    collect_group_ids_walk(group, &mut out);
-    out
 }
 
 #[cfg(test)]

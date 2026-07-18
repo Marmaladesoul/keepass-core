@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use keepass_core::model::{Entry, EntryId, Group, GroupId, Vault};
+use keepass_core::model::{Entry, EntryId, GroupId, Vault};
 use uuid::Uuid;
 
 use crate::conflict::EntryConflict;
@@ -80,8 +80,10 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
         }
     }
 
-    let local_entries = collect_entries_by_id(&local.root);
-    let remote_entries = collect_entries_by_id(&remote.root);
+    let local_entries: HashMap<EntryId, &Entry> =
+        local.root.iter_entries().map(|e| (e.id, e)).collect();
+    let remote_entries: HashMap<EntryId, &Entry> =
+        remote.root.iter_entries().map(|e| (e.id, e)).collect();
 
     let local_tombstones: HashMap<Uuid, Option<chrono::DateTime<chrono::Utc>>> = local
         .deleted_objects
@@ -104,7 +106,11 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
 
     // Parent-map for remote-only entries so the symmetric edit-vs-
     // delete restore can target the right group on apply.
-    let remote_parents = collect_entry_parents(&remote.root);
+    let remote_parents: HashMap<EntryId, GroupId> = remote
+        .root
+        .iter_entries_with_parent()
+        .map(|(e, p)| (e.id, p))
+        .collect();
 
     for id in all_ids {
         match (local_entries.get(&id), remote_entries.get(&id)) {
@@ -125,24 +131,6 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
     }
 
     Ok(outcome)
-}
-
-/// Build a `entry_id → owning_group_id` map for every entry in
-/// `root`'s subtree. Used by `merge` to know where to restore a
-/// symmetric edit-vs-delete entry.
-fn collect_entry_parents(root: &Group) -> HashMap<EntryId, GroupId> {
-    let mut out = HashMap::new();
-    walk_entry_parents(root, &mut out);
-    out
-}
-
-fn walk_entry_parents(group: &Group, out: &mut HashMap<EntryId, GroupId>) {
-    for entry in &group.entries {
-        out.insert(entry.id, group.id);
-    }
-    for sub in &group.groups {
-        walk_entry_parents(sub, out);
-    }
 }
 
 /// Per-entry classification when both sides have the entry. Runs the
@@ -356,27 +344,6 @@ fn remote_edited_after(
     local_deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
     crate::time::conservative_edit_wins(remote.times.last_modification_time, local_deleted_at)
-}
-
-/// Build a lookup from [`EntryId`] to its `&Entry` over the entire
-/// group tree rooted at `root`. Depth-first traversal.
-///
-/// Slice 5a's apply step walks remote independently to find parent
-/// groups for `added_on_disk` insertions, so the walker doesn't need
-/// to retain parent-group context here.
-fn collect_entries_by_id(root: &Group) -> HashMap<EntryId, &Entry> {
-    let mut out = HashMap::new();
-    walk_group(root, &mut out);
-    out
-}
-
-fn walk_group<'a>(group: &'a Group, out: &mut HashMap<EntryId, &'a Entry>) {
-    for entry in &group.entries {
-        out.insert(entry.id, entry);
-    }
-    for sub in &group.groups {
-        walk_group(sub, out);
-    }
 }
 
 #[cfg(test)]
