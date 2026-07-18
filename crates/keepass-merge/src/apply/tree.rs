@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::binary_pool::BinaryPoolRemap;
 use crate::entry_merge::{AttachmentAutoResolution, Side};
-use crate::hash::entry_content_hash;
+use crate::hash::{entry_content_hash, sha256};
 use crate::history_merge::merge_histories;
 use crate::time::second_resolution;
 use crate::tombstone::{
@@ -718,7 +718,7 @@ fn union_attachment_tombstones_recursive(
             let Some(bin) = local_binaries.get(att.ref_id as usize) else {
                 return true;
             };
-            let hash = sha256_attachment(&bin.data);
+            let hash = sha256(&bin.data);
             let key = (att.name.clone(), hash);
             if !ts_set.contains(&key) {
                 return true;
@@ -747,13 +747,6 @@ fn union_attachment_tombstones_recursive(
     for sub in &mut group.groups {
         union_attachment_tombstones_recursive(sub, remote_entries, local_binaries);
     }
-}
-
-fn sha256_attachment(bytes: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    h.finalize().into()
 }
 
 /// Walk every entry present on both sides; union their tag-state

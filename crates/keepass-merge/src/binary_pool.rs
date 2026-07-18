@@ -24,7 +24,8 @@
 use std::collections::HashMap;
 
 use keepass_core::model::{Attachment, Binary};
-use sha2::{Digest, Sha256};
+
+use crate::hash::sha256;
 
 /// Translates remote-vault [`Attachment::ref_id`] values to indices
 /// into `local.binaries`, importing remote binaries on demand.
@@ -134,12 +135,6 @@ impl<'a> BinaryPoolRemap<'a> {
         self.cache.insert(remote_ref_id, local_id);
         Some(local_id)
     }
-}
-
-fn sha256(bytes: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    h.finalize().into()
 }
 
 fn u32_from_usize(n: usize) -> Option<u32> {
