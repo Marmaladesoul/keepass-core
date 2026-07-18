@@ -184,6 +184,85 @@ fn symmetric_edit_vs_delete_local_deleted_remote_edited_converges() {
     );
 }
 
+#[test]
+fn symmetric_edit_vs_delete_with_no_edit_provenance_converges() {
+    // Regression for the delete-vs-edit direction asymmetry: an alive
+    // entry carrying NO `last_modification_time` (absent provenance)
+    // faces a concrete tombstone `deleted_at` on the other peer.
+    //
+    // The conservative policy is "any missing timestamp ⇒ edit wins
+    // (keep)", and it must hold from BOTH merge directions:
+    //   - deletion-local  / alive-remote (`remote_edited_after`)
+    //   - alive-local / deletion-remote (`local_edited_after`)
+    // If only one direction keeps, the peers diverge — one drops the
+    // entry the other retains. This test pins that both peers converge
+    // to "entry alive".
+    let entry_id = 0x77u128;
+    let t_init = ts(2026, 1, 1, 0, 1, 0);
+    let t_del = ts(2026, 1, 1, 0, 2, 0);
+
+    // Both start with entry X under root.
+    let mut peer0 = Vault::empty(GroupId(Uuid::nil()));
+    entry_in(&mut peer0.root, entry_id, "original", t_init, t_init);
+    let mut peer1 = peer0.clone();
+
+    // Peer-0 deletes X at a concrete `deleted_at`.
+    peer0
+        .root
+        .entries
+        .retain(|e| e.id != EntryId(Uuid::from_u128(entry_id)));
+    peer0
+        .deleted_objects
+        .push(keepass_core::model::DeletedObject::new(
+            Uuid::from_u128(entry_id),
+            Some(t_del),
+        ));
+
+    // Peer-1 edits X but the edit carries NO mtime (absent provenance).
+    let edited = peer1
+        .root
+        .entries
+        .iter_mut()
+        .find(|e| e.id == EntryId(Uuid::from_u128(entry_id)))
+        .unwrap();
+    edited.title = "edited".into();
+    edited.times.last_modification_time = None;
+
+    // Pairwise sync, both directions.
+    let p0_snap = peer0.clone();
+    let outcome = merge(&peer1, &p0_snap).expect("merge to peer1");
+    apply_merge_park_conflicts(
+        &mut peer1,
+        &p0_snap,
+        &outcome,
+        &cfg(ts(2026, 1, 1, 0, 4, 0)),
+    )
+    .expect("apply to peer1");
+
+    let p1_snap = peer1.clone();
+    let outcome2 = merge(&peer0, &p1_snap).expect("merge to peer0");
+    apply_merge_park_conflicts(
+        &mut peer0,
+        &p1_snap,
+        &outcome2,
+        &cfg(ts(2026, 1, 1, 0, 5, 0)),
+    )
+    .expect("apply to peer0");
+
+    // Both peers must retain the entry — convergence. Pre-fix, the
+    // deletion-local / alive-remote direction dropped it on peer-0
+    // while peer-1 kept it: silent divergence.
+    let entry_id_t = EntryId(Uuid::from_u128(entry_id));
+    assert!(
+        find_entry(&peer0.root, entry_id_t).is_some(),
+        "peer-0 (deletion-local) must keep the no-provenance edit"
+    );
+    assert!(
+        find_entry(&peer1.root, entry_id_t).is_some(),
+        "peer-1 (alive-local) must keep the no-provenance edit"
+    );
+}
+
 fn find_entry(group: &Group, id: EntryId) -> Option<&Entry> {
     for e in &group.entries {
         if e.id == id {
