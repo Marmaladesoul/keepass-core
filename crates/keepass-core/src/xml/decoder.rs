@@ -1187,17 +1187,55 @@ fn read_meta<R: std::io::BufRead>(
                 depth += 1;
             }
             // Self-closing unknown child at top level — see the matching
-            // comment in `read_group`. The four nested-structured
-            // typed children (`<Binaries/>`, `<MemoryProtection/>`,
-            // `<CustomData/>`, `<CustomIcons/>`) are absorbed as
-            // no-ops here, so they don't shadow-emit from
-            // `unknown_xml` after the typed encoder has already
-            // written the (still-empty) element.
+            // comment in `read_group`. Two classes of name are absorbed
+            // as no-ops here instead of being captured, so they don't
+            // shadow-emit from `unknown_xml` after the typed encoder has
+            // already written the element:
+            //
+            //   1. the four nested-structured typed children
+            //      (`<Binaries/>`, `<MemoryProtection/>`,
+            //      `<CustomData/>`, `<CustomIcons/>`), handled by
+            //      dedicated readers in the Start arm; and
+            //   2. the scalar Meta fields `write_meta` emits
+            //      UNCONDITIONALLY (`<Generator>`, `<DatabaseName>`,
+            //      `<DatabaseDescription>`, `<DefaultUserName>`,
+            //      `<MaintenanceHistoryDays>`, `<RecycleBinEnabled>`,
+            //      `<MasterKeyChangeRec>`, `<MasterKeyChangeForce>`,
+            //      `<HistoryMaxItems>`, `<HistoryMaxSize>`). Note the
+            //      three via `write_optional_text_element`, which despite
+            //      its name ALWAYS emits (it exists to collapse "absent"
+            //      and "present-but-empty" to one shape) — so they carry
+            //      the same double-emit risk as the plain always-written
+            //      scalars, not the skip-if-empty exemption below.
+            //
+            // Capturing a self-closing form of any always-written name
+            // would double-emit on save: once from the typed encoder,
+            // once re-emitted from the captured stub. The genuinely
+            // skip-if-empty scalars (`<Color>`, `<HeaderHash>`,
+            // `<RecycleBinUUID>`, the `*Changed` timestamps, …) are
+            // deliberately NOT excluded — the typed encoder omits them
+            // when empty/absent, so capturing their self-closing form is
+            // the only way they survive a round-trip and it carries no
+            // double-emit risk. Mirrors the
+            // AutoType/Association/DeletedObject empty-capture guards.
             Ok(Event::Empty(e)) if depth == 0 => {
                 let name = tag_name(&e)?;
                 if !matches!(
                     name.as_str(),
-                    "Binaries" | "MemoryProtection" | "CustomData" | "CustomIcons"
+                    "Binaries"
+                        | "MemoryProtection"
+                        | "CustomData"
+                        | "CustomIcons"
+                        | "Generator"
+                        | "DatabaseName"
+                        | "DatabaseDescription"
+                        | "DefaultUserName"
+                        | "MaintenanceHistoryDays"
+                        | "RecycleBinEnabled"
+                        | "MasterKeyChangeRec"
+                        | "MasterKeyChangeForce"
+                        | "HistoryMaxItems"
+                        | "HistoryMaxSize"
                 ) {
                     let unknown = capture_unknown_empty(e)?;
                     meta.unknown_xml.push(unknown);
@@ -3807,6 +3845,95 @@ mod tests {
                 ),
                 "self-closing typed element leaked into unknown_xml: {:?}",
                 el.tag
+            );
+        }
+    }
+
+    #[test]
+    fn self_closing_always_written_meta_scalars_do_not_double_emit() {
+        // FIDELITY FIX (Meta analogue of the AutoType self-closing
+        // guard): a self-closing form of any scalar Meta field that
+        // `write_meta` writes UNCONDITIONALLY must be absorbed as a
+        // no-op, NOT captured into `unknown_xml`. Pre-fix the empty form
+        // was routed to `unknown_xml` and re-emitted on save *alongside*
+        // the typed encoder's own always-written element → two of that
+        // element in the output. Post-fix each round-trips to exactly
+        // one. The named acceptance case is `<Generator/>`; the rest of
+        // the always-written set is exercised in the same document so the
+        // whole exclusion set is guarded.
+        let xml = br"<KeePassFile>
+  <Meta>
+    <Generator/>
+    <DatabaseName/>
+    <DatabaseDescription/>
+    <DefaultUserName/>
+    <MaintenanceHistoryDays/>
+    <RecycleBinEnabled/>
+    <MasterKeyChangeRec/>
+    <MasterKeyChangeForce/>
+    <HistoryMaxItems/>
+    <HistoryMaxSize/>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>R</Name>
+    </Group>
+  </Root>
+</KeePassFile>";
+        // Every scalar Meta field the encoder emits unconditionally —
+        // including the three routed through `write_optional_text_element`
+        // (`DatabaseName`, `DatabaseDescription`, `DefaultUserName`),
+        // which despite the name ALWAYS emit and so carry the same
+        // double-emit risk.
+        let always_written = [
+            "Generator",
+            "DatabaseName",
+            "DatabaseDescription",
+            "DefaultUserName",
+            "MaintenanceHistoryDays",
+            "RecycleBinEnabled",
+            "MasterKeyChangeRec",
+            "MasterKeyChangeForce",
+            "HistoryMaxItems",
+            "HistoryMaxSize",
+        ];
+
+        // Decode: none of the self-closing always-written scalars may
+        // leak into `unknown_xml` (that leak is the double-emit source).
+        let vault = decode_vault(xml).expect("decode");
+        for tag in always_written {
+            assert!(
+                !vault.meta.unknown_xml.iter().any(|el| el.tag == tag),
+                "self-closing <{tag}/> leaked into Meta.unknown_xml"
+            );
+        }
+
+        // Encode: each always-written element appears exactly once — the
+        // typed encoder's copy, with no shadow copy from `unknown_xml`.
+        // Count element openings boundary-aware: `<tag` followed by a
+        // name-terminating byte (`>`, `/`, or whitespace). This counts
+        // both the `<tag>` and self-closing `<tag/>` forms (so a captured
+        // shadow stub is caught) while NOT miscounting a prefix — e.g.
+        // `<DatabaseName>` must not match inside `<DatabaseNameChanged>`.
+        let encoded = crate::xml::encoder::encode_vault(&vault).expect("encode");
+        let s = std::str::from_utf8(&encoded).expect("utf8");
+        let count_openings = |tag: &str| -> usize {
+            let needle = format!("<{tag}");
+            s.match_indices(&needle)
+                .filter(|(i, _)| {
+                    s[i + needle.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| matches!(c, '>' | '/' | ' ' | '\t' | '\n' | '\r'))
+                })
+                .count()
+        };
+        for tag in always_written {
+            assert_eq!(
+                count_openings(tag),
+                1,
+                "expected exactly one <{tag}> (no double-emit) in: {s}"
             );
         }
     }
