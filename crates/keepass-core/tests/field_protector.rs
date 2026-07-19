@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use keepass_core::CompositeKey;
 use keepass_core::Error;
 use keepass_core::kdbx::{Kdbx, Sealed, Unlocked};
-use keepass_core::model::{CustomField, NewEntry};
+use keepass_core::model::{CustomField, HistoryPolicy, NewEntry};
 use keepass_core::protector::{FieldProtector, ProtectorError, SessionKey};
 use secrecy::SecretString;
 
@@ -535,6 +535,86 @@ fn edit_entry_under_protector_snapshot_carries_old_plaintext() {
         snap_totp.value, original_totp,
         "snapshot preserves the OLD protected cf"
     );
+}
+
+#[test]
+fn restore_entry_from_history_under_protector_persists_restored_password_through_save() {
+    // Data-integrity regression: `restore_entry_from_history` reverts
+    // `entry.password` (and other protected fields) from a history
+    // snapshot, but — unlike `edit_entry` — it must ALSO refresh the
+    // protected-field side table for the restored entry. Otherwise the
+    // save pipeline's `unwrap_vault_protected_fields` step overlays the
+    // stale PRE-restore wrapped bytes over the restored plaintext, and
+    // the restored password silently reverts on save (a user restores
+    // an old password, saves, and gets the new one back).
+    let composite = CompositeKey::from_password(b"test");
+    let protector: Arc<dyn FieldProtector> = Arc::new(XorProtector { key: 0xa5 });
+    let mut kdbx = Kdbx::<Unlocked>::create_empty_v4_with_protector(
+        &composite,
+        "Restore Under Protector",
+        Some(protector.clone()),
+    )
+    .expect("create_empty_v4_with_protector");
+
+    let root = kdbx.vault().root.id;
+    let id = kdbx
+        .add_entry(
+            root,
+            NewEntry::new("login").password(SecretString::from("A")),
+        )
+        .expect("add_entry");
+
+    // Edit A -> B. `HistoryPolicy::Snapshot` snapshots the pre-edit
+    // "A" into history[0]; the editor's re-wrap pass then blanks the
+    // live + snapshot plaintext and records the wrapped bytes in the
+    // side-table (live = wrap("B"), history[0] = wrap("A")).
+    kdbx.edit_entry(id, HistoryPolicy::Snapshot, |e| {
+        e.set_password(SecretString::from("B"));
+    })
+    .expect("edit_entry");
+    assert_eq!(
+        kdbx.reveal_password(id).unwrap(),
+        "B",
+        "live is B after edit"
+    );
+    assert_eq!(kdbx.vault().entry(id).unwrap().history.len(), 1);
+
+    // Restore history[0] -> brings the live password back to "A", and
+    // (Snapshot) captures the pre-restore "B" as a fresh snapshot.
+    kdbx.restore_entry_from_history(id, 0, HistoryPolicy::Snapshot)
+        .expect("restore_entry_from_history");
+
+    // Reveal must see the restored "A" immediately — the side-table is
+    // the source of truth, so a stale record here means the restore
+    // never touched it.
+    assert_eq!(
+        kdbx.reveal_password(id).unwrap(),
+        "A",
+        "reveal should see the restored password, not the pre-restore one"
+    );
+
+    // Save while wrapped, reopen with NO protector so plaintext lands
+    // back in the model, and assert the restored value survived the
+    // round-trip rather than reverting to "B".
+    let saved = kdbx.save_to_bytes().expect("save_to_bytes");
+    let reopened = Kdbx::<Sealed>::open_from_bytes(saved)
+        .expect("reopen")
+        .read_header()
+        .expect("read_header")
+        .unlock(&composite)
+        .expect("unlock");
+    let entry = reopened.vault().root.entries.first().expect("one entry");
+    assert_eq!(
+        entry.password, "A",
+        "restored password must persist through save, not revert to B"
+    );
+
+    // History side-table alignment: after a Snapshot restore the entry
+    // carries [original "A", pre-restore "B"] and both must round-trip
+    // with their true plaintext (a misaligned re-wrap would blank one).
+    assert_eq!(entry.history.len(), 2, "original + pre-restore snapshot");
+    assert_eq!(entry.history[0].password, "A", "original snapshot");
+    assert_eq!(entry.history[1].password, "B", "pre-restore snapshot");
 }
 
 #[test]
