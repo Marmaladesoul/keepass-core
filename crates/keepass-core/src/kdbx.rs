@@ -1312,6 +1312,16 @@ impl Kdbx<Unlocked> {
     /// 7. Run the binary-pool refcount GC — truncation can drop a snapshot
     ///    that was the only remaining reference to a pool binary, so
     ///    we collect the pool after history shrinks.
+    /// 8. When a [`FieldProtector`] is configured, re-wrap the restored
+    ///    entry (live protected fields + every surviving history
+    ///    snapshot) into a fresh side-table record, exactly as
+    ///    [`Self::edit_entry`] does. The protected-field plaintext for a
+    ///    protector-backed vault lives in the side-table, not the model
+    ///    `String`s; without this step the save pipeline's unwrap pass
+    ///    would overlay the STALE pre-restore wrapped bytes over the
+    ///    restored plaintext and the restore would be silently lost on
+    ///    save. No-op when no protector is configured (the non-protector
+    ///    path is behaviour-identical to before).
     ///
     /// **`unknown_xml` is intentionally left on the live entry.** By
     /// construction these are XML subtrees the decoder didn't
@@ -1327,6 +1337,12 @@ impl Kdbx<Unlocked> {
     /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
     /// - [`ModelError::HistoryIndexOutOfRange`] if `history_index`
     ///   is `>= entry.history.len()`.
+    /// - [`ModelError::Protector`] when a [`FieldProtector`] is
+    ///   configured and acquiring the session key, unwrapping the
+    ///   pre-restore snapshot plaintext, or re-wrapping the restored
+    ///   fields fails. In practice production protectors do not fail,
+    ///   but the error is surfaced so callers can route the failure
+    ///   rather than persisting a half-restored side-table.
     pub fn restore_entry_from_history(
         &mut self,
         id: EntryId,
@@ -1338,6 +1354,20 @@ impl Kdbx<Unlocked> {
         let now = self.state.clock.now();
         let history_max_items = self.state.vault.meta.history_max_items;
         let history_max_size = self.state.vault.meta.history_max_size;
+        // Capture the protector + the pre-restore wrapped record so we
+        // can unwrap the live entry (and its history snapshots) to
+        // plaintext before reading the target snapshot, then re-wrap the
+        // restored entry into a fresh side-table record afterwards.
+        // Mirror of `edit_entry`: with a protector configured the model
+        // `String`s are blanked and the real bytes live in the
+        // side-table, so a raw `snap.password` read would see the empty
+        // post-wrap string and the side-table would still point at the
+        // pre-restore ciphertext. When no protector is configured all of
+        // this is skipped and the path is behaviour-identical to before.
+        let protector = self.state.protector.clone();
+        let old_record = protector
+            .as_ref()
+            .and_then(|_| self.state.protected_fields.get(&id).cloned());
 
         let entry = self
             .state
@@ -1352,6 +1382,22 @@ impl Kdbx<Unlocked> {
                 index: history_index,
                 len: entry.history.len(),
             });
+        }
+
+        // Per-restore key: acquired once if a protector is configured
+        // AND this entry has wrapped fields. Used for both the
+        // pre-restore unwrap and the post-restore re-wrap so we pay a
+        // single `acquire_session_key` call per restore.
+        let restore_key = match (protector.as_ref(), old_record.as_ref()) {
+            (Some(p), Some(_)) => Some(p.acquire_session_key()?),
+            _ => None,
+        };
+        // Restore plaintext onto the live entry and every history
+        // snapshot from the side-table, so the snapshot we clone next
+        // carries real plaintext (not the blanked post-wrap string) and
+        // any pre-restore snapshot we push captures live plaintext.
+        if let (Some(rec), Some(k)) = (old_record.as_ref(), restore_key.as_ref()) {
+            unwrap_entry_with_key(entry, rec, k)?;
         }
 
         // Clone the target snapshot out before mutating history — once
@@ -1400,10 +1446,35 @@ impl Kdbx<Unlocked> {
 
         truncate_history(&mut entry.history, history_max_items, history_max_size);
 
+        // Re-wrap the restored entry (live protected fields + every
+        // surviving history snapshot) into a fresh side-table record so
+        // the canonical "model holds empty plaintext, side-table holds
+        // wrapped bytes" invariant is restored around the new content.
+        // Truncation ran first, so the record's history aligns
+        // positionally with `entry.history`. Without this the save-time
+        // unwrap step blindly overlays the OLD wrapped bytes over the
+        // restored plaintext and the restore is lost on save. Mirror of
+        // `edit_entry`'s post-edit re-wrap.
+        let new_record = match (protector.as_ref(), restore_key.as_ref()) {
+            (Some(_), Some(k)) => Some(wrap_entry_with_key(entry, k)?),
+            (Some(p), None) => {
+                // Restore on an entry that had no wrapped record before
+                // (e.g. all protected fields were empty at unlock).
+                // Acquire a key now to wrap the restored state.
+                let k = p.acquire_session_key()?;
+                Some(wrap_entry_with_key(entry, &k)?)
+            }
+            _ => None,
+        };
+
         // End the entry borrow so the vault is accessible again for
         // pool GC.
         let _ = entry;
         gc_binaries_pool(&mut self.state.vault);
+
+        if let Some(new_record) = new_record {
+            self.state.protected_fields.insert(id, new_record);
+        }
 
         Ok(())
     }
