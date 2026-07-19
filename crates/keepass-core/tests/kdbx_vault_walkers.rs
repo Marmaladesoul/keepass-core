@@ -15,9 +15,10 @@
 use chrono::{DateTime, Utc};
 use keepass_core::CompositeKey;
 use keepass_core::kdbx::{Kdbx, Sealed};
-use keepass_core::model::{FixedClock, NewEntry, NewGroup};
+use keepass_core::model::{FixedClock, GroupId, NewEntry, NewGroup};
 use std::fs;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -235,4 +236,73 @@ fn move_group_to_position_same_parent_reorders_siblings() {
         .expect("parent in tree");
     let names: Vec<&str> = parent_node.groups.iter().map(|g| g.name.as_str()).collect();
     assert_eq!(names, vec!["b", "c", "a"]);
+}
+
+#[test]
+fn move_group_equals_move_to_position_pushed_to_end() {
+    // Guards the DRY merge of the two movers into one shared core:
+    // `move_group(x, p)` must produce a byte-identical tree — same child
+    // order, same `previous_parent_group`, same `location_changed` stamp —
+    // as `move_group_to_position(x, p, n)` for any `n` at/past the
+    // destination's post-detach child count (both append to the end).
+    let at: DateTime<Utc> = "2026-05-12T10:00:00Z".parse().unwrap();
+
+    // Pin UUIDs so the two independently-built vaults are structurally
+    // identical, making a whole-subtree `assert_eq!` meaningful.
+    let parent_uuid = Uuid::from_u128(0x0001);
+    let c0_uuid = Uuid::from_u128(0x00c0);
+    let c1_uuid = Uuid::from_u128(0x00c1);
+    let mover_uuid = Uuid::from_u128(0x000f);
+
+    let build = |kdbx: &mut Kdbx<keepass_core::kdbx::Unlocked>| -> (GroupId, GroupId) {
+        let root_id = kdbx.vault().root.id;
+        let parent = kdbx
+            .add_group(root_id, NewGroup::new("Parent").with_uuid(parent_uuid))
+            .unwrap();
+        kdbx.add_group(parent, NewGroup::new("c0").with_uuid(c0_uuid))
+            .unwrap();
+        kdbx.add_group(parent, NewGroup::new("c1").with_uuid(c1_uuid))
+            .unwrap();
+        let mover = kdbx
+            .add_group(root_id, NewGroup::new("mover").with_uuid(mover_uuid))
+            .unwrap();
+        (parent, mover)
+    };
+
+    let mut via_push = open(at);
+    let (parent_a, mover_a) = build(&mut via_push);
+    via_push.move_group(mover_a, parent_a).unwrap();
+
+    let mut via_position = open(at);
+    let (parent_b, mover_b) = build(&mut via_position);
+    // After the mover detaches from root, `parent` has two children; any
+    // position >= 2 appends, matching `move_group`'s push.
+    via_position
+        .move_group_to_position(mover_b, parent_b, 2)
+        .unwrap();
+
+    let dest_a = via_push
+        .vault()
+        .root
+        .groups
+        .iter()
+        .find(|g| g.id == parent_a)
+        .expect("parent survives in push variant");
+    let dest_b = via_position
+        .vault()
+        .root
+        .groups
+        .iter()
+        .find(|g| g.id == parent_b)
+        .expect("parent survives in position variant");
+
+    // Whole-subtree structural equality: child order, ids, and the moved
+    // group's `previous_parent_group` + `location_changed` stamp all match.
+    assert_eq!(dest_a, dest_b);
+    // And the mover really landed at the end (push semantics).
+    assert_eq!(
+        dest_a.groups.last().map(|g| g.id),
+        Some(mover_a),
+        "mover appended to the end"
+    );
 }
