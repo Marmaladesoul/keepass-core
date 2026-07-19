@@ -52,9 +52,8 @@ use crate::format::{
     write_hmac_block_stream,
 };
 use crate::model::{
-    Binary, Clock, Entry, EntryEditor, EntryId, Group, GroupEditor, GroupId, HistoryPolicy,
-    ModelError, NewEntry, NewGroup, PortableEntry, RandomUuids, SystemClock, Timestamps,
-    UuidSource, Vault,
+    Binary, Clock, Entry, EntryEditor, EntryId, GroupEditor, GroupId, HistoryPolicy, ModelError,
+    NewEntry, NewGroup, PortableEntry, RandomUuids, SystemClock, UuidSource, Vault,
 };
 use crate::protector::{FieldProtector, ProtectorError, SessionKey, open_with_key, seal_with_key};
 use crate::secret::{CompositeKey, TransformedKey};
@@ -77,7 +76,6 @@ pub(crate) use crate::vault_ops::binaries::{
 pub(crate) use crate::vault_ops::history::{should_snapshot_now, truncate_history};
 pub(crate) use crate::vault_ops::icons::gc_custom_icons_pool;
 pub(crate) use crate::vault_ops::ids::{fresh_uuid, uuid_in_use};
-pub(crate) use crate::vault_ops::tombstones::collect_subtree_tombstones;
 
 // Path-preserving re-export: `compute_history_drop_count` moved to
 // `crate::vault_ops::history`, but `keepass-merge` imports it from
@@ -595,7 +593,7 @@ impl Kdbx<Unlocked> {
     /// creation [`Clock`] and root-id [`UuidSource`] injected, so a fresh
     /// vault is byte-reproducible.
     ///
-    /// `clock` stamps the root group's [`Timestamps`] (and is retained on
+    /// `clock` stamps the root group's [`Timestamps`](crate::model::Timestamps) (and is retained on
     /// the unlocked vault for later mutations, exactly as `unlock`'s clock
     /// is); `uuids` mints the root [`GroupId`]. Pass a
     /// [`crate::model::FixedClock`] + [`crate::model::SeededUuids`] to make
@@ -907,7 +905,7 @@ impl Kdbx<Unlocked> {
     ///
     /// The library owns UUID generation (unless the builder set one
     /// via [`NewEntry::with_uuid`]), fills in every
-    /// [`Timestamps`] field from [`Self::clock`], sets
+    /// [`Timestamps`](crate::model::Timestamps) field from [`Self::clock`], sets
     /// `previous_parent_group = None`, and appends the entry to the
     /// parent's child list. Returns the new entry's [`EntryId`].
     ///
@@ -2079,12 +2077,12 @@ impl Kdbx<Unlocked> {
         do_save(self.signature, self.version, &self.state)
     }
 
-    /// Insert a new [`Group`] under the parent identified by
+    /// Insert a new [`Group`](crate::model::Group) under the parent identified by
     /// `parent`.
     ///
     /// Mirrors [`Self::add_entry`]: the library owns UUID generation
     /// (unless the builder set one via [`NewGroup::with_uuid`]),
-    /// fills in every [`Timestamps`] field from [`Self::clock`],
+    /// fills in every [`Timestamps`](crate::model::Timestamps) field from [`Self::clock`],
     /// sets `previous_parent_group = None`, and appends the group to
     /// the parent's child list. Returns the new group's [`GroupId`].
     ///
@@ -2104,56 +2102,8 @@ impl Kdbx<Unlocked> {
         parent: GroupId,
         template: NewGroup,
     ) -> Result<GroupId, ModelError> {
-        let uuid = match template.uuid {
-            Some(u) => {
-                if uuid_in_use(&self.state.vault, u) {
-                    return Err(ModelError::DuplicateUuid(u));
-                }
-                u
-            }
-            None => fresh_uuid(&self.state.vault),
-        };
-
-        if self.state.vault.root.group(parent).is_none() {
-            return Err(ModelError::GroupNotFound(parent));
-        }
-
-        let now = self.state.clock.now();
-        let group = Group {
-            id: GroupId(uuid),
-            name: template.name,
-            notes: template.notes,
-            groups: Vec::new(),
-            entries: Vec::new(),
-            is_expanded: true,
-            default_auto_type_sequence: String::new(),
-            enable_auto_type: template.enable_auto_type,
-            enable_searching: template.enable_searching,
-            custom_data: Vec::new(),
-            previous_parent_group: None,
-            last_top_visible_entry: None,
-            custom_icon_uuid: None,
-            times: Timestamps {
-                creation_time: Some(now),
-                last_modification_time: Some(now),
-                last_access_time: Some(now),
-                location_changed: Some(now),
-                expiry_time: None,
-                expires: false,
-                usage_count: 0,
-            },
-            icon_id: template.icon_id,
-            unknown_xml: Vec::new(),
-        };
-
-        let target = self
-            .state
-            .vault
-            .root
-            .group_mut(parent)
-            .expect("parent existence checked above");
-        target.groups.push(group);
-        Ok(GroupId(uuid))
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::group_ops::add_group(vault, clock.as_ref(), parent, template)
     }
 
     /// Recursively delete the group with the given id.
@@ -2169,28 +2119,8 @@ impl Kdbx<Unlocked> {
     /// - [`ModelError::CannotDeleteRoot`] if `id` is the root group's id.
     /// - [`ModelError::GroupNotFound`] if `id` is not in the vault.
     pub fn delete_group(&mut self, id: GroupId) -> Result<(), ModelError> {
-        if self.state.vault.root.id == id {
-            return Err(ModelError::CannotDeleteRoot);
-        }
-        let now = self.state.clock.now();
-        let removed = self
-            .state
-            .vault
-            .root
-            .detach_group(id)
-            .map(|(g, _)| g)
-            .ok_or(ModelError::GroupNotFound(id))?;
-        // Tombstone every entry and subgroup recursively, in addition
-        // to the group itself.
-        let tombstones = collect_subtree_tombstones(&removed, now);
-        self.state.vault.deleted_objects.extend(tombstones);
-        // Same rationale as `delete_entry`: a whole subtree's worth of
-        // attachments may have just lost their last referent, and the
-        // worst case (delete a group full of attachments) is exactly
-        // the situation where leaking orphan binaries to the next save
-        // hurts most.
-        gc_binaries_pool(&mut self.state.vault);
-        Ok(())
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::group_ops::delete_group(vault, clock.as_ref(), id)
     }
 
     /// Move a group from its current parent to `new_parent`.
@@ -2217,47 +2147,8 @@ impl Kdbx<Unlocked> {
     /// call is `.expect()`ed because the destination's existence was
     /// already proved earlier in the function.
     pub fn move_group(&mut self, id: GroupId, new_parent: GroupId) -> Result<(), ModelError> {
-        if self.state.vault.root.id == id {
-            // Root has no parent and reparenting it would orphan the
-            // whole vault.
-            return Err(ModelError::CannotDeleteRoot);
-        }
-
-        // Check the destination exists before touching anything.
-        if self.state.vault.root.group(new_parent).is_none() {
-            return Err(ModelError::GroupNotFound(new_parent));
-        }
-
-        // Cycle check: walk `id`'s subtree (including `id` itself)
-        // and reject if `new_parent` lives inside it.
-        let Some(source_subtree) = self.state.vault.root.group(id) else {
-            return Err(ModelError::GroupNotFound(id));
-        };
-        if source_subtree.group(new_parent).is_some() {
-            return Err(ModelError::CircularMove {
-                moving: id,
-                new_parent,
-            });
-        }
-
-        let (mut group, old_parent) = self
-            .state
-            .vault
-            .root
-            .detach_group(id)
-            .ok_or(ModelError::GroupNotFound(id))?;
-        let now = self.state.clock.now();
-        group.previous_parent_group = Some(old_parent);
-        group.times.location_changed = Some(now);
-
-        let target = self
-            .state
-            .vault
-            .root
-            .group_mut(new_parent)
-            .expect("destination existence checked above");
-        target.groups.push(group);
-        Ok(())
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::group_ops::move_group(vault, clock.as_ref(), id, new_parent)
     }
 
     /// Move a group from its current parent to `new_parent`, inserting
@@ -2294,43 +2185,14 @@ impl Kdbx<Unlocked> {
         new_parent: GroupId,
         position: usize,
     ) -> Result<(), ModelError> {
-        if self.state.vault.root.id == id {
-            return Err(ModelError::CannotDeleteRoot);
-        }
-
-        if self.state.vault.root.group(new_parent).is_none() {
-            return Err(ModelError::GroupNotFound(new_parent));
-        }
-
-        let Some(source_subtree) = self.state.vault.root.group(id) else {
-            return Err(ModelError::GroupNotFound(id));
-        };
-        if source_subtree.group(new_parent).is_some() {
-            return Err(ModelError::CircularMove {
-                moving: id,
-                new_parent,
-            });
-        }
-
-        let (mut group, old_parent) = self
-            .state
-            .vault
-            .root
-            .detach_group(id)
-            .ok_or(ModelError::GroupNotFound(id))?;
-        let now = self.state.clock.now();
-        group.previous_parent_group = Some(old_parent);
-        group.times.location_changed = Some(now);
-
-        let target = self
-            .state
-            .vault
-            .root
-            .group_mut(new_parent)
-            .expect("destination existence checked above");
-        let clamped = position.min(target.groups.len());
-        target.groups.insert(clamped, group);
-        Ok(())
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::group_ops::move_group_to_position(
+            vault,
+            clock.as_ref(),
+            id,
+            new_parent,
+            position,
+        )
     }
 
     /// Field-level edit on a single group, with one automatic
@@ -2349,19 +2211,8 @@ impl Kdbx<Unlocked> {
         id: GroupId,
         f: impl FnOnce(&mut GroupEditor<'_>) -> R,
     ) -> Result<R, ModelError> {
-        let now = self.state.clock.now();
-        let group = self
-            .state
-            .vault
-            .root
-            .group_mut(id)
-            .ok_or(ModelError::GroupNotFound(id))?;
-        let result = {
-            let mut editor = GroupEditor::new(group);
-            f(&mut editor)
-        };
-        group.times.last_modification_time = Some(now);
-        Ok(result)
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::group_ops::edit_group(vault, clock.as_ref(), id, f)
     }
 
     // -----------------------------------------------------------------
