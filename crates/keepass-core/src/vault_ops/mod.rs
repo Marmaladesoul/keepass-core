@@ -36,6 +36,7 @@ pub(crate) mod group_ops;
 pub(crate) mod history;
 pub(crate) mod icons;
 pub(crate) mod ids;
+pub(crate) mod import_export;
 pub(crate) mod meta_settings;
 pub(crate) mod recycle;
 pub(crate) mod tombstones;
