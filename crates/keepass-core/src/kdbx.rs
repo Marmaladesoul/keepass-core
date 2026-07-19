@@ -1853,43 +1853,8 @@ impl Kdbx<Unlocked> {
     ///
     /// - [`ModelError::EntryNotFound`] if `id` is absent.
     pub fn recycle_entry(&mut self, id: EntryId) -> Result<Option<GroupId>, ModelError> {
-        // Validate existence + get the entry's current parent group.
-        let parent = self
-            .state
-            .vault
-            .root
-            .entry_parent(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-
-        // `recycle_bin_enabled = false` → hard delete, no bin.
-        if !self.state.vault.meta.recycle_bin_enabled
-            && self.state.vault.meta.recycle_bin_uuid.is_none()
-        {
-            // Only fall through to hard-delete when BOTH enabled is
-            // false AND no bin exists. If a bin exists (even with
-            // enabled=false), respect it — matches KeePassXC's
-            // "bin exists, you can still use it" flexibility.
-            self.delete_entry(id)?;
-            return Ok(None);
-        }
-
-        // Already inside the bin? Walk ancestors from the parent
-        // group up to root; any ancestor == bin → no-op.
-        if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
-            if self
-                .state
-                .vault
-                .root
-                .group(bin_id)
-                .is_some_and(|bin| bin.group(parent).is_some())
-            {
-                return Ok(None);
-            }
-        }
-
-        let bin_id = self.find_or_create_recycle_bin()?;
-        self.move_entry(id, bin_id)?;
-        Ok(Some(bin_id))
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::recycle::recycle_entry(vault, clock.as_ref(), id)
     }
 
     /// Soft-delete a group (and its subtree) into the recycle bin.
@@ -1903,44 +1868,8 @@ impl Kdbx<Unlocked> {
     ///   itself — "group can't be its own ancestor" is the wire
     ///   invariant, and recycling the bin into itself trips it.
     pub fn recycle_group(&mut self, id: GroupId) -> Result<Option<GroupId>, ModelError> {
-        if self.state.vault.root.group(id).is_none() {
-            return Err(ModelError::GroupNotFound(id));
-        }
-        if id == self.state.vault.root.id {
-            return Err(ModelError::CannotDeleteRoot);
-        }
-
-        // Same fallback logic as `recycle_entry`.
-        if !self.state.vault.meta.recycle_bin_enabled
-            && self.state.vault.meta.recycle_bin_uuid.is_none()
-        {
-            self.delete_group(id)?;
-            return Ok(None);
-        }
-
-        // Is `id` the bin itself? → CircularMove.
-        if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
-            if bin_id == id && self.state.vault.root.group(bin_id).is_some() {
-                return Err(ModelError::CircularMove {
-                    moving: id,
-                    new_parent: bin_id,
-                });
-            }
-            // Already inside the bin?
-            if self
-                .state
-                .vault
-                .root
-                .group(bin_id)
-                .is_some_and(|bin| bin.group(id).is_some())
-            {
-                return Ok(None);
-            }
-        }
-
-        let bin_id = self.find_or_create_recycle_bin()?;
-        self.move_group(id, bin_id)?;
-        Ok(Some(bin_id))
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::recycle::recycle_group(vault, clock.as_ref(), id)
     }
 
     /// Permanently delete every direct child of the recycle bin.
@@ -1959,56 +1888,8 @@ impl Kdbx<Unlocked> {
     /// `meta.recycle_bin_uuid` is `None` or it points at a group
     /// that no longer resolves). No error, just a no-op.
     pub fn empty_recycle_bin(&mut self) -> Result<usize, ModelError> {
-        let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid else {
-            return Ok(0);
-        };
-        // Snapshot direct-child ids BEFORE mutating — can't iterate
-        // `&mut Vec` while calling `&mut self` delete methods. A
-        // dangling `recycle_bin_uuid` resolves to `None` here and
-        // we early-return 0.
-        let Some(bin) = self.state.vault.root.group(bin_id) else {
-            return Ok(0);
-        };
-        let entry_ids: Vec<EntryId> = bin.entries.iter().map(|e| e.id).collect();
-        let group_ids: Vec<GroupId> = bin.groups.iter().map(|g| g.id).collect();
-        let count = entry_ids.len() + group_ids.len();
-
-        for eid in entry_ids {
-            self.delete_entry(eid)?;
-        }
-        for gid in group_ids {
-            self.delete_group(gid)?;
-        }
-        Ok(count)
-    }
-
-    /// Resolve the existing recycle bin group id, or create one
-    /// lazily under the root if none exists (or if the current
-    /// `recycle_bin_uuid` dangles). See [`Self::recycle_entry`] for
-    /// the lazy-creation invariants.
-    fn find_or_create_recycle_bin(&mut self) -> Result<GroupId, ModelError> {
-        if let Some(bin_id) = self.state.vault.meta.recycle_bin_uuid {
-            if self.state.vault.root.group(bin_id).is_some() {
-                return Ok(bin_id);
-            }
-            // Dangling — fall through and mint a fresh bin. The
-            // stale `recycle_bin_uuid` is about to be overwritten
-            // below.
-        }
-        let root = self.state.vault.root.id;
-        let bin_id = self.add_group(
-            root,
-            NewGroup::new("Recycle Bin")
-                .icon_id(43)
-                .enable_auto_type(Some(false))
-                .enable_searching(Some(false)),
-        )?;
-        let now = self.state.clock.now();
-        self.state.vault.meta.recycle_bin_enabled = true;
-        self.state.vault.meta.recycle_bin_uuid = Some(bin_id);
-        self.state.vault.meta.recycle_bin_changed = Some(now);
-        self.stamp_settings_changed();
-        Ok(bin_id)
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::recycle::empty_recycle_bin(vault, clock.as_ref())
     }
 
     /// Serialise this unlocked database back to a KDBX byte stream —
@@ -2292,15 +2173,6 @@ impl Kdbx<Unlocked> {
     pub fn set_master_key_change_force(&mut self, days: i64) {
         let Unlocked { vault, clock, .. } = &mut self.state;
         vault_ops::meta_settings::set_master_key_change_force(vault, clock.as_ref(), days);
-    }
-
-    /// Stamp [`crate::model::Meta::settings_changed`] from the
-    /// injected clock via [`vault_ops::meta_settings::stamp_settings_changed`].
-    /// Thin wrapper retained for the still-in-place verbs (e.g.
-    /// `find_or_create_recycle_bin`) that stamp settings directly.
-    fn stamp_settings_changed(&mut self) {
-        let Unlocked { vault, clock, .. } = &mut self.state;
-        vault_ops::meta_settings::stamp_settings_changed(vault, clock.as_ref());
     }
 
     /// Replace the master key.

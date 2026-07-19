@@ -313,6 +313,52 @@ fn recycle_group_on_group_already_nested_in_bin_returns_ok_none_without_mutation
 }
 
 #[test]
+fn recycle_group_hard_deletes_subtree_when_bin_disabled_and_no_bin_exists() {
+    // Group counterpart to
+    // `recycle_entry_hard_deletes_when_bin_disabled_and_no_bin_exists`:
+    // with the bin disabled AND no bin group present, recycling a
+    // group must permanently delete its whole subtree (one
+    // `DeletedObject` per entry, subgroup, and the group itself),
+    // return `Ok(None)`, and mint no bin. Pins the
+    // permanent-delete-without-bin path for groups.
+    let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
+    let (mut kdbx, _) = open_with_clock(&kdbx4_basic(), t0);
+    // Normalise meta pre-state — the kdbxweb/kdbx4-basic fixture
+    // ships with `recycle_bin_enabled = true` + a dangling UUID;
+    // clear both so the "bin disabled, no bin exists" branch is
+    // unambiguously under test.
+    kdbx.set_recycle_bin(false, None);
+    let root = kdbx.vault().root.id;
+
+    // Subtree: "Doomed" > "Nested" + one entry in each.
+    let doomed = kdbx.add_group(root, NewGroup::new("Doomed")).unwrap();
+    let nested = kdbx.add_group(doomed, NewGroup::new("Nested")).unwrap();
+    let e_top = kdbx.add_entry(doomed, NewEntry::new("Top")).unwrap();
+    let e_nested = kdbx.add_entry(nested, NewEntry::new("Deep")).unwrap();
+    assert!(!kdbx.vault().meta.recycle_bin_enabled);
+    assert!(kdbx.vault().meta.recycle_bin_uuid.is_none());
+    let tombstones_before = kdbx.vault().deleted_objects.len();
+
+    let result = kdbx.recycle_group(doomed).unwrap();
+    assert!(result.is_none(), "hard-delete fallback returns Ok(None)");
+
+    // The whole subtree is gone.
+    assert!(kdbx.vault().group(doomed).is_none());
+    assert!(kdbx.vault().group(nested).is_none());
+    assert!(kdbx.vault().entry(e_top).is_none());
+    assert!(kdbx.vault().entry(e_nested).is_none());
+    // One tombstone per removed record: 2 entries + 2 groups = 4.
+    assert_eq!(
+        kdbx.vault().deleted_objects.len(),
+        tombstones_before + 4,
+        "hard-delete cascade emits one DeletedObject per entry and subgroup"
+    );
+    // No bin was created.
+    assert!(kdbx.vault().meta.recycle_bin_uuid.is_none());
+    assert!(!kdbx.vault().meta.recycle_bin_enabled);
+}
+
+#[test]
 fn recycle_group_on_bin_itself_returns_circular_move() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, _) = open_with_clock(&kdbx4_basic(), t0);
