@@ -31,6 +31,7 @@
 //! [`Vault`]: crate::model::Vault
 
 pub(crate) mod binaries;
+pub(crate) mod entry_ops;
 pub(crate) mod history;
 pub(crate) mod icons;
 pub(crate) mod ids;
