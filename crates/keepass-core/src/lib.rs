@@ -63,6 +63,12 @@ pub mod protector;
 pub mod secret;
 pub mod xml;
 
+// Policy / CRUD verbs and helpers, extracted from `kdbx` as free
+// functions over `&mut Vault`. `kdbx` keeps the typestate + crypto and
+// delegates every verb here through a thin wrapper. Crate-private: the
+// public surface stays the `Kdbx` methods. See [`vault_ops`] for the seam.
+pub(crate) mod vault_ops;
+
 // Re-export the headline types so consumers can write
 // `use keepass_core::{CompositeKey, Error};` without walking the module tree.
 #[doc(inline)]
