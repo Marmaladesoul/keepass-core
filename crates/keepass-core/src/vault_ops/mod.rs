@@ -39,4 +39,5 @@ pub(crate) mod ids;
 pub(crate) mod import_export;
 pub(crate) mod meta_settings;
 pub(crate) mod recycle;
+pub(crate) mod reveal;
 pub(crate) mod tombstones;

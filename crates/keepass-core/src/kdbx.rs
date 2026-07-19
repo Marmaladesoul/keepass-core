@@ -164,7 +164,7 @@ pub struct Unlocked {
 /// strings are cleared in tandem so plaintext is not duplicated in
 /// memory. Reveal-side accessors and the save pipeline consult this
 /// table to recover the plaintext on demand.
-type ProtectedFieldMap = std::collections::HashMap<EntryId, ProtectedFields>;
+pub(crate) type ProtectedFieldMap = std::collections::HashMap<EntryId, ProtectedFields>;
 
 /// Wrapped protected-field bytes for a single [`Entry`] and its
 /// [`history`](Entry::history) snapshots.
@@ -175,16 +175,16 @@ type ProtectedFieldMap = std::collections::HashMap<EntryId, ProtectedFields>;
 /// history snapshot, in the same order as
 /// [`Entry::history`](crate::model::Entry::history).
 #[derive(Debug, Clone, Default)]
-struct ProtectedFields {
+pub(crate) struct ProtectedFields {
     /// Wrapped bytes for the entry's password. `None` means the
     /// password was empty at unlock time (and remains empty after
     /// wrap, since wrapping an empty string is meaningless and would
     /// just add an empty-wrap round-trip cost for no benefit).
-    password: Option<Vec<u8>>,
+    pub(crate) password: Option<Vec<u8>>,
     /// Wrapped bytes for each `CustomField` with `protected = true`,
     /// keyed by `CustomField::key`. Non-protected custom fields are
     /// not included.
-    custom_fields: std::collections::HashMap<String, Vec<u8>>,
+    pub(crate) custom_fields: std::collections::HashMap<String, Vec<u8>>,
     /// One entry per snapshot in [`Entry::history`](crate::model::Entry::history),
     /// in the same order. Each carries the wrapped form of the
     /// snapshot's password and protected custom fields.
@@ -771,15 +771,11 @@ impl Kdbx<Unlocked> {
     /// Returns [`Error::Protector`] if the configured protector's
     /// `unwrap` rejects any wrapped blob or produces non-UTF-8 output.
     pub fn vault_with_unwrapped_protected(&self) -> Result<Vault, Error> {
-        let mut vault = self.state.vault.clone();
-        if let Some(protector) = self.state.protector.as_ref() {
-            unwrap_vault_protected_fields(
-                &mut vault,
-                &self.state.protected_fields,
-                protector.as_ref(),
-            )?;
-        }
-        Ok(vault)
+        vault_ops::reveal::vault_with_unwrapped_protected(
+            &self.state.vault,
+            self.state.protector.as_deref(),
+            &self.state.protected_fields,
+        )
     }
 
     /// Reveal an entry's password as plaintext.
@@ -799,25 +795,12 @@ impl Kdbx<Unlocked> {
     /// the protector fails or the wrapped bytes can't be opened /
     /// produce non-UTF-8 output.
     pub fn reveal_password(&self, id: EntryId) -> Result<String, Error> {
-        let entry = self
-            .state
-            .vault
-            .root
-            .entry(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-        match (
-            self.state.protector.as_ref(),
-            self.state.protected_fields.get(&id),
-        ) {
-            (Some(protector), Some(record)) => match &record.password {
-                Some(bytes) => {
-                    let key = protector.acquire_session_key()?;
-                    Ok(decode_wrapped_with_key(bytes, &key)?)
-                }
-                None => Ok(String::new()),
-            },
-            _ => Ok(entry.password.clone()),
-        }
+        vault_ops::reveal::reveal_password(
+            &self.state.vault,
+            self.state.protector.as_deref(),
+            &self.state.protected_fields,
+            id,
+        )
     }
 
     /// Reveal a custom field's value as plaintext.
@@ -835,31 +818,13 @@ impl Kdbx<Unlocked> {
     /// [`ProtectorError::Open`] (wrapped in [`Error::Protector`]) on
     /// protector failure or non-UTF-8 output.
     pub fn reveal_custom_field(&self, id: EntryId, key: &str) -> Result<Option<String>, Error> {
-        let entry = self
-            .state
-            .vault
-            .root
-            .entry(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-        let Some(cf) = entry.custom_fields.iter().find(|c| c.key == key) else {
-            return Ok(None);
-        };
-        if !cf.protected {
-            return Ok(Some(cf.value.clone()));
-        }
-        match (
-            self.state.protector.as_ref(),
-            self.state.protected_fields.get(&id),
-        ) {
-            (Some(protector), Some(record)) => match record.custom_fields.get(key) {
-                Some(bytes) => {
-                    let session_key = protector.acquire_session_key()?;
-                    Ok(Some(decode_wrapped_with_key(bytes, &session_key)?))
-                }
-                None => Ok(Some(String::new())),
-            },
-            _ => Ok(Some(cf.value.clone())),
-        }
+        vault_ops::reveal::reveal_custom_field(
+            &self.state.vault,
+            self.state.protector.as_deref(),
+            &self.state.protected_fields,
+            id,
+            key,
+        )
     }
 
     /// The [`Clock`] this unlocked database uses to stamp timestamps
@@ -2399,7 +2364,7 @@ fn wrap_string_in_place_with_key(
 /// Mirror of [`wrap_vault_protected_fields`], used by the save
 /// pipeline on a local clone of the vault so the canonical
 /// [`Unlocked::vault`] state stays wrapped across the save.
-fn unwrap_vault_protected_fields(
+pub(crate) fn unwrap_vault_protected_fields(
     vault: &mut Vault,
     map: &ProtectedFieldMap,
     protector: &dyn FieldProtector,
@@ -2440,7 +2405,10 @@ fn unwrap_entry_with_key(
     Ok(())
 }
 
-fn decode_wrapped_with_key(wrapped: &[u8], key: &SessionKey) -> Result<String, ProtectorError> {
+pub(crate) fn decode_wrapped_with_key(
+    wrapped: &[u8],
+    key: &SessionKey,
+) -> Result<String, ProtectorError> {
     let bytes = open_with_key(key, wrapped)?;
     String::from_utf8(bytes)
         .map_err(|e| ProtectorError::Open(format!("opened bytes are not valid UTF-8: {e}")))
