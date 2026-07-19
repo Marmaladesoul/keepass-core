@@ -618,6 +618,82 @@ fn restore_entry_from_history_under_protector_persists_restored_password_through
 }
 
 #[test]
+fn edit_entry_under_protector_acquires_exactly_one_session_key() {
+    // Characterisation: with a protector installed, a single
+    // `edit_entry` cycle fetches the session key EXACTLY ONCE — the
+    // per-edit key is reused for both the pre-edit unwrap and the
+    // post-edit re-wrap. Not zero, not one-per-field. Pins the
+    // acquisition count so the kdbx.rs -> vault_ops relocation can't
+    // silently regress the cross-boundary key-fetch cost.
+    let composite = CompositeKey::from_password(b"test");
+    let (bytes, _, _, _) = fixture_bytes_with_one_entry(&composite);
+
+    let protector = Arc::new(CountingProtector::new(0x5a));
+    let mut unlocked = Kdbx::<Sealed>::open_from_bytes(bytes)
+        .expect("open")
+        .read_header()
+        .expect("read_header")
+        .unlock_with_protector(&composite, Some(protector.clone()))
+        .expect("unlock_with_protector");
+    let id = unlocked.vault().root.entries.first().unwrap().id;
+
+    let before = protector.acquires();
+    unlocked
+        .edit_entry(id, HistoryPolicy::NoSnapshot, |e| {
+            e.set_password(SecretString::from("rotated"));
+        })
+        .expect("edit_entry");
+    let after = protector.acquires();
+
+    assert_eq!(
+        after - before,
+        1,
+        "one edit under a protector must acquire exactly one session key",
+    );
+}
+
+#[test]
+fn restore_entry_from_history_under_protector_acquires_exactly_one_session_key() {
+    // Characterisation: a single `restore_entry_from_history` cycle
+    // under a protector fetches the session key EXACTLY ONCE — reused
+    // for the pre-restore unwrap and the post-restore re-wrap. Pins the
+    // acquisition count across the relocation.
+    let composite = CompositeKey::from_password(b"test");
+    let protector = Arc::new(CountingProtector::new(0xa5));
+    let mut kdbx = Kdbx::<Unlocked>::create_empty_v4_with_protector(
+        &composite,
+        "Restore Acquire Count",
+        Some(protector.clone()),
+    )
+    .expect("create_empty_v4_with_protector");
+
+    let root = kdbx.vault().root.id;
+    let id = kdbx
+        .add_entry(
+            root,
+            NewEntry::new("login").password(SecretString::from("A")),
+        )
+        .expect("add_entry");
+
+    // Edit A -> B under Snapshot so history[0] exists to restore from.
+    kdbx.edit_entry(id, HistoryPolicy::Snapshot, |e| {
+        e.set_password(SecretString::from("B"));
+    })
+    .expect("edit_entry");
+
+    let before = protector.acquires();
+    kdbx.restore_entry_from_history(id, 0, HistoryPolicy::Snapshot)
+        .expect("restore_entry_from_history");
+    let after = protector.acquires();
+
+    assert_eq!(
+        after - before,
+        1,
+        "one restore under a protector must acquire exactly one session key",
+    );
+}
+
+#[test]
 fn create_empty_v4_with_protector_stores_protector() {
     let composite = CompositeKey::from_password(b"test");
     let protector: Arc<dyn FieldProtector> = Arc::new(XorProtector { key: 0x33 });

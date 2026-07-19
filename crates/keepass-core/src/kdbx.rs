@@ -69,8 +69,7 @@ use crate::vault_ops;
 // that module for the seam). The crypto and still-in-place CRUD code below
 // calls the pure helpers unqualified, so re-export them at this module's
 // root — the compiler enforces that the set is complete.
-pub(crate) use crate::vault_ops::binaries::{apply_pending_attaches, gc_binaries_pool};
-pub(crate) use crate::vault_ops::history::{should_snapshot_now, truncate_history};
+pub(crate) use crate::vault_ops::binaries::gc_binaries_pool;
 pub(crate) use crate::vault_ops::icons::gc_custom_icons_pool;
 
 // Path-preserving re-export: `compute_history_drop_count` moved to
@@ -976,107 +975,27 @@ impl Kdbx<Unlocked> {
         policy: HistoryPolicy,
         f: impl FnOnce(&mut EntryEditor<'_>) -> R,
     ) -> Result<R, ModelError> {
-        // Hoist everything we need off `self.state` before we take
-        // a long-lived `&mut Entry` borrow — the borrow checker
-        // otherwise forbids touching `self.state.clock` / meta
-        // through the rest of the method.
-        let now = self.state.clock.now();
-        let history_max_items = self.state.vault.meta.history_max_items;
-        let history_max_size = self.state.vault.meta.history_max_size;
-        // Capture the protector + the pre-edit wrapped record so the
-        // editor closure can operate on plaintext, then we re-wrap
-        // everything (live fields + every history snapshot) once it
-        // returns. When no protector is configured the unwrap/rewrap
-        // bookkeeping is skipped entirely.
-        let protector = self.state.protector.clone();
-        let old_record = protector
-            .as_ref()
-            .and_then(|_| self.state.protected_fields.get(&id).cloned());
-
-        let entry = self
-            .state
-            .vault
-            .root
-            .entry_mut(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-
-        // Restore plaintext on the entry from the side-table so the
-        // editor closure reads "current" values from `entry.password`
-        // / protected custom fields, and any snapshot we clone next
-        // captures the up-to-date plaintext for save-time use. This
-        // mirror's the save pipeline's `unwrap_vault_protected_fields`
-        // step on a single entry.
-        // Per-edit key: acquired once if a protector is configured AND
-        // this entry has wrapped fields. Used for both the pre-edit
-        // unwrap and the post-edit re-wrap below so the editor pays
-        // a single `acquire_session_key` call per edit cycle.
-        let edit_key = match (protector.as_ref(), old_record.as_ref()) {
-            (Some(p), Some(_)) => Some(p.acquire_session_key()?),
-            _ => None,
-        };
-        if let (Some(rec), Some(k)) = (old_record.as_ref(), edit_key.as_ref()) {
-            unwrap_entry_with_key(entry, rec, k)?;
-        }
-
-        let should_snapshot = should_snapshot_now(policy, &entry.history, now);
-
-        if should_snapshot {
-            let mut snap = entry.clone();
-            // KeePass history entries never nest their own history.
-            snap.history.clear();
-            entry.history.push(snap);
-            truncate_history(&mut entry.history, history_max_items, history_max_size);
-        }
-
-        // Scope the editor borrow so `entry` is freely usable again
-        // when we stamp the last-modification timestamp below. Pull
-        // any staged attach intents out of the editor before its
-        // borrow drops — they get applied against the Vault's
-        // shared binaries pool after the &mut Entry borrow ends.
-        // Split-borrow: `entry` is &mut into `self.state.vault.root`;
-        // the binary pool is a sibling field of the same Vault. Rust
-        // allows holding both borrows simultaneously because they
-        // target disjoint fields.
-        let binaries: &[Binary] = &self.state.vault.binaries;
-        let (result, pending) = {
-            let mut editor = EntryEditor::new(entry, binaries);
-            let r = f(&mut editor);
-            let p = editor.take_pending_binary_ops();
-            (r, p)
-        };
-
-        entry.times.last_modification_time = Some(now);
-
-        // Re-wrap the entry's protected fields (live + every history
-        // snapshot) into a fresh side-table record so the canonical
-        // "model holds empty plaintext, side-table holds wrapped
-        // bytes" invariant is restored. Without this the save-time
-        // unwrap step blindly restores the OLD wrapped bytes over
-        // whatever the editor wrote and the edit is lost.
-        let new_record = match (protector.as_ref(), edit_key.as_ref()) {
-            (Some(_), Some(k)) => Some(wrap_entry_with_key(entry, k)?),
-            (Some(p), None) => {
-                // Edit on an entry that didn't have a wrapped record
-                // before this edit (e.g. all protected fields were
-                // empty). Acquire a key now to wrap the new state.
-                let k = p.acquire_session_key()?;
-                Some(wrap_entry_with_key(entry, &k)?)
-            }
-            _ => None,
-        };
-
-        // The &mut Entry borrow ends here; from this point on we
-        // have &mut Vault available for pool-level work.
-        let _ = entry;
-
-        apply_pending_attaches(&mut self.state.vault, id, pending);
-        gc_binaries_pool(&mut self.state.vault);
-
-        if let Some(new_record) = new_record {
-            self.state.protected_fields.insert(id, new_record);
-        }
-
-        Ok(result)
+        // Disjoint-field destructure of `self.state`: `edit_entry` needs
+        // `&mut vault` and `&mut protected_fields` simultaneously, so it
+        // can't go through the `self.clock()` / `self.field_protector()`
+        // accessors (each borrows all of `self`). Splitting the fields
+        // hands the free fn four independent borrows.
+        let Unlocked {
+            vault,
+            clock,
+            protector,
+            protected_fields,
+            ..
+        } = &mut self.state;
+        vault_ops::entry_ops::edit_entry(
+            vault,
+            clock.as_ref(),
+            protector.as_deref(),
+            protected_fields,
+            id,
+            policy,
+            f,
+        )
     }
 
     /// Stamp `entry.times.last_access_time = clock.now()` on the
@@ -1219,134 +1138,26 @@ impl Kdbx<Unlocked> {
         history_index: usize,
         policy: HistoryPolicy,
     ) -> Result<(), ModelError> {
-        // Hoist off `self.state` before the `&mut Entry` borrow, same
-        // reason as `edit_entry`.
-        let now = self.state.clock.now();
-        let history_max_items = self.state.vault.meta.history_max_items;
-        let history_max_size = self.state.vault.meta.history_max_size;
-        // Capture the protector + the pre-restore wrapped record so we
-        // can unwrap the live entry (and its history snapshots) to
-        // plaintext before reading the target snapshot, then re-wrap the
-        // restored entry into a fresh side-table record afterwards.
-        // Mirror of `edit_entry`: with a protector configured the model
-        // `String`s are blanked and the real bytes live in the
-        // side-table, so a raw `snap.password` read would see the empty
-        // post-wrap string and the side-table would still point at the
-        // pre-restore ciphertext. When no protector is configured all of
-        // this is skipped and the path is behaviour-identical to before.
-        let protector = self.state.protector.clone();
-        let old_record = protector
-            .as_ref()
-            .and_then(|_| self.state.protected_fields.get(&id).cloned());
-
-        let entry = self
-            .state
-            .vault
-            .root
-            .entry_mut(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-
-        if history_index >= entry.history.len() {
-            return Err(ModelError::HistoryIndexOutOfRange {
-                id,
-                index: history_index,
-                len: entry.history.len(),
-            });
-        }
-
-        // Per-restore key: acquired once if a protector is configured
-        // AND this entry has wrapped fields. Used for both the
-        // pre-restore unwrap and the post-restore re-wrap so we pay a
-        // single `acquire_session_key` call per restore.
-        let restore_key = match (protector.as_ref(), old_record.as_ref()) {
-            (Some(p), Some(_)) => Some(p.acquire_session_key()?),
-            _ => None,
-        };
-        // Restore plaintext onto the live entry and every history
-        // snapshot from the side-table, so the snapshot we clone next
-        // carries real plaintext (not the blanked post-wrap string) and
-        // any pre-restore snapshot we push captures live plaintext.
-        if let (Some(rec), Some(k)) = (old_record.as_ref(), restore_key.as_ref()) {
-            unwrap_entry_with_key(entry, rec, k)?;
-        }
-
-        // Clone the target snapshot out before mutating history — once
-        // we push the pre-restore snapshot the index shifts.
-        let snap = entry.history[history_index].clone();
-
-        if should_snapshot_now(policy, &entry.history, now) {
-            let mut pre_restore = entry.clone();
-            // KeePass never nests history; the snapshot we're pushing
-            // represents the live entry at call time, not "live + all
-            // its prior history".
-            pre_restore.history.clear();
-            entry.history.push(pre_restore);
-        }
-
-        // ---- Restore content -----------------------------------------
-        // Explicit field-by-field copy so the restore set is auditable
-        // at this call site. Excluded fields are documented on the
-        // method; if a new field lands on `Entry`, the reviewer sees
-        // this block and decides its restore policy deliberately.
-        entry.title = snap.title;
-        entry.username = snap.username;
-        entry.password = snap.password;
-        entry.url = snap.url;
-        entry.notes = snap.notes;
-        entry.tags = snap.tags;
-        entry.custom_fields = snap.custom_fields;
-        entry.attachments = snap.attachments;
-        entry.foreground_color = snap.foreground_color;
-        entry.background_color = snap.background_color;
-        entry.override_url = snap.override_url;
-        entry.custom_icon_uuid = snap.custom_icon_uuid;
-        entry.icon_id = snap.icon_id;
-        entry.quality_check = snap.quality_check;
-        entry.auto_type = snap.auto_type;
-        // Expiry is wire-split into two fields, but semantically one —
-        // the `set_expiry` setter unifies them at the API boundary and
-        // we copy them atomically here so a stale `expires=false` can't
-        // linger alongside a freshly-restored `expiry_time`.
-        entry.times.expires = snap.times.expires;
-        entry.times.expiry_time = snap.times.expiry_time;
-
-        // Stamp the restore as an edit, so UIs that sort by
-        // last-modification show this entry at the top.
-        entry.times.last_modification_time = Some(now);
-
-        truncate_history(&mut entry.history, history_max_items, history_max_size);
-
-        // Re-wrap the restored entry (live protected fields + every
-        // surviving history snapshot) into a fresh side-table record so
-        // the canonical "model holds empty plaintext, side-table holds
-        // wrapped bytes" invariant is restored around the new content.
-        // Truncation ran first, so the record's history aligns
-        // positionally with `entry.history`. Without this the save-time
-        // unwrap step blindly overlays the OLD wrapped bytes over the
-        // restored plaintext and the restore is lost on save. Mirror of
-        // `edit_entry`'s post-edit re-wrap.
-        let new_record = match (protector.as_ref(), restore_key.as_ref()) {
-            (Some(_), Some(k)) => Some(wrap_entry_with_key(entry, k)?),
-            (Some(p), None) => {
-                // Restore on an entry that had no wrapped record before
-                // (e.g. all protected fields were empty at unlock).
-                // Acquire a key now to wrap the restored state.
-                let k = p.acquire_session_key()?;
-                Some(wrap_entry_with_key(entry, &k)?)
-            }
-            _ => None,
-        };
-
-        // End the entry borrow so the vault is accessible again for
-        // pool GC.
-        let _ = entry;
-        gc_binaries_pool(&mut self.state.vault);
-
-        if let Some(new_record) = new_record {
-            self.state.protected_fields.insert(id, new_record);
-        }
-
-        Ok(())
+        // Disjoint-field destructure of `self.state`, same reason as
+        // `edit_entry`: the restore needs `&mut vault` and
+        // `&mut protected_fields` at once, which the whole-`self`
+        // accessors can't provide.
+        let Unlocked {
+            vault,
+            clock,
+            protector,
+            protected_fields,
+            ..
+        } = &mut self.state;
+        vault_ops::entry_ops::restore_entry_from_history(
+            vault,
+            clock.as_ref(),
+            protector.as_deref(),
+            protected_fields,
+            id,
+            history_index,
+            policy,
+        )
     }
 
     /// Apply the vault's current
@@ -2316,7 +2127,7 @@ fn wrap_vault_protected_fields(
 /// Wrap an entry's protected fields against a pre-acquired session key.
 /// Used by both the bulk pass and the entry editor's per-edit re-wrap
 /// (which acquires its own key once per edit).
-fn wrap_entry_with_key(
+pub(crate) fn wrap_entry_with_key(
     entry: &mut Entry,
     key: &SessionKey,
 ) -> Result<ProtectedFields, ProtectorError> {
@@ -2378,7 +2189,11 @@ pub(crate) fn unwrap_vault_protected_fields(
     Ok(())
 }
 
-fn unwrap_entry_with_key(
+/// Restore an entry's protected-field plaintext from `record` against a
+/// pre-acquired session key. Inverse of [`wrap_entry_with_key`]; used by
+/// both the bulk save-time unwrap and the entry editor's per-edit unwrap
+/// (which acquires its own key once per edit).
+pub(crate) fn unwrap_entry_with_key(
     entry: &mut Entry,
     record: &ProtectedFields,
     key: &SessionKey,
