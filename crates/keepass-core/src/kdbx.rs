@@ -52,9 +52,9 @@ use crate::format::{
     write_hmac_block_stream,
 };
 use crate::model::{
-    AutoType, Binary, Clock, DeletedObject, Entry, EntryEditor, EntryId, Group, GroupEditor,
-    GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, PortableEntry, RandomUuids,
-    SystemClock, Timestamps, UuidSource, Vault,
+    Binary, Clock, Entry, EntryEditor, EntryId, Group, GroupEditor, GroupId, HistoryPolicy,
+    ModelError, NewEntry, NewGroup, PortableEntry, RandomUuids, SystemClock, Timestamps,
+    UuidSource, Vault,
 };
 use crate::protector::{FieldProtector, ProtectorError, SessionKey, open_with_key, seal_with_key};
 use crate::secret::{CompositeKey, TransformedKey};
@@ -927,63 +927,8 @@ impl Kdbx<Unlocked> {
         parent: GroupId,
         template: NewEntry,
     ) -> Result<EntryId, ModelError> {
-        let uuid = match template.uuid {
-            Some(u) => {
-                if uuid_in_use(&self.state.vault, u) {
-                    return Err(ModelError::DuplicateUuid(u));
-                }
-                u
-            }
-            None => fresh_uuid(&self.state.vault),
-        };
-
-        // Locate the target parent up front so we fail early.
-        if self.state.vault.root.group(parent).is_none() {
-            return Err(ModelError::GroupNotFound(parent));
-        }
-
-        let now = self.state.clock.now();
-        let entry = Entry {
-            id: EntryId(uuid),
-            title: template.title,
-            username: template.username,
-            password: template.password,
-            url: template.url,
-            notes: template.notes,
-            custom_fields: Vec::new(),
-            tags: template.tags,
-            history: Vec::new(),
-            attachments: Vec::new(),
-            foreground_color: String::new(),
-            background_color: String::new(),
-            override_url: String::new(),
-            custom_icon_uuid: None,
-            custom_data: Vec::new(),
-            quality_check: true,
-            previous_parent_group: None,
-            auto_type: AutoType::default(),
-            times: Timestamps {
-                creation_time: Some(now),
-                last_modification_time: Some(now),
-                last_access_time: Some(now),
-                location_changed: Some(now),
-                expiry_time: None,
-                expires: false,
-                usage_count: 0,
-            },
-            icon_id: 0,
-            unknown_xml: Vec::new(),
-        };
-
-        // Re-locate under &mut; infallible because we just checked.
-        let target = self
-            .state
-            .vault
-            .root
-            .group_mut(parent)
-            .expect("group existence checked above");
-        target.entries.push(entry);
-        Ok(EntryId(uuid))
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::entry_ops::add_entry(vault, clock.as_ref(), parent, template)
     }
 
     /// Remove the entry with the given id, recording a tombstone in
@@ -996,24 +941,8 @@ impl Kdbx<Unlocked> {
     /// - [`ModelError::EntryNotFound`] if no entry with that id exists
     ///   anywhere in the vault.
     pub fn delete_entry(&mut self, id: EntryId) -> Result<(), ModelError> {
-        let (removed, _old_parent) = self
-            .state
-            .vault
-            .root
-            .detach_entry(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-        let now = self.state.clock.now();
-        self.state
-            .vault
-            .deleted_objects
-            .push(DeletedObject::new(removed.id.0, Some(now)));
-        // The deleted entry may have been the last referent of one or
-        // more pool binaries. Reap them now so the post-condition
-        // "vault.binaries holds only bytes still reachable from a live
-        // entry" holds for any caller reading the vault between
-        // `delete_entry` and `save_to_bytes`.
-        gc_binaries_pool(&mut self.state.vault);
-        Ok(())
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::entry_ops::delete_entry(vault, clock.as_ref(), id)
     }
 
     /// Move an entry from its current parent to `new_parent`.
@@ -1042,31 +971,8 @@ impl Kdbx<Unlocked> {
     /// call is `.expect()`ed because the first call has already
     /// proved the destination exists.
     pub fn move_entry(&mut self, id: EntryId, new_parent: GroupId) -> Result<(), ModelError> {
-        // Check the destination first so a failure leaves the entry
-        // where it was.
-        if self.state.vault.root.group(new_parent).is_none() {
-            return Err(ModelError::GroupNotFound(new_parent));
-        }
-
-        let (mut entry, old_parent) = self
-            .state
-            .vault
-            .root
-            .detach_entry(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-
-        entry.previous_parent_group = Some(old_parent);
-        let now = self.state.clock.now();
-        entry.times.location_changed = Some(now);
-
-        let target = self
-            .state
-            .vault
-            .root
-            .group_mut(new_parent)
-            .expect("destination existence checked above");
-        target.entries.push(entry);
-        Ok(())
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::entry_ops::move_entry(vault, clock.as_ref(), id, new_parent)
     }
 
     /// Field-level edit on a single entry, with one automatic
@@ -1248,15 +1154,8 @@ impl Kdbx<Unlocked> {
     ///
     /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
     pub fn touch_entry(&mut self, id: EntryId) -> Result<(), ModelError> {
-        let now = self.state.clock.now();
-        let entry = self
-            .state
-            .vault
-            .root
-            .entry_mut(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-        entry.times.last_access_time = Some(now);
-        Ok(())
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::entry_ops::touch_entry(vault, clock.as_ref(), id)
     }
 
     /// Clear `entry.times.last_access_time` on the entry identified
@@ -1279,14 +1178,7 @@ impl Kdbx<Unlocked> {
     ///
     /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
     pub fn clear_entry_last_access(&mut self, id: EntryId) -> Result<(), ModelError> {
-        let entry = self
-            .state
-            .vault
-            .root
-            .entry_mut(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-        entry.times.last_access_time = None;
-        Ok(())
+        vault_ops::entry_ops::clear_entry_last_access(&mut self.state.vault, id)
     }
 
     /// Restore the live entry's content from its own
@@ -1526,21 +1418,7 @@ impl Kdbx<Unlocked> {
     ///
     /// - [`ModelError::EntryNotFound`] if `id` is not in the vault.
     pub fn trim_entry_history(&mut self, id: EntryId) -> Result<u32, ModelError> {
-        let history_max_items = self.state.vault.meta.history_max_items;
-        let history_max_size = self.state.vault.meta.history_max_size;
-        let entry = self
-            .state
-            .vault
-            .root
-            .entry_mut(id)
-            .ok_or(ModelError::EntryNotFound(id))?;
-        let before = entry.history.len();
-        truncate_history(&mut entry.history, history_max_items, history_max_size);
-        let removed = before - entry.history.len();
-        // `before - after` is bounded by history length; `u32::MAX`
-        // snapshots is many orders of magnitude past anything KeePass
-        // emits in practice, so the cast is safe.
-        Ok(u32::try_from(removed).unwrap_or(u32::MAX))
+        vault_ops::entry_ops::trim_entry_history(&mut self.state.vault, id)
     }
 
     /// Drop every history snapshot whose own
@@ -1564,17 +1442,7 @@ impl Kdbx<Unlocked> {
     /// records are written: history snapshots are a per-entry
     /// implementation detail, not first-class vault objects.
     pub fn prune_history_older_than(&mut self, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
-        let mut removed = 0;
-        for entry in self.state.vault.root.iter_entries_mut() {
-            let before = entry.history.len();
-            entry.history.retain(|snap| {
-                snap.times
-                    .last_modification_time
-                    .is_some_and(|t| t >= cutoff)
-            });
-            removed += before - entry.history.len();
-        }
-        removed
+        vault_ops::entry_ops::prune_history_older_than(&mut self.state.vault, cutoff)
     }
 
     // -----------------------------------------------------------------
@@ -2291,7 +2159,7 @@ impl Kdbx<Unlocked> {
     /// Recursively delete the group with the given id.
     ///
     /// Every entry and every subgroup under the target gets its own
-    /// [`DeletedObject`] tombstone (stamped from [`Self::clock`])
+    /// [`DeletedObject`](crate::model::DeletedObject) tombstone (stamped from [`Self::clock`])
     /// before the subtree is removed, so a peer replica merging
     /// against this vault can tell deleted records apart from
     /// never-seen ones.
