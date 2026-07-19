@@ -26,7 +26,7 @@
 //!   into the [`crate::model::Vault`] tree. Read and write operations
 //!   are both available — including [`Kdbx::<Unlocked>::save_to_bytes`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -51,11 +51,10 @@ use crate::format::{
     read_hmac_block_stream, verify_header_hash, verify_header_hmac, write_hashed_block_stream,
     write_hmac_block_stream,
 };
-use crate::model::entry_editor::PendingBinaryOps;
 use crate::model::{
-    Attachment, AutoType, Binary, Clock, CustomIcon, DeletedObject, Entry, EntryEditor, EntryId,
-    Group, GroupEditor, GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, PortableEntry,
-    RandomUuids, SystemClock, Timestamps, UuidSource, Vault,
+    AutoType, Binary, Clock, DeletedObject, Entry, EntryEditor, EntryId, Group, GroupEditor,
+    GroupId, HistoryPolicy, ModelError, NewEntry, NewGroup, PortableEntry, RandomUuids,
+    SystemClock, Timestamps, UuidSource, Vault,
 };
 use crate::protector::{FieldProtector, ProtectorError, SessionKey, open_with_key, seal_with_key};
 use crate::secret::{CompositeKey, TransformedKey};
@@ -65,6 +64,26 @@ use crate::xml::{
 };
 use std::sync::Arc;
 use zeroize::ZeroizeOnDrop;
+
+use crate::vault_ops;
+
+// The policy / CRUD helpers and verbs now live in `crate::vault_ops` (see
+// that module for the seam). The crypto and still-in-place CRUD code below
+// calls the pure helpers unqualified, so re-export them at this module's
+// root — the compiler enforces that the set is complete.
+pub(crate) use crate::vault_ops::binaries::{
+    apply_pending_attaches, gc_binaries_pool, insert_or_dedup_binary,
+};
+pub(crate) use crate::vault_ops::history::{should_snapshot_now, truncate_history};
+pub(crate) use crate::vault_ops::icons::gc_custom_icons_pool;
+pub(crate) use crate::vault_ops::ids::{fresh_uuid, uuid_in_use};
+pub(crate) use crate::vault_ops::tombstones::collect_subtree_tombstones;
+
+// Path-preserving re-export: `compute_history_drop_count` moved to
+// `crate::vault_ops::history`, but `keepass-merge` imports it from
+// `keepass_core::kdbx::compute_history_drop_count`. Keep that public path
+// resolving from here (`pub`, not `pub(crate)`).
+pub use crate::vault_ops::history::compute_history_drop_count;
 
 // ---------------------------------------------------------------------------
 // State markers
@@ -881,7 +900,7 @@ impl Kdbx<Unlocked> {
     /// is replaced. The next [`Self::save_to_bytes`] re-encrypts the new
     /// vault under the existing key.
     pub fn replace_vault(&mut self, vault: Vault) {
-        self.state.vault = vault;
+        vault_ops::meta_settings::replace_vault(&mut self.state.vault, vault);
     }
 
     /// Insert a new [`Entry`] under the group identified by `parent`.
@@ -1578,11 +1597,8 @@ impl Kdbx<Unlocked> {
     /// Stamps [`crate::model::Meta::settings_changed`] on a fresh
     /// insert; a dedup hit does not stamp (nothing changed).
     pub fn add_custom_icon(&mut self, data: Vec<u8>) -> uuid::Uuid {
-        let (uuid, inserted) = add_or_dedup_icon(&mut self.state.vault, data);
-        if inserted {
-            self.stamp_settings_changed();
-        }
-        uuid
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::icons::add_custom_icon(vault, clock.as_ref(), data)
     }
 
     /// Remove the custom icon with the given UUID from
@@ -1603,14 +1619,8 @@ impl Kdbx<Unlocked> {
     /// Stamps [`crate::model::Meta::settings_changed`] on success;
     /// a "no such icon" call does not stamp (nothing changed).
     pub fn remove_custom_icon(&mut self, id: uuid::Uuid) -> bool {
-        let before = self.state.vault.meta.custom_icons.len();
-        self.state.vault.meta.custom_icons.retain(|c| c.uuid != id);
-        if self.state.vault.meta.custom_icons.len() < before {
-            self.stamp_settings_changed();
-            true
-        } else {
-            false
-        }
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::icons::remove_custom_icon(vault, clock.as_ref(), id)
     }
 
     /// Borrow the raw bytes for the custom icon identified by `id`.
@@ -1622,13 +1632,7 @@ impl Kdbx<Unlocked> {
     /// image payload directly without a second decode step.
     #[must_use]
     pub fn custom_icon(&self, id: uuid::Uuid) -> Option<&[u8]> {
-        self.state
-            .vault
-            .meta
-            .custom_icons
-            .iter()
-            .find(|c| c.uuid == id)
-            .map(|c| c.data.as_slice())
+        vault_ops::icons::custom_icon(&self.state.vault, id)
     }
 
     // -----------------------------------------------------------------
@@ -2506,27 +2510,27 @@ impl Kdbx<Unlocked> {
 
     /// Set the user-visible vault name.
     pub fn set_database_name(&mut self, name: impl Into<String>) {
-        self.state.vault.meta.database_name = name.into();
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_database_name(vault, clock.as_ref(), name);
     }
 
     /// Set the user-visible free-text vault description.
     pub fn set_database_description(&mut self, description: impl Into<String>) {
-        self.state.vault.meta.database_description = description.into();
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_database_description(vault, clock.as_ref(), description);
     }
 
     /// Set the default username used for new entries.
     pub fn set_default_username(&mut self, username: impl Into<String>) {
-        self.state.vault.meta.default_username = username.into();
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_default_username(vault, clock.as_ref(), username);
     }
 
     /// Set the vault-level colour swatch (hex `"#RRGGBB"`). Empty
     /// string falls back to the host client's default colour.
     pub fn set_color(&mut self, hex: impl Into<String>) {
-        self.state.vault.meta.color = hex.into();
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_color(vault, clock.as_ref(), hex);
     }
 
     /// Configure the recycle bin: whether soft-delete is enabled, and
@@ -2534,49 +2538,50 @@ impl Kdbx<Unlocked> {
     /// reference (the on-disk encoding then surfaces as either an
     /// absent or all-zero UUID).
     pub fn set_recycle_bin(&mut self, enabled: bool, group: Option<GroupId>) {
-        self.state.vault.meta.recycle_bin_enabled = enabled;
-        self.state.vault.meta.recycle_bin_uuid = group;
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_recycle_bin(vault, clock.as_ref(), enabled, group);
     }
 
     /// Cap entry-history length. `-1` means unlimited.
     pub fn set_history_max_items(&mut self, max: i32) {
-        self.state.vault.meta.history_max_items = max;
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_history_max_items(vault, clock.as_ref(), max);
     }
 
     /// Cap entry-history byte size. `-1` means unlimited.
     pub fn set_history_max_size(&mut self, max: i64) {
-        self.state.vault.meta.history_max_size = max;
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_history_max_size(vault, clock.as_ref(), max);
     }
 
     /// Set how long to keep entry snapshots before the host client
     /// prunes them, in days.
     pub fn set_maintenance_history_days(&mut self, days: u32) {
-        self.state.vault.meta.maintenance_history_days = days;
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_maintenance_history_days(vault, clock.as_ref(), days);
     }
 
     /// Set the recommended-master-key-change interval, in days.
     /// `-1` disables the recommendation.
     pub fn set_master_key_change_rec(&mut self, days: i64) {
-        self.state.vault.meta.master_key_change_rec = days;
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_master_key_change_rec(vault, clock.as_ref(), days);
     }
 
     /// Set the forced-master-key-change interval, in days.
     /// `-1` disables the force policy.
     pub fn set_master_key_change_force(&mut self, days: i64) {
-        self.state.vault.meta.master_key_change_force = days;
-        self.stamp_settings_changed();
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::set_master_key_change_force(vault, clock.as_ref(), days);
     }
 
     /// Stamp [`crate::model::Meta::settings_changed`] from the
-    /// injected clock. Shared by every setter above so a single
-    /// place owns the side-effect.
+    /// injected clock via [`vault_ops::meta_settings::stamp_settings_changed`].
+    /// Thin wrapper retained for the still-in-place verbs (e.g.
+    /// `find_or_create_recycle_bin`) that stamp settings directly.
     fn stamp_settings_changed(&mut self) {
-        self.state.vault.meta.settings_changed = Some(self.state.clock.now());
+        let Unlocked { vault, clock, .. } = &mut self.state;
+        vault_ops::meta_settings::stamp_settings_changed(vault, clock.as_ref());
     }
 
     /// Replace the master key.
@@ -2687,345 +2692,6 @@ impl Kdbx<Unlocked> {
 // Vault-tree helpers used by the mutation API.
 // ---------------------------------------------------------------------------
 
-/// Build a [`DeletedObject`] tombstone (stamped `at`) for the group
-/// itself plus every entry and every subgroup recursively under it,
-/// in depth-first order. Used by `delete_group` so a peer replica
-/// merging against this vault can distinguish deleted records from
-/// never-seen ones.
-fn collect_subtree_tombstones(
-    group: &Group,
-    at: chrono::DateTime<chrono::Utc>,
-) -> Vec<DeletedObject> {
-    let mut out = Vec::new();
-    push_subtree_tombstones(group, at, &mut out);
-    out
-}
-
-fn push_subtree_tombstones(
-    group: &Group,
-    at: chrono::DateTime<chrono::Utc>,
-    out: &mut Vec<DeletedObject>,
-) {
-    for e in &group.entries {
-        out.push(DeletedObject::new(e.id.0, Some(at)));
-    }
-    for child in &group.groups {
-        push_subtree_tombstones(child, at, out);
-    }
-    out.push(DeletedObject::new(group.id.0, Some(at)));
-}
-
-/// `true` if `candidate` matches any existing entry id, group id, or
-/// the root group id. Used by [`Kdbx::add_entry`] to reject
-/// caller-supplied UUIDs that would collide.
-fn uuid_in_use(vault: &Vault, candidate: uuid::Uuid) -> bool {
-    group_uuid_in_use(&vault.root, candidate)
-}
-
-fn group_uuid_in_use(group: &Group, candidate: uuid::Uuid) -> bool {
-    if group.id.0 == candidate {
-        return true;
-    }
-    // Walk both the live entry ids AND every history snapshot's id.
-    // Tree-wide UUID uniqueness on the wire includes history entries
-    // — KeePass writers assign history snapshots their own `<UUID>`
-    // element, and `import_entry(mint_new_uuid=false)`'s pre-mutation
-    // collision check has to catch incoming UUIDs that collide with
-    // a pre-existing history id (not just a live one). Also fixes a
-    // latent hole on `add_entry`'s caller-supplied-UUID rejection
-    // path, which uses the same helper.
-    if group
-        .entries
-        .iter()
-        .any(|e| e.id.0 == candidate || e.history.iter().any(|s| s.id.0 == candidate))
-    {
-        return true;
-    }
-    group.groups.iter().any(|g| group_uuid_in_use(g, candidate))
-}
-
-/// Generate a fresh v4 UUID that doesn't collide with any existing
-/// entry or group in the vault. In practice `Uuid::new_v4()` is
-/// globally unique and the loop is belt-and-braces, but the loop
-/// makes the "never collide" invariant explicit.
-fn fresh_uuid(vault: &Vault) -> uuid::Uuid {
-    loop {
-        let candidate = uuid::Uuid::new_v4();
-        if !uuid_in_use(vault, candidate) {
-            return candidate;
-        }
-    }
-}
-
-/// Insertion + content-hash dedup core for [`Kdbx::add_custom_icon`].
-///
-/// Returns `(uuid, inserted)`. When `inserted == true`, a fresh icon
-/// was pushed and the caller should stamp
-/// [`crate::model::Meta::settings_changed`]; when `false`, dedup hit
-/// an existing icon and nothing about the pool has changed (so no
-/// stamp).
-///
-/// Extracted from the public method so a unit test can assert the
-/// load-bearing idempotence invariant directly — `name` and
-/// `last_modified` on an existing icon must NOT be overwritten by a
-/// same-bytes re-insertion. Neither field is on the public surface
-/// yet, so crossing the integration-test boundary without an
-/// `unsafe` pointer cast or a test-only accessor isn't possible.
-fn add_or_dedup_icon(vault: &mut Vault, data: Vec<u8>) -> (uuid::Uuid, bool) {
-    let incoming: [u8; 32] = Sha256::digest(&data).into();
-    for existing in &vault.meta.custom_icons {
-        let hash: [u8; 32] = Sha256::digest(&existing.data).into();
-        if hash == incoming {
-            return (existing.uuid, false);
-        }
-    }
-    let uuid = fresh_icon_uuid(vault);
-    vault.meta.custom_icons.push(CustomIcon {
-        uuid,
-        data,
-        name: String::new(),
-        last_modified: None,
-    });
-    (uuid, true)
-}
-
-/// Generate a fresh v4 UUID that doesn't collide with any existing
-/// custom-icon UUID in [`Vault::meta::custom_icons`]. Entry/group
-/// UUIDs live in a different semantic namespace (the wire format
-/// doesn't cross-reference them), but `Uuid::new_v4()` is globally
-/// unique anyway; the loop is belt-and-braces.
-fn fresh_icon_uuid(vault: &Vault) -> uuid::Uuid {
-    loop {
-        let candidate = uuid::Uuid::new_v4();
-        if !vault.meta.custom_icons.iter().any(|c| c.uuid == candidate) {
-            return candidate;
-        }
-    }
-}
-
-/// Apply the attach intents staged inside an `edit_entry` closure to
-/// the shared [`Vault::binaries`] pool, then push matching
-/// [`Attachment`] references onto the target entry.
-///
-/// Dedup-by-content-hash: SHA-256 of the payload paired with the
-/// `protected` flag is the dedup key. Identical-bytes-but-different-
-/// flag attachments stay as separate pool entries because the
-/// `protected` flag rides on the binary itself in the KDBX4 inner
-/// header (and on the `Protected="True"` `<Value>` attribute on
-/// KDBX3); coalescing them would silently flip the flag for one
-/// caller.
-fn apply_pending_attaches(vault: &mut Vault, id: EntryId, pending: PendingBinaryOps) {
-    if pending.attaches.is_empty() {
-        return;
-    }
-    // Index existing pool by (content hash, protected). Take the
-    // earliest index on a collision so dedup is deterministic.
-    let mut hash_to_idx: HashMap<([u8; 32], bool), u32> = HashMap::new();
-    for (i, b) in vault.binaries.iter().enumerate() {
-        let h: [u8; 32] = Sha256::digest(&b.data).into();
-        hash_to_idx
-            .entry((h, b.protected))
-            .or_insert_with(|| u32::try_from(i).expect("pool idx fits u32"));
-    }
-
-    let mut new_attachments: Vec<Attachment> = Vec::with_capacity(pending.attaches.len());
-    for att in pending.attaches {
-        let h: [u8; 32] = Sha256::digest(&att.data).into();
-        let key = (h, att.protected);
-        let ref_id = if let Some(&idx) = hash_to_idx.get(&key) {
-            idx
-        } else {
-            let idx = u32::try_from(vault.binaries.len()).expect("pool idx fits u32");
-            vault.binaries.push(Binary {
-                data: att.data,
-                protected: att.protected,
-            });
-            hash_to_idx.insert(key, idx);
-            idx
-        };
-        new_attachments.push(Attachment {
-            name: att.name,
-            ref_id,
-        });
-    }
-
-    if let Some(e) = vault.entry_mut(id) {
-        e.attachments.extend(new_attachments);
-    }
-}
-
-/// Refcount-aware garbage collection of [`Vault::binaries`].
-///
-/// Walks every entry (and every history snapshot) in the vault to
-/// build the set of `ref_id`s that are still in use, then drops any
-/// pool entry not in that set and renumbers the surviving
-/// references so the indexes stay contiguous from 0.
-///
-/// Called from every mutation that can orphan a binary —
-/// `edit_entry` (after `detach`), `delete_entry`, `delete_group`,
-/// `restore_history` — and once more inside `do_save` as defence in
-/// depth. A `detach` shrinks the pool only when the very last
-/// reference (in any entry, this one or another) is gone, so a binary
-/// shared between two entries survives a detach from one of them.
-fn gc_binaries_pool(vault: &mut Vault) {
-    let mut in_use: HashSet<u32> = HashSet::new();
-    for e in vault.iter_entries() {
-        for a in &e.attachments {
-            in_use.insert(a.ref_id);
-        }
-        // History snapshots are themselves `Entry` values that carry
-        // their own attachment lists; dropping a pool entry a snapshot
-        // still references would corrupt the saved file.
-        for snap in &e.history {
-            for a in &snap.attachments {
-                in_use.insert(a.ref_id);
-            }
-        }
-    }
-
-    let n = vault.binaries.len();
-    let n_u32 = u32::try_from(n).expect("pool size fits u32");
-    if (0..n_u32).all(|i| in_use.contains(&i)) {
-        return;
-    }
-
-    // Old-index → new-index mapping; `None` for dropped entries.
-    let mut remap: Vec<Option<u32>> = Vec::with_capacity(n);
-    let mut next: u32 = 0;
-    for i in 0..n_u32 {
-        if in_use.contains(&i) {
-            remap.push(Some(next));
-            next += 1;
-        } else {
-            remap.push(None);
-        }
-    }
-
-    let kept: Vec<Binary> = vault
-        .binaries
-        .drain(..)
-        .enumerate()
-        .filter(|(i, _)| remap[*i].is_some())
-        .map(|(_, b)| b)
-        .collect();
-    vault.binaries = kept;
-
-    // Rewrite every attachment ref_id (live + history) through the
-    // old->new index remap so the surviving references stay contiguous.
-    for e in vault.iter_entries_mut() {
-        for a in &mut e.attachments {
-            if let Some(Some(new)) = remap.get(a.ref_id as usize) {
-                a.ref_id = *new;
-            }
-        }
-        for snap in &mut e.history {
-            for a in &mut snap.attachments {
-                if let Some(Some(new)) = remap.get(a.ref_id as usize) {
-                    a.ref_id = *new;
-                }
-            }
-        }
-    }
-}
-
-/// Save-time refcount GC for [`Vault::meta::custom_icons`].
-///
-/// Walks every entry (live + every `history[]` snapshot) and every
-/// group to collect the set of `custom_icon_uuid` values actually
-/// referenced, prunes the pool to that set, and sweeps any surviving
-/// reference that no longer resolves (e.g. because the caller ran
-/// `remove_custom_icon(X)` without unsetting the field) back to
-/// `None`. The on-disk invariant "every `<CustomIconUUID>` resolves
-/// in `<CustomIcons>`" is restored before the bytes hit the wire.
-///
-/// **Rhythm divergence from `gc_binaries_pool`**: the binary-pool GC
-/// runs inside every mutation that can orphan a binary
-/// (`edit_entry`/`detach`, `delete_entry`, `delete_group`,
-/// `restore_history`) so that `vault.binaries` reflects only
-/// reachable bytes for any caller reading the vault between mutations
-/// — the per-entry `attachments` accessor is part of the public
-/// surface and callers can plausibly index into the pool. Icons
-/// neither have a bulk accessor yet nor can they be orphaned by a
-/// content edit (only by the explicit `remove_custom_icon`, whose
-/// docstring already warns callers), so the icon GC runs only on
-/// save. This keeps the hot `edit_entry` path from paying for a tree
-/// walk it doesn't need.
-fn gc_custom_icons_pool(vault: &mut Vault) {
-    let mut in_use: HashSet<uuid::Uuid> = HashSet::new();
-    // Group icons come from every group; entry icons come from every
-    // entry plus each of its history snapshots (a snapshot carries its
-    // own `custom_icon_uuid` that must keep its icon alive in the pool).
-    for g in vault.iter_groups() {
-        if let Some(u) = g.custom_icon_uuid {
-            in_use.insert(u);
-        }
-    }
-    for e in vault.iter_entries() {
-        if let Some(u) = e.custom_icon_uuid {
-            in_use.insert(u);
-        }
-        for snap in &e.history {
-            if let Some(u) = snap.custom_icon_uuid {
-                in_use.insert(u);
-            }
-        }
-    }
-    vault.meta.custom_icons.retain(|c| in_use.contains(&c.uuid));
-
-    // Dangling-ref sweep: any entry/group custom_icon_uuid that
-    // doesn't resolve in the post-prune pool gets reset to None.
-    // Without this the wire format would carry an unresolvable
-    // reference.
-    let pool: HashSet<uuid::Uuid> = vault.meta.custom_icons.iter().map(|c| c.uuid).collect();
-    vault.for_each_group_mut(&mut |g| {
-        if let Some(u) = g.custom_icon_uuid {
-            if !pool.contains(&u) {
-                g.custom_icon_uuid = None;
-            }
-        }
-        for e in &mut g.entries {
-            if let Some(u) = e.custom_icon_uuid {
-                if !pool.contains(&u) {
-                    e.custom_icon_uuid = None;
-                }
-            }
-            for snap in &mut e.history {
-                if let Some(u) = snap.custom_icon_uuid {
-                    if !pool.contains(&u) {
-                        snap.custom_icon_uuid = None;
-                    }
-                }
-            }
-        }
-    });
-}
-
-/// Append `bin` to [`Vault::binaries`] if no existing binary has
-/// identical `(data, protected)`; otherwise return the existing
-/// slot's `ref_id`. Used by [`Kdbx::import_entry`] to dedup
-/// imported attachment bytes against the destination pool.
-///
-/// Content-hash comparison uses SHA-256 so a large shared
-/// attachment (e.g. a company-logo PNG on many entries) imports
-/// exactly once. The `protected` flag is part of the dedup key
-/// because the same bytes with a different inner-stream encryption
-/// flag are semantically different binaries (the on-disk
-/// representation differs).
-fn insert_or_dedup_binary(vault: &mut Vault, bin: Binary) -> u32 {
-    let incoming: [u8; 32] = Sha256::digest(&bin.data).into();
-    for (idx, existing) in vault.binaries.iter().enumerate() {
-        if existing.protected == bin.protected {
-            let h: [u8; 32] = Sha256::digest(&existing.data).into();
-            if h == incoming {
-                return u32::try_from(idx).expect("pool index fits u32");
-            }
-        }
-    }
-    let new_ref = u32::try_from(vault.binaries.len()).expect("pool index fits u32");
-    vault.binaries.push(bin);
-    new_ref
-}
-
 /// Apply the binary + custom-icon remaps produced during
 /// [`Kdbx::import_entry`] to a single [`Entry`]. Walks the entry's
 /// attachments and `custom_icon_uuid`; callers invoke this once on
@@ -3045,140 +2711,6 @@ fn remap_entry_refs(
             entry.custom_icon_uuid = Some(new);
         }
     }
-}
-
-/// Decide whether a mutation that carries `policy` should push a
-/// pre-mutation snapshot given the live entry's current `history` and
-/// the current wall-clock `now`.
-///
-/// Shared by [`Kdbx::edit_entry`] and
-/// [`Kdbx::restore_entry_from_history`] — both need the same
-/// SnapshotIfOlderThan semantics, and extracting the helper keeps the
-/// two call sites from drifting.
-fn should_snapshot_now(
-    policy: HistoryPolicy,
-    history: &[Entry],
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    match policy {
-        HistoryPolicy::NoSnapshot => false,
-        HistoryPolicy::Snapshot => true,
-        HistoryPolicy::SnapshotIfOlderThan(window) => match history.last() {
-            None => true,
-            Some(last) => {
-                let threshold = now - window;
-                // Absent timestamp → treat as "ancient" and snapshot.
-                last.times
-                    .last_modification_time
-                    .is_none_or(|t| t < threshold)
-            }
-        },
-    }
-}
-
-/// How many records to drop from the front of `history` to satisfy
-/// the `max_items` (negative = unlimited) and `max_size` (negative =
-/// unlimited) budgets. Oldest records — index 0 first — go first.
-/// The item-count budget is applied first, then the size budget.
-///
-/// `max_items` and `max_size` are the KDBX `Meta` budgets
-/// (`history_max_items` / `history_max_size`) and can be passed
-/// straight through; the negative sentinel is the format's own
-/// encoding of "unlimited", not an invention of this crate.
-///
-/// Call this when you need to know *which* records a save-time
-/// truncation will drop **before** it drops them — to record, react
-/// to, or veto those deletions. Saving already applies these budgets
-/// on its own; you do not need to call this to get truncation.
-///
-/// `max_size` is a soft budget measured against an approximation of
-/// each entry's serialised XML size: the byte length of the five
-/// canonical string fields plus custom fields and tags, plus a
-/// 200-byte constant for wrapper markup. Good enough for "don't let
-/// a megabyte of history accumulate"; not byte-exact. **The
-/// approximation may be refined in any release** — treat the return
-/// value as a budget decision, not a stable count to assert against.
-///
-/// # Why this is public
-///
-/// This is the single source of truth for *which* history records a
-/// budget drops, and it is deliberately exported because more than
-/// one layer has to agree on that answer. The save path here drops
-/// the records outright. A layer that syncs a vault with peers has a
-/// harder job: it must leave a marker behind for each dropped record
-/// (a *tombstone*), or a peer that hasn't truncated yet will send
-/// the record back on the next merge and resurrect it. Those two
-/// sets must be identical — any record the save path drops but the
-/// sync layer did not tombstone comes back. Sharing this function
-/// makes that agreement structural rather than a matter of keeping
-/// two copies of the heuristic aligned by inspection.
-///
-/// (`keepass-merge`'s `prune_history_with_tombstones` is the
-/// in-workspace consumer that does exactly this.)
-#[must_use]
-pub fn compute_history_drop_count(history: &[Entry], max_items: i32, max_size: i64) -> usize {
-    let mut drop_count: usize = 0;
-
-    // Item-count budget first, since it's cheapest and common.
-    if max_items >= 0 {
-        let cap = usize::try_from(max_items).unwrap_or(usize::MAX);
-        if history.len() > cap {
-            drop_count = history.len() - cap;
-        }
-    }
-
-    // Size budget, if one is declared. Compute the prefix length to
-    // drop in one walk — dropping one record at a time and re-summing
-    // is O(N²) on the worst-case path.
-    if max_size >= 0 {
-        let cap = u64::try_from(max_size).unwrap_or(u64::MAX);
-        // Saturating, to match `approx_entry_size`'s own discipline:
-        // a plain `sum()` would panic in debug on a total past `u64`.
-        // Unreachable with real string lengths, but this function is
-        // the canonical copy — it shouldn't carry a panic edge at all.
-        let mut total: u64 = history
-            .iter()
-            .fold(0u64, |acc, e| acc.saturating_add(approx_entry_size(e)));
-        // Discount the records the item-count pass already claimed.
-        for h in &history[..drop_count] {
-            total = total.saturating_sub(approx_entry_size(h));
-        }
-        while total > cap && drop_count < history.len() {
-            total = total.saturating_sub(approx_entry_size(&history[drop_count]));
-            drop_count += 1;
-        }
-    }
-
-    drop_count
-}
-
-/// Truncate `history` per `max_items` / `max_size`, dropping the
-/// records [`compute_history_drop_count`] selects.
-fn truncate_history(history: &mut Vec<Entry>, max_items: i32, max_size: i64) {
-    let drop_count = compute_history_drop_count(history, max_items, max_size);
-    if drop_count > 0 {
-        history.drain(0..drop_count);
-    }
-}
-
-/// Approximate the byte footprint an entry takes up when serialised
-/// inside a `<History>` block. Counts the user-visible string bytes
-/// plus a constant for XML wrapping overhead.
-fn approx_entry_size(e: &Entry) -> u64 {
-    let mut n: u64 = 200; // wrapper markup for <Entry>...<History>...</History></Entry>
-    n = n.saturating_add(e.title.len() as u64);
-    n = n.saturating_add(e.username.len() as u64);
-    n = n.saturating_add(e.password.len() as u64);
-    n = n.saturating_add(e.url.len() as u64);
-    n = n.saturating_add(e.notes.len() as u64);
-    for cf in &e.custom_fields {
-        n = n.saturating_add(cf.key.len() as u64);
-        n = n.saturating_add(cf.value.len() as u64);
-    }
-    for t in &e.tags {
-        n = n.saturating_add(t.len() as u64);
-    }
-    n
 }
 
 // ---------------------------------------------------------------------------
@@ -3950,70 +3482,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
-    // add_or_dedup_icon — pure-helper idempotence invariant
-    // -----------------------------------------------------------------
-
-    fn empty_vault() -> Vault {
-        use crate::model::{Group, GroupId, Meta};
-        Vault {
-            root: Group {
-                id: GroupId(uuid::Uuid::nil()),
-                name: String::new(),
-                notes: String::new(),
-                groups: Vec::new(),
-                entries: Vec::new(),
-                is_expanded: true,
-                default_auto_type_sequence: String::new(),
-                enable_auto_type: None,
-                enable_searching: None,
-                custom_data: Vec::new(),
-                previous_parent_group: None,
-                last_top_visible_entry: None,
-                custom_icon_uuid: None,
-                icon_id: 0,
-                times: Timestamps::default(),
-                unknown_xml: Vec::new(),
-            },
-            meta: Meta::default(),
-            binaries: Vec::new(),
-            deleted_objects: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn add_or_dedup_icon_dedup_preserves_existing_metadata() {
-        // First insert establishes the icon, then we hand-label it
-        // to simulate a caller that has previously named it. A
-        // second insert with the same bytes must dedup back to the
-        // same UUID AND leave `name` / `last_modified` alone —
-        // otherwise any Keys "re-register this icon" flow would
-        // silently wipe user-set labels.
-        let mut vault = empty_vault();
-        let (first, inserted) = add_or_dedup_icon(&mut vault, b"icon-bytes".to_vec());
-        assert!(inserted);
-        vault.meta.custom_icons[0].name = "My Label".to_owned();
-        let marker_ts: chrono::DateTime<chrono::Utc> = "2024-05-06T07:08:09Z".parse().unwrap();
-        vault.meta.custom_icons[0].last_modified = Some(marker_ts);
-
-        let (second, inserted) = add_or_dedup_icon(&mut vault, b"icon-bytes".to_vec());
-        assert_eq!(first, second, "dedup returns the existing UUID");
-        assert!(!inserted, "dedup must not stamp settings_changed");
-        assert_eq!(vault.meta.custom_icons.len(), 1);
-        assert_eq!(vault.meta.custom_icons[0].name, "My Label");
-        assert_eq!(vault.meta.custom_icons[0].last_modified, Some(marker_ts));
-    }
-
-    #[test]
-    fn add_or_dedup_icon_different_bytes_mint_new_entry() {
-        let mut vault = empty_vault();
-        let (a, inserted_a) = add_or_dedup_icon(&mut vault, b"first".to_vec());
-        let (b, inserted_b) = add_or_dedup_icon(&mut vault, b"second".to_vec());
-        assert!(inserted_a && inserted_b);
-        assert_ne!(a, b);
-        assert_eq!(vault.meta.custom_icons.len(), 2);
-    }
-
     #[test]
     fn replace_vault_swaps_in_replacement_and_subsequent_edits_work() {
         use std::{fs, path::Path};
@@ -4059,64 +3527,5 @@ mod tests {
             .add_entry(original_root_id, NewEntry::new("post-swap entry"))
             .expect("add_entry post-replace");
         assert!(unlocked.vault().root.entries.iter().any(|e| e.id == new_id));
-    }
-
-    /// History of `count` records, each `approx_entry_size` = 200
-    /// (wrapper) + 2 (a two-byte title) = 202 bytes. The per-record
-    /// arithmetic the size tests rely on only holds while
-    /// `count <= 10`; past that the titles grow a third byte.
-    fn sized_history(count: usize) -> Vec<Entry> {
-        assert!(count <= 10, "sized_history: records stop being 202 bytes");
-        (0..count)
-            .map(|i| {
-                let mut e = Entry::empty(EntryId(uuid::Uuid::nil()));
-                e.title = format!("v{i}");
-                e
-            })
-            .collect()
-    }
-
-    #[test]
-    fn drop_count_is_zero_when_both_budgets_are_unlimited() {
-        assert_eq!(compute_history_drop_count(&sized_history(5), -1, -1), 0);
-        // Any negative means unlimited, not just -1 — the extremes
-        // pin the sentinel contract against a future signature change.
-        assert_eq!(
-            compute_history_drop_count(&sized_history(5), i32::MIN, i64::MIN),
-            0
-        );
-    }
-
-    #[test]
-    fn drop_count_honours_item_budget() {
-        assert_eq!(compute_history_drop_count(&sized_history(5), 2, -1), 3);
-        assert_eq!(compute_history_drop_count(&sized_history(5), 5, -1), 0);
-        assert_eq!(compute_history_drop_count(&sized_history(5), 0, -1), 5);
-    }
-
-    #[test]
-    fn drop_count_honours_size_budget() {
-        // 5 × 202 = 1010 bytes; a 500-byte cap leaves 2 (404 bytes).
-        assert_eq!(compute_history_drop_count(&sized_history(5), -1, 500), 3);
-        assert_eq!(compute_history_drop_count(&sized_history(5), -1, 1010), 0);
-    }
-
-    /// The interesting case: both budgets active. The size pass must
-    /// measure only the records the item pass leaves behind, and must
-    /// never un-drop what the item pass already claimed.
-    #[test]
-    fn drop_count_applies_both_budgets_together() {
-        // Item cap 4 drops 1, leaving 4 × 202 = 808 bytes. A 500-byte
-        // cap then drops 2 more (leaving 404) → 3 total.
-        assert_eq!(compute_history_drop_count(&sized_history(5), 4, 500), 3);
-        // The item budget alone already satisfies a slack size budget:
-        // the size pass must not widen the drop beyond it.
-        assert_eq!(compute_history_drop_count(&sized_history(5), 2, 5000), 3);
-    }
-
-    #[test]
-    fn drop_count_never_exceeds_history_length() {
-        assert_eq!(compute_history_drop_count(&sized_history(3), -1, 0), 3);
-        assert_eq!(compute_history_drop_count(&[], 0, 0), 0);
     }
 }
