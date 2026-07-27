@@ -26,7 +26,7 @@ subtle = "2"                       # constant-time comparison
 
 # Identifiers.
 uuid   = { version = "1", features = ["v4"] }
-base64 = "0.22"                     # KeePass UUIDs + protected-value payloads are base64
+base64 = "0.23"                     # KeePass UUIDs + protected-value payloads are base64
 
 # Crypto primitives — RustCrypto family, no unsafe.
 sha2   = "0.11"                     # SHA-256, SHA-512
