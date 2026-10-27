@@ -382,8 +382,8 @@ mod tests {
         let local = vault_with(vec![e.clone()]);
         let remote = vault_with(vec![e]);
         let out = merge(&local, &remote).expect("merge");
-        assert!(out.disk_only_changes.is_empty());
-        assert!(out.local_only_changes.is_empty());
+        assert_eq!(out.disk_only_changes.len(), 0);
+        assert_eq!(out.local_only_changes.len(), 0);
         assert!(out.entry_conflicts.is_empty());
     }
 
@@ -391,13 +391,13 @@ mod tests {
     fn empty_vaults_produce_empty_outcome() {
         let v = Vault::empty(GroupId(Uuid::nil()));
         let out = merge(&v, &v).expect("merge");
-        assert!(out.disk_only_changes.is_empty());
-        assert!(out.local_only_changes.is_empty());
+        assert_eq!(out.disk_only_changes.len(), 0);
+        assert_eq!(out.local_only_changes.len(), 0);
         assert!(out.entry_conflicts.is_empty());
-        assert!(out.added_on_disk.is_empty());
-        assert!(out.deleted_on_disk.is_empty());
-        assert!(out.local_deletions_pending_sync.is_empty());
-        assert!(out.delete_edit_conflicts.is_empty());
+        assert_eq!(out.added_on_disk.len(), 0);
+        assert_eq!(out.deleted_on_disk.len(), 0);
+        assert_eq!(out.local_deletions_pending_sync.len(), 0);
+        assert_eq!(out.delete_edit_conflicts.len(), 0);
         assert!(out.group_conflicts.is_empty());
     }
 
@@ -406,9 +406,9 @@ mod tests {
         let local = vault_with(vec![entry(1, "a", at(2026, 1))]);
         let remote = Vault::empty(GroupId(Uuid::nil()));
         let out = merge(&local, &remote).expect("merge");
-        assert!(out.deleted_on_disk.is_empty());
-        assert!(out.delete_edit_conflicts.is_empty());
-        assert!(out.added_on_disk.is_empty());
+        assert_eq!(out.deleted_on_disk.len(), 0);
+        assert_eq!(out.delete_edit_conflicts.len(), 0);
+        assert_eq!(out.added_on_disk.len(), 0);
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
         ));
         let out = merge(&local, &remote).expect("merge");
         assert_eq!(out.deleted_on_disk, vec![EntryId(Uuid::from_u128(1))]);
-        assert!(out.delete_edit_conflicts.is_empty());
+        assert_eq!(out.delete_edit_conflicts.len(), 0);
     }
 
     #[test]
@@ -438,7 +438,7 @@ mod tests {
         ));
         let out = merge(&local, &remote).expect("merge");
         assert_eq!(out.delete_edit_conflicts, vec![EntryId(Uuid::from_u128(1))]);
-        assert!(out.deleted_on_disk.is_empty());
+        assert_eq!(out.deleted_on_disk.len(), 0);
     }
 
     #[test]
@@ -501,7 +501,7 @@ mod tests {
         let out = merge(&vault_with(vec![local]), &vault_with(vec![remote])).expect("merge");
         assert_eq!(out.local_only_changes, vec![EntryId(Uuid::from_u128(1))]);
         assert!(out.entry_conflicts.is_empty());
-        assert!(out.disk_only_changes.is_empty());
+        assert_eq!(out.disk_only_changes.len(), 0);
     }
 
     #[test]
@@ -515,8 +515,8 @@ mod tests {
         remote.history = vec![ancestor];
         let out = merge(&vault_with(vec![local]), &vault_with(vec![remote])).expect("merge");
         assert_eq!(out.entry_conflicts.len(), 1);
-        assert!(out.disk_only_changes.is_empty());
-        assert!(out.local_only_changes.is_empty());
+        assert_eq!(out.disk_only_changes.len(), 0);
+        assert_eq!(out.local_only_changes.len(), 0);
     }
 
     #[test]
@@ -532,7 +532,7 @@ mod tests {
         remote.deleted_objects.push(tombstone(1, None));
         let out = merge(&local, &remote).expect("merge");
         assert_eq!(out.delete_edit_conflicts, vec![EntryId(Uuid::from_u128(1))]);
-        assert!(out.deleted_on_disk.is_empty());
+        assert_eq!(out.deleted_on_disk.len(), 0);
     }
 
     #[test]
@@ -636,8 +636,8 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
         ));
         let out = merge(&local, &remote).expect("merge");
-        assert!(out.deleted_on_disk.is_empty());
-        assert!(out.delete_edit_conflicts.is_empty());
-        assert!(out.added_on_disk.is_empty());
+        assert_eq!(out.deleted_on_disk.len(), 0);
+        assert_eq!(out.delete_edit_conflicts.len(), 0);
+        assert_eq!(out.added_on_disk.len(), 0);
     }
 }

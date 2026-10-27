@@ -199,7 +199,10 @@ fn clear_history_drops_all_entries_and_returns_count() {
         })
         .unwrap();
     assert_eq!(dropped, 3);
-    assert!(kdbx.vault().entry(id).unwrap().history.is_empty());
+    assert_eq!(
+        kdbx.vault().entry(id).unwrap().history,
+        [] as [keepass_core::model::Entry; 0]
+    );
 }
 
 #[test]
@@ -207,7 +210,10 @@ fn clear_history_on_empty_returns_zero_without_side_effects() {
     let t0: DateTime<Utc> = "2026-04-22T10:00:00Z".parse().unwrap();
     let (mut kdbx, clock) = open_basic_with_clock(t0);
     let id = seed_entry_with_history(&mut kdbx, &clock, t0, &["v1"]);
-    assert!(kdbx.vault().entry(id).unwrap().history.is_empty());
+    assert_eq!(
+        kdbx.vault().entry(id).unwrap().history,
+        [] as [keepass_core::model::Entry; 0]
+    );
 
     let dropped = kdbx
         // `clear_history` as a method pointer doesn't bridge the
@@ -219,7 +225,10 @@ fn clear_history_on_empty_returns_zero_without_side_effects() {
         })
         .unwrap();
     assert_eq!(dropped, 0);
-    assert!(kdbx.vault().entry(id).unwrap().history.is_empty());
+    assert_eq!(
+        kdbx.vault().entry(id).unwrap().history,
+        [] as [keepass_core::model::Entry; 0]
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -250,7 +259,7 @@ fn restore_with_snapshot_policy_pushes_pre_restore_and_restores_content() {
     assert_eq!(e.history[2].password, "v3");
     // The pushed pre-restore snapshot carries empty history (KeePass
     // never nests).
-    assert!(e.history[2].history.is_empty());
+    assert_eq!(e.history[2].history, [] as [keepass_core::model::Entry; 0]);
     // last_modification_time advanced to the restore clock.
     assert_eq!(e.times.last_modification_time, Some(t_restore));
 }

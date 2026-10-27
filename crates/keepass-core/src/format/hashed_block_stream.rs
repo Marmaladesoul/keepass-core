@@ -325,7 +325,7 @@ mod tests {
     fn empty_stream_is_just_the_end_marker() {
         let stream = encode(&[]);
         let decoded = read_hashed_block_stream(&stream).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
         // end marker is 4 + 32 + 4 = 40 bytes exactly
         assert_eq!(stream.len(), 40);
     }
@@ -437,7 +437,7 @@ mod tests {
         stream[36..40].copy_from_slice(&0u32.to_le_bytes());
         let decoded = read_hashed_block_stream(&stream).unwrap();
         // We terminated at the (now-zeroed) block-0; output is empty.
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
         // Only the end marker: 4 + 32 + 4 = 40 bytes.
         assert_eq!(bytes.len(), 40);
         let decoded = read_hashed_block_stream(&bytes).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
     }
 
     #[test]

@@ -1345,7 +1345,7 @@ mod tests {
 
         let out = merge_entry(&local, &remote, &[], &[]);
         assert!(out.had_ancestor);
-        assert!(out.auto_resolutions.is_empty());
+        assert_eq!(out.auto_resolutions.len(), 0);
         assert_eq!(out.conflicts.len(), 1);
         assert_eq!(out.conflicts[0].key, "Title");
         assert_eq!(out.conflicts[0].kind, FieldDeltaKind::BothDiffer);
@@ -1361,7 +1361,7 @@ mod tests {
 
         let out = merge_entry(&local, &remote, &[], &[]);
         assert!(!out.had_ancestor);
-        assert!(out.auto_resolutions.is_empty());
+        assert_eq!(out.auto_resolutions.len(), 0);
         assert_eq!(out.conflicts.len(), 1);
     }
 
@@ -1419,7 +1419,7 @@ mod tests {
         remote.custom_fields = vec![CustomField::new("pw", "remote-secret", true)];
 
         let out = merge_entry(&local, &remote, &[], &[]);
-        assert!(out.auto_resolutions.is_empty());
+        assert_eq!(out.auto_resolutions.len(), 0);
         assert_eq!(out.conflicts.len(), 1);
         assert_eq!(out.conflicts[0].key, "pw");
         assert_eq!(out.conflicts[0].kind, FieldDeltaKind::BothDiffer);

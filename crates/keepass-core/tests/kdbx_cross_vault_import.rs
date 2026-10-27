@@ -546,7 +546,10 @@ fn import_carries_binary_referenced_only_by_history_snapshot() {
     })
     .unwrap();
     let src_entry = src.vault().entry(src_id).unwrap();
-    assert!(src_entry.attachments.is_empty());
+    assert_eq!(
+        src_entry.attachments,
+        [] as [keepass_core::model::Attachment; 0]
+    );
     assert_eq!(src_entry.history[0].attachments.len(), 1);
 
     let (mut dst, _) = open_with_clock(&kdbx4_basic(), t0);
@@ -554,7 +557,10 @@ fn import_carries_binary_referenced_only_by_history_snapshot() {
     let imported = dst.import_entry(root_group(&dst), portable, true).unwrap();
 
     let dst_entry = dst.vault().entry(imported).unwrap();
-    assert!(dst_entry.attachments.is_empty());
+    assert_eq!(
+        dst_entry.attachments,
+        [] as [keepass_core::model::Attachment; 0]
+    );
     assert_eq!(dst_entry.history.len(), 1);
     assert_eq!(dst_entry.history[0].attachments.len(), 1);
     let snap_ref = dst_entry.history[0].attachments[0].ref_id;

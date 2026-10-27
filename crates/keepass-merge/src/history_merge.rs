@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn empty_inputs_produce_empty_output() {
-        assert!(merge_histories(&[], &[], &[], &no_tombstones()).is_empty());
+        assert_eq!(merge_histories(&[], &[], &[], &no_tombstones()).len(), 0);
     }
 
     #[test]

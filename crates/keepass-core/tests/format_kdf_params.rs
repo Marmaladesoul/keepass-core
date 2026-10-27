@@ -79,7 +79,7 @@ fn every_kdbx3_fixture_decodes_as_aes_kdf() {
 fn every_kdbx4_fixture_decodes_as_argon2() {
     let mut kdbxs: Vec<_> = find_kdbxs(&fixtures_root().join("pykeepass"));
     kdbxs.extend(find_kdbxs(&fixtures_root().join("kdbxweb")));
-    assert!(!kdbxs.is_empty());
+    assert_ne!(kdbxs, [] as [std::path::PathBuf; 0]);
 
     for path in kdbxs {
         let header = parse_outer_header(&path);

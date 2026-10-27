@@ -31,9 +31,18 @@ fn create_empty_v4_round_trips_via_save_and_open() {
     // entries, no deleted objects.
     assert_eq!(reopened.vault().meta.database_name, "Test Vault");
     assert_eq!(reopened.vault().root.name, "Test Vault");
-    assert!(reopened.vault().root.entries.is_empty());
-    assert!(reopened.vault().root.groups.is_empty());
-    assert!(reopened.vault().deleted_objects.is_empty());
+    assert_eq!(
+        reopened.vault().root.entries,
+        [] as [keepass_core::model::Entry; 0]
+    );
+    assert_eq!(
+        reopened.vault().root.groups,
+        [] as [keepass_core::model::Group; 0]
+    );
+    assert_eq!(
+        reopened.vault().deleted_objects,
+        [] as [keepass_core::model::DeletedObject; 0]
+    );
 
     // Second-round save produces structurally-identical bytes (re-save
     // should be byte-stable; OuterHeader retained verbatim, no

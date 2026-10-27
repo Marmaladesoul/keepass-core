@@ -116,11 +116,11 @@ mod tests {
     fn default_is_empty_strings_and_no_uuid() {
         let e = NewEntry::new("Title");
         assert_eq!(e.title, "Title");
-        assert!(e.username.is_empty());
-        assert!(e.password.is_empty());
-        assert!(e.url.is_empty());
-        assert!(e.notes.is_empty());
-        assert!(e.tags.is_empty());
+        assert_eq!(e.username.len(), 0);
+        assert_eq!(e.password.len(), 0);
+        assert_eq!(e.url.len(), 0);
+        assert_eq!(e.notes.len(), 0);
+        assert_eq!(e.tags.len(), 0);
         assert!(e.uuid.is_none());
     }
 

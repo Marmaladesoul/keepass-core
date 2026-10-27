@@ -417,8 +417,8 @@ fn empty_recycle_bin_returns_direct_child_count_and_emits_tombstones() {
 
     // Bin group survives, empty.
     let bin_group = kdbx.vault().group(bin).expect("bin still present");
-    assert!(bin_group.entries.is_empty());
-    assert!(bin_group.groups.is_empty());
+    assert_eq!(bin_group.entries, [] as [keepass_core::model::Entry; 0]);
+    assert_eq!(bin_group.groups, [] as [keepass_core::model::Group; 0]);
     assert_eq!(kdbx.vault().meta.recycle_bin_uuid, Some(bin));
 }
 

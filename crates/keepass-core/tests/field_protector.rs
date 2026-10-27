@@ -223,7 +223,7 @@ fn field_protector_round_trips_via_save() {
 
     // Canonical in-memory state stays wrapped after save.
     let entry_after = unlocked.vault().root.entries.first().unwrap();
-    assert!(entry_after.password.is_empty());
+    assert_eq!(entry_after.password, "");
 
     // Reopen with no protector — plaintext recovered into the model.
     let reopened = Kdbx::<Sealed>::open_from_bytes(bytes2)
@@ -359,13 +359,13 @@ fn vault_with_unwrapped_protected_returns_plaintext_clone() {
     // Canonical state still wrapped after the unwrap call — the
     // clone is independent.
     let canonical_after = unlocked.vault().root.entries.first().unwrap();
-    assert!(canonical_after.password.is_empty());
+    assert_eq!(canonical_after.password, "");
     let canonical_totp_after = canonical_after
         .custom_fields
         .iter()
         .find(|c| c.key == "TOTP Seed")
         .unwrap();
-    assert!(canonical_totp_after.value.is_empty());
+    assert_eq!(canonical_totp_after.value, "");
 }
 
 #[test]

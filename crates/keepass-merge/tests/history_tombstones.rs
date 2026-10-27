@@ -506,5 +506,8 @@ fn reconcile_without_tombstones_is_a_noop() {
     let changed = reconcile_history_tombstones(&mut local, &peer, &[]).unwrap();
     assert!(!changed, "no tombstone on either side ⇒ no change");
     assert_eq!(history_titles(&local), ["a", "b"]);
-    assert!(parse_tombstones(&local.custom_data).unwrap().is_empty());
+    assert_eq!(
+        parse_tombstones(&local.custom_data).unwrap(),
+        [] as [keepass_merge::HistoryTombstone; 0]
+    );
 }

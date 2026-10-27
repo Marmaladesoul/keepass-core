@@ -260,7 +260,13 @@ fn truly_identical_entry_still_omitted() {
     let remote = vault(vec![e_remote], vec![Binary::new(b"x".to_vec(), false)]);
 
     let outcome = merge(&local, &remote).unwrap();
-    assert!(outcome.disk_only_changes.is_empty());
-    assert!(outcome.local_only_changes.is_empty());
+    assert_eq!(
+        outcome.disk_only_changes,
+        [] as [keepass_core::model::EntryId; 0]
+    );
+    assert_eq!(
+        outcome.local_only_changes,
+        [] as [keepass_core::model::EntryId; 0]
+    );
     assert!(outcome.entry_conflicts.is_empty());
 }

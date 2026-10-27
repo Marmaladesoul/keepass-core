@@ -142,15 +142,15 @@ mod tests {
     #[test]
     fn default_is_empty() {
         let outcome = MergeOutcome::default();
-        assert!(outcome.disk_only_changes.is_empty());
-        assert!(outcome.local_only_changes.is_empty());
+        assert_eq!(outcome.disk_only_changes.len(), 0);
+        assert_eq!(outcome.local_only_changes.len(), 0);
         assert!(outcome.entry_conflicts.is_empty());
-        assert!(outcome.added_on_disk.is_empty());
-        assert!(outcome.deleted_on_disk.is_empty());
-        assert!(outcome.local_deletions_pending_sync.is_empty());
-        assert!(outcome.delete_edit_conflicts.is_empty());
+        assert_eq!(outcome.added_on_disk.len(), 0);
+        assert_eq!(outcome.deleted_on_disk.len(), 0);
+        assert_eq!(outcome.local_deletions_pending_sync.len(), 0);
+        assert_eq!(outcome.delete_edit_conflicts.len(), 0);
         assert!(outcome.group_conflicts.is_empty());
-        assert!(outcome.lca_missing_entries.is_empty());
-        assert!(outcome.corruption_signals.is_empty());
+        assert_eq!(outcome.lca_missing_entries.len(), 0);
+        assert_eq!(outcome.corruption_signals.len(), 0);
     }
 }
