@@ -64,7 +64,7 @@ pub fn aes_256_cbc_decrypt(
             got: iv.0.len(),
         });
     }
-    if ciphertext.len() % 16 != 0 {
+    if !ciphertext.len().is_multiple_of(16) {
         return Err(CipherError::BlockMisalignment {
             len: ciphertext.len(),
             block_size: 16,
