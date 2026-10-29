@@ -3200,14 +3200,14 @@ mod tests {
     fn empty_tags_element_yields_empty_vec() {
         let vault = decode_vault(tags_fixture("<Tags></Tags>").as_bytes()).unwrap();
         let e = vault.iter_entries().next().unwrap();
-        assert!(e.tags.is_empty());
+        assert_eq!(e.tags.len(), 0);
     }
 
     #[test]
     fn missing_tags_element_yields_empty_vec() {
         let vault = decode_vault(tags_fixture("").as_bytes()).unwrap();
         let e = vault.iter_entries().next().unwrap();
-        assert!(e.tags.is_empty());
+        assert_eq!(e.tags.len(), 0);
     }
 
     // -----------------------------------------------------------------
@@ -3268,7 +3268,7 @@ mod tests {
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
         let e = vault.iter_entries().next().unwrap();
-        assert!(e.history.is_empty());
+        assert_eq!(e.history.len(), 0);
     }
 
     #[test]
@@ -3378,7 +3378,7 @@ mod tests {
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
         let e = vault.iter_entries().next().unwrap();
-        assert!(e.attachments.is_empty());
+        assert_eq!(e.attachments.len(), 0);
     }
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
@@ -3437,8 +3437,8 @@ mod tests {
 </KeePassFile>"#;
         let vault = decode_vault(xml).unwrap();
         assert_eq!(vault.binaries.len(), 3); // 0, 1 placeholders + 2
-        assert!(vault.binaries[0].data.is_empty());
-        assert!(vault.binaries[1].data.is_empty());
+        assert_eq!(vault.binaries[0].data.len(), 0);
+        assert_eq!(vault.binaries[1].data.len(), 0);
         assert_eq!(vault.binaries[2].data, b"abc");
     }
 
@@ -3672,13 +3672,13 @@ mod tests {
   </Root>
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
-        assert!(vault.deleted_objects.is_empty());
+        assert_eq!(vault.deleted_objects.len(), 0);
     }
 
     #[test]
     fn missing_deleted_objects_block_is_empty() {
         let vault = decode_vault(sample_xml()).unwrap();
-        assert!(vault.deleted_objects.is_empty());
+        assert_eq!(vault.deleted_objects.len(), 0);
     }
 
     // -----------------------------------------------------------------
@@ -3723,7 +3723,7 @@ mod tests {
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
         assert!(vault.root.is_expanded); // KeePass default: true
-        assert!(vault.root.default_auto_type_sequence.is_empty());
+        assert_eq!(vault.root.default_auto_type_sequence.len(), 0);
         assert_eq!(vault.root.enable_auto_type, None);
         assert_eq!(vault.root.enable_searching, None);
     }
@@ -3801,7 +3801,7 @@ mod tests {
     #[test]
     fn missing_custom_data_is_empty() {
         let vault = decode_vault(sample_xml()).unwrap();
-        assert!(vault.meta.custom_data.is_empty());
+        assert_eq!(vault.meta.custom_data.len(), 0);
     }
 
     #[test]
@@ -3830,9 +3830,9 @@ mod tests {
   </Root>
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
-        assert!(vault.meta.custom_data.is_empty());
-        assert!(vault.meta.custom_icons.is_empty());
-        assert!(vault.binaries.is_empty());
+        assert_eq!(vault.meta.custom_data.len(), 0);
+        assert_eq!(vault.meta.custom_icons.len(), 0);
+        assert_eq!(vault.binaries.len(), 0);
         assert_eq!(vault.meta.memory_protection, MemoryProtection::default());
         // None of the four typed elements should appear as unknown
         // children — that's exactly the duplicate-emission risk this
@@ -3956,7 +3956,7 @@ mod tests {
   </Root>
 </KeePassFile>";
         let vault = decode_vault(xml).unwrap();
-        assert!(vault.root.custom_data.is_empty());
+        assert_eq!(vault.root.custom_data.len(), 0);
         assert!(
             !vault
                 .root
@@ -3966,7 +3966,7 @@ mod tests {
             "self-closing <CustomData/> leaked into Group.unknown_xml"
         );
         let entry = vault.iter_entries().next().unwrap();
-        assert!(entry.custom_data.is_empty());
+        assert_eq!(entry.custom_data.len(), 0);
         assert!(
             !entry.unknown_xml.iter().any(|el| el.tag == "CustomData"),
             "self-closing <CustomData/> leaked into Entry.unknown_xml"
@@ -4028,9 +4028,9 @@ mod tests {
     fn missing_entry_metadata_fields_are_empty_or_none() {
         let vault = decode_vault(sample_xml()).unwrap();
         let e = vault.iter_entries().next().unwrap();
-        assert!(e.foreground_color.is_empty());
-        assert!(e.background_color.is_empty());
-        assert!(e.override_url.is_empty());
+        assert_eq!(e.foreground_color.len(), 0);
+        assert_eq!(e.background_color.len(), 0);
+        assert_eq!(e.override_url.len(), 0);
         assert_eq!(e.custom_icon_uuid, None);
     }
 
@@ -4145,9 +4145,9 @@ mod tests {
     #[test]
     fn missing_group_or_entry_custom_data_is_empty() {
         let vault = decode_vault(sample_xml()).unwrap();
-        assert!(vault.root.custom_data.is_empty());
+        assert_eq!(vault.root.custom_data.len(), 0);
         let e = vault.iter_entries().next().unwrap();
-        assert!(e.custom_data.is_empty());
+        assert_eq!(e.custom_data.len(), 0);
     }
 
     // -----------------------------------------------------------------
@@ -4332,8 +4332,8 @@ mod tests {
         let e = vault.iter_entries().next().unwrap();
         assert!(e.auto_type.enabled); // default: enabled
         assert_eq!(e.auto_type.data_transfer_obfuscation, 0);
-        assert!(e.auto_type.default_sequence.is_empty());
-        assert!(e.auto_type.associations.is_empty());
+        assert_eq!(e.auto_type.default_sequence.len(), 0);
+        assert_eq!(e.auto_type.associations.len(), 0);
     }
 
     #[test]
@@ -4613,9 +4613,9 @@ mod tests {
             e0.auto_type.data_transfer_obfuscation,
             AutoType::default().data_transfer_obfuscation
         );
-        assert!(e0.auto_type.default_sequence.is_empty());
-        assert!(e0.auto_type.associations.is_empty());
-        assert!(!e0.auto_type.unknown_xml.is_empty());
+        assert_eq!(e0.auto_type.default_sequence.len(), 0);
+        assert_eq!(e0.auto_type.associations.len(), 0);
+        assert_ne!(e0.auto_type.unknown_xml.len(), 0);
 
         let vault = round_trip_vault(xml);
         let entry = vault.iter_entries().next().expect("one entry");
@@ -4664,9 +4664,9 @@ mod tests {
 
         // Nothing was captured as unknown anywhere in these blocks.
         let entry1 = vault1.iter_entries().next().unwrap();
-        assert!(entry1.auto_type.unknown_xml.is_empty());
-        assert!(entry1.auto_type.associations[0].unknown_xml.is_empty());
-        assert!(vault1.deleted_objects[0].unknown_xml.is_empty());
+        assert_eq!(entry1.auto_type.unknown_xml.len(), 0);
+        assert_eq!(entry1.auto_type.associations[0].unknown_xml.len(), 0);
+        assert_eq!(vault1.deleted_objects[0].unknown_xml.len(), 0);
 
         let encoded1 = crate::xml::encoder::encode_vault(&vault1).expect("encode 1");
         let s = std::str::from_utf8(&encoded1).expect("utf8");

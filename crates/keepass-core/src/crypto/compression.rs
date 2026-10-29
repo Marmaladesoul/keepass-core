@@ -230,7 +230,7 @@ mod tests {
     fn round_trips_gzip_empty() {
         let compressed = gzip(b"");
         let decompressed = decompress(CompressionFlags::Gzip, &compressed).unwrap();
-        assert!(decompressed.is_empty());
+        assert_eq!(decompressed.len(), 0);
     }
 
     #[test]

@@ -881,7 +881,7 @@ mod tests {
             "irrelevant".to_string(),
             None,
         )];
-        assert!(parse_tombstones(&cd).unwrap().is_empty());
+        assert_eq!(parse_tombstones(&cd).unwrap().len(), 0);
     }
 
     #[test]
@@ -1027,7 +1027,7 @@ mod tests {
             None,
         )];
         write_attachment_tombstones_to_custom_data(&mut cd, &[], None);
-        assert!(cd.is_empty());
+        assert_eq!(cd.len(), 0);
     }
 
     #[test]

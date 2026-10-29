@@ -602,7 +602,7 @@ mod tests {
         assert!(pending.attaches[1].protected);
         // attachments aren't applied to the entry until edit_entry
         // runs the post-pass.
-        assert!(e.attachments.is_empty());
+        assert_eq!(e.attachments.len(), 0);
     }
 
     #[test]
@@ -620,7 +620,7 @@ mod tests {
         assert!(editor.detach("a.txt"));
         assert!(!editor.detach("a.txt"));
         assert!(editor.detach("b.txt"));
-        assert!(e.attachments.is_empty());
+        assert_eq!(e.attachments.len(), 0);
     }
 
     #[test]

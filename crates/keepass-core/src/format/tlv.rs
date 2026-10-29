@@ -362,7 +362,7 @@ mod tests {
         let buf = pack_v3(&[(0, b"")]);
         let mut cursor: &[u8] = &buf;
         let (fields, end) = read_header_fields(&mut cursor, LengthWidth::U16).unwrap();
-        assert!(fields.is_empty());
+        assert_eq!(fields.len(), 0);
         assert!(end.is_end());
         assert_eq!(end.value, b"");
     }
@@ -464,7 +464,7 @@ mod tests {
         let bytes = write_header_fields(&fields_in, end_in, LengthWidth::U16).unwrap();
         let mut cursor: &[u8] = &bytes;
         let (fields_out, end_out) = read_header_fields(&mut cursor, LengthWidth::U16).unwrap();
-        assert!(cursor.is_empty());
+        assert_eq!(cursor.len(), 0);
         assert_eq!(fields_out.len(), fields_in.len());
         for (a, b) in fields_out.iter().zip(fields_in.iter()) {
             assert_eq!(a.tag, b.tag);
@@ -497,7 +497,7 @@ mod tests {
         let bytes = write_header_fields(&fields_in, end_in, LengthWidth::U32).unwrap();
         let mut cursor: &[u8] = &bytes;
         let (fields_out, end_out) = read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
-        assert!(cursor.is_empty());
+        assert_eq!(cursor.len(), 0);
         for (a, b) in fields_out.iter().zip(fields_in.iter()) {
             assert_eq!(a.tag, b.tag);
             assert_eq!(a.value, b.value);
@@ -546,7 +546,7 @@ mod tests {
         let bytes = write_header_fields(&[], end_in, LengthWidth::U32).unwrap();
         let mut cursor: &[u8] = &bytes;
         let (fields, end_out) = read_header_fields(&mut cursor, LengthWidth::U32).unwrap();
-        assert!(fields.is_empty());
+        assert_eq!(fields.len(), 0);
         assert_eq!(end_out.tag, 0);
         assert_eq!(end_out.value, b"END!");
     }
@@ -579,10 +579,10 @@ mod tests {
         let bytes = write_header_fields(&[], end_in, LengthWidth::U16).unwrap();
         let mut cursor: &[u8] = &bytes;
         let (fields, end_out) = read_header_fields(&mut cursor, LengthWidth::U16).unwrap();
-        assert!(fields.is_empty());
+        assert_eq!(fields.len(), 0);
         assert_eq!(end_out.tag, 0);
         assert_eq!(end_out.value, b"\r\n\r\n");
-        assert!(cursor.is_empty());
+        assert_eq!(cursor.len(), 0);
     }
 
     #[test]

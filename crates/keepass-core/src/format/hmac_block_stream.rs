@@ -345,7 +345,7 @@ mod tests {
         let base = fixed_base();
         let stream = encode(&[], &base);
         let decoded = read_hmac_block_stream(&stream, &base).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
         assert_eq!(stream.len(), 36); // 32-byte tag + 4-byte size
     }
 
@@ -462,7 +462,7 @@ mod tests {
         // Only the end marker: 32-byte tag + 4-byte size = 36 bytes.
         assert_eq!(bytes.len(), 36);
         let decoded = read_hmac_block_stream(&bytes, &base).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
     }
 
     #[test]

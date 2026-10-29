@@ -338,8 +338,14 @@ fn identical_tags_still_omitted() {
     remote_e.tags = vec!["work".into(), "important".into()];
 
     let outcome = merge(&vault(vec![local_e]), &vault(vec![remote_e])).unwrap();
-    assert!(outcome.disk_only_changes.is_empty());
-    assert!(outcome.local_only_changes.is_empty());
+    assert_eq!(
+        outcome.disk_only_changes,
+        [] as [keepass_core::model::EntryId; 0]
+    );
+    assert_eq!(
+        outcome.local_only_changes,
+        [] as [keepass_core::model::EntryId; 0]
+    );
     assert!(outcome.entry_conflicts.is_empty());
 }
 

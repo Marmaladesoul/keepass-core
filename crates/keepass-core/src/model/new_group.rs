@@ -93,7 +93,7 @@ mod tests {
     fn default_is_empty_notes_no_uuid() {
         let g = NewGroup::new("Personal");
         assert_eq!(g.name, "Personal");
-        assert!(g.notes.is_empty());
+        assert_eq!(g.notes.len(), 0);
         assert!(g.uuid.is_none());
     }
 

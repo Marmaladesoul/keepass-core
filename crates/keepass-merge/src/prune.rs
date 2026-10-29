@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(first, 0);
         assert_eq!(second, 0);
         assert_eq!(e.history.len(), 3);
-        assert!(parse_tombstones(&e.custom_data).unwrap().is_empty());
+        assert_eq!(parse_tombstones(&e.custom_data).unwrap().len(), 0);
     }
 
     #[test]

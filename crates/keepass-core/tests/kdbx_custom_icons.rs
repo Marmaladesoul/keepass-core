@@ -175,7 +175,10 @@ fn remove_custom_icon_returns_false_for_absent_and_no_mutation() {
     let bogus = uuid::Uuid::from_u128(0x1234_5678);
     assert!(!kdbx.remove_custom_icon(bogus));
     assert_eq!(kdbx.vault().meta.settings_changed, settings_before);
-    assert!(kdbx.vault().meta.custom_icons.is_empty());
+    assert_eq!(
+        kdbx.vault().meta.custom_icons,
+        [] as [keepass_core::model::CustomIcon; 0]
+    );
 }
 
 // ---------------------------------------------------------------------

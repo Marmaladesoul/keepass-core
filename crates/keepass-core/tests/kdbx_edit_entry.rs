@@ -109,7 +109,7 @@ fn edit_entry_snapshot_policy_records_pre_edit_state_and_round_trips() {
     assert_eq!(snap.password, "hunter2");
     assert_eq!(snap.title, "Gmail");
     // Snapshot's own history is empty (KeePass never nests).
-    assert!(snap.history.is_empty());
+    assert_eq!(snap.history, [] as [keepass_core::model::Entry; 0]);
 
     // Round-trip.
     let bytes = kdbx.save_to_bytes().unwrap();

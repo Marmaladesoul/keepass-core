@@ -165,17 +165,17 @@ mod tests {
         let id = EntryId(Uuid::from_u128(0x42));
         let e = Entry::empty(id);
         assert_eq!(e.id, id);
-        assert!(e.title.is_empty());
-        assert!(e.username.is_empty());
-        assert!(e.password.is_empty());
-        assert!(e.url.is_empty());
-        assert!(e.notes.is_empty());
-        assert!(e.custom_fields.is_empty());
-        assert!(e.tags.is_empty());
-        assert!(e.history.is_empty());
-        assert!(e.attachments.is_empty());
-        assert!(e.custom_data.is_empty());
-        assert!(e.unknown_xml.is_empty());
+        assert_eq!(e.title.len(), 0);
+        assert_eq!(e.username.len(), 0);
+        assert_eq!(e.password.len(), 0);
+        assert_eq!(e.url.len(), 0);
+        assert_eq!(e.notes.len(), 0);
+        assert_eq!(e.custom_fields.len(), 0);
+        assert_eq!(e.tags.len(), 0);
+        assert_eq!(e.history.len(), 0);
+        assert_eq!(e.attachments.len(), 0);
+        assert_eq!(e.custom_data.len(), 0);
+        assert_eq!(e.unknown_xml.len(), 0);
         assert!(e.custom_icon_uuid.is_none());
         assert!(e.previous_parent_group.is_none());
         assert_eq!(e.icon_id, 0);
@@ -192,24 +192,24 @@ mod tests {
         let id = GroupId(Uuid::from_u128(0x99));
         let g = Group::empty(id);
         assert_eq!(g.id, id);
-        assert!(g.name.is_empty());
-        assert!(g.notes.is_empty());
-        assert!(g.groups.is_empty());
-        assert!(g.entries.is_empty());
+        assert_eq!(g.name.len(), 0);
+        assert_eq!(g.notes.len(), 0);
+        assert_eq!(g.groups.len(), 0);
+        assert_eq!(g.entries.len(), 0);
         assert!(
             g.is_expanded,
             "is_expanded defaults to KeePass 2.x's default of true"
         );
-        assert!(g.default_auto_type_sequence.is_empty());
+        assert_eq!(g.default_auto_type_sequence.len(), 0);
         assert!(g.enable_auto_type.is_none());
         assert!(g.enable_searching.is_none());
-        assert!(g.custom_data.is_empty());
+        assert_eq!(g.custom_data.len(), 0);
         assert!(g.previous_parent_group.is_none());
         assert!(g.last_top_visible_entry.is_none());
         assert!(g.custom_icon_uuid.is_none());
         assert_eq!(g.icon_id, 0);
         assert_eq!(g.times, Timestamps::default());
-        assert!(g.unknown_xml.is_empty());
+        assert_eq!(g.unknown_xml.len(), 0);
     }
 
     #[test]
@@ -218,8 +218,8 @@ mod tests {
         let v = Vault::empty(root_id);
         assert_eq!(v.root.id, root_id);
         assert_eq!(v.meta, Meta::default());
-        assert!(v.binaries.is_empty());
-        assert!(v.deleted_objects.is_empty());
+        assert_eq!(v.binaries.len(), 0);
+        assert_eq!(v.deleted_objects.len(), 0);
         assert_eq!(v.total_entries(), 0);
     }
 

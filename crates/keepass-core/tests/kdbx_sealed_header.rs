@@ -69,7 +69,7 @@ fn every_valid_fixture_passes_sealed_and_header() {
         let h = kdbx.header();
         assert_eq!(h.version(), version);
         assert_eq!(h.master_seed.0.len(), 32);
-        assert!(!h.encryption_iv.0.is_empty());
+        assert_ne!(h.encryption_iv.0, [] as [u8; 0]);
 
         // KDBX4 must expose KDF parameters; KDBX3 must expose the legacy
         // transform seed + rounds. The `VersionFields` enum guarantees the

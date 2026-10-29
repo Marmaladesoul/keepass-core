@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn absent_key_parses_as_empty() {
-        assert!(parse_conflict_resolutions(&[]).expect("parse").is_empty());
+        assert_eq!(parse_conflict_resolutions(&[]).expect("parse").len(), 0);
     }
 
     #[test]

@@ -369,7 +369,7 @@ mod tests {
         let outcome = merge(&local, &remote).expect("merge");
         apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
 
-        assert!(local.root.entries.is_empty());
+        assert_eq!(local.root.entries.len(), 0);
         assert_eq!(local.root.groups[0].entries.len(), 1);
         assert_eq!(local.root.groups[0].entries[0].title, "in-child");
     }
@@ -389,7 +389,7 @@ mod tests {
 
         apply_merge(&mut local, &remote, &outcome, &Resolution::default()).expect("apply");
 
-        assert!(local.root.entries.is_empty());
+        assert_eq!(local.root.entries.len(), 0);
         // Tombstone now in local.
         assert_eq!(local.deleted_objects.len(), 1);
         assert_eq!(local.deleted_objects[0].uuid, Uuid::from_u128(1));
@@ -726,7 +726,7 @@ mod tests {
 
         apply_merge(&mut local, &remote, &outcome, &resolution).expect("apply");
 
-        assert!(local.root.entries.is_empty());
+        assert_eq!(local.root.entries.len(), 0);
         assert!(
             local
                 .deleted_objects
