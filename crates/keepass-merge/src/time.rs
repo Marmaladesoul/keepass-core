@@ -65,6 +65,33 @@ pub(crate) fn later_wins(
     }
 }
 
+/// Group A with a deterministic tie-break — [`later_wins`] for a value
+/// arbitrated by its own "changed" timestamp, except that equal
+/// timestamps fall through to the values and the greater one wins.
+///
+/// Plain `later_wins` keeps the incumbent on a tie, so two replicas
+/// holding different values under the same timestamp each keep their own
+/// and never converge (e.g. two writers that each set the field without
+/// advancing its timestamp). Any total order on the values makes both
+/// sides pick the same one; "greater" is the one used.
+///
+/// Truth table (`incumbent` / `challenger` → result):
+/// - `Some(i)` / `Some(c)`, `c != i` → `c > i`
+/// - `None`    / `Some(_)` → `true`
+/// - `Some(_)` / `None`    → `false`
+/// - equal timestamps (both `None`, or both `Some(t)`) →
+///   `challenger_value > incumbent_value` (equal values ⇒ `false`)
+pub(crate) fn later_or_greater_wins<T: Ord + ?Sized>(
+    incumbent: Option<DateTime<Utc>>,
+    incumbent_value: &T,
+    challenger: Option<DateTime<Utc>>,
+    challenger_value: &T,
+) -> bool {
+    // `Option` orders `None` below any `Some`, which is exactly
+    // `later_wins`' table; the value only decides a timestamp tie.
+    (challenger, challenger_value) > (incumbent, incumbent_value)
+}
+
 /// Group B — advancing (grow-only) merge of two optional timestamps:
 /// the later of the two, but never regressing to `None`.
 ///
@@ -132,7 +159,8 @@ pub(crate) fn strictly_after(mtime: Option<DateTime<Utc>>, cutoff: DateTime<Utc>
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_only_max, conservative_edit_wins, later_wins, second_resolution, strictly_after,
+        advance_only_max, conservative_edit_wins, later_or_greater_wins, later_wins,
+        second_resolution, strictly_after,
     };
     use chrono::{DateTime, TimeZone, Timelike, Utc};
 
@@ -157,6 +185,21 @@ mod tests {
         assert!(!later_wins(Some(early()), None));
         // None/None: nothing to swap on.
         assert!(!later_wins(None, None));
+    }
+
+    #[test]
+    fn later_or_greater_wins_breaks_ties_on_the_value() {
+        // A strictly later timestamp still decides, whatever the values.
+        assert!(later_or_greater_wins(Some(early()), &9, Some(late()), &1));
+        assert!(!later_or_greater_wins(Some(late()), &1, Some(early()), &9));
+        assert!(later_or_greater_wins(None, &9, Some(early()), &1));
+        // Equal timestamps (including both absent): the greater value wins,
+        // so each side of a tie picks the same one.
+        assert!(later_or_greater_wins(Some(early()), &1, Some(early()), &2));
+        assert!(!later_or_greater_wins(Some(early()), &2, Some(early()), &1));
+        assert!(later_or_greater_wins(None, &1, None, &2));
+        // Equal everything: no change.
+        assert!(!later_or_greater_wins(Some(early()), &1, Some(early()), &1));
     }
 
     #[test]

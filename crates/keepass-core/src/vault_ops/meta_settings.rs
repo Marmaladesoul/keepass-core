@@ -3,12 +3,11 @@
 //!
 //! Each setter writes one field on `vault.meta` and stamps
 //! [`crate::model::Meta::settings_changed`] via
-//! [`stamp_settings_changed`]. The high-level setter API deliberately
-//! does not auto-stamp the per-field `*Changed` timestamps
-//! (`database_name_changed` and friends) — those are KeePass's own
-//! field-level edit-history hooks and are left for the caller to
-//! manage. Encoder and decoder still round-trip them faithfully when
-//! set in-model.
+//! [`stamp_settings_changed`]. The fields that carry their own "changed"
+//! timestamp — name, description, default username and the recycle-bin
+//! pair — stamp that too: it is what the meta merge arbitrates those
+//! fields on, so an edit left unstamped would lose to any stamped value
+//! from another replica, however stale.
 
 use crate::model::{Clock, GroupId, Vault};
 
@@ -22,6 +21,7 @@ pub(crate) fn stamp_settings_changed(vault: &mut Vault, clock: &dyn Clock) {
 /// Free-fn core of [`Kdbx::set_database_name`](crate::kdbx::Kdbx::set_database_name).
 pub(crate) fn set_database_name(vault: &mut Vault, clock: &dyn Clock, name: impl Into<String>) {
     vault.meta.database_name = name.into();
+    vault.meta.database_name_changed = Some(clock.now());
     stamp_settings_changed(vault, clock);
 }
 
@@ -32,6 +32,7 @@ pub(crate) fn set_database_description(
     description: impl Into<String>,
 ) {
     vault.meta.database_description = description.into();
+    vault.meta.database_description_changed = Some(clock.now());
     stamp_settings_changed(vault, clock);
 }
 
@@ -42,6 +43,7 @@ pub(crate) fn set_default_username(
     username: impl Into<String>,
 ) {
     vault.meta.default_username = username.into();
+    vault.meta.default_username_changed = Some(clock.now());
     stamp_settings_changed(vault, clock);
 }
 
@@ -60,6 +62,7 @@ pub(crate) fn set_recycle_bin(
 ) {
     vault.meta.recycle_bin_enabled = enabled;
     vault.meta.recycle_bin_uuid = group;
+    vault.meta.recycle_bin_changed = Some(clock.now());
     stamp_settings_changed(vault, clock);
 }
 

@@ -41,7 +41,7 @@
 use keepass_core::model::{CustomDataItem, CustomIcon, Meta};
 
 use crate::or_set::union_by_key;
-use crate::time::{advance_only_max, later_wins};
+use crate::time::{advance_only_max, later_or_greater_wins, later_wins};
 
 /// Apply the spec §2.1 per-field rules to `local.meta`, taking
 /// remote's values where the local-vs-remote arbitration falls to
@@ -85,7 +85,12 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
     // "*_changed" timestamp. The spec calls for activity-log emission
     // when the remote side wins; that surface lands with audit item 10
     // (PR-3.3) — the merge crate just performs the LWW for now.
-    if later_wins(local.database_name_changed, remote.database_name_changed) {
+    if later_or_greater_wins(
+        local.database_name_changed,
+        local.database_name.as_str(),
+        remote.database_name_changed,
+        remote.database_name.as_str(),
+    ) {
         crate::events::emit(&crate::MergeEvent::VaultMetaFieldLww {
             field: "DatabaseName",
             local_value: local.database_name.clone(),
@@ -94,9 +99,11 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
         local.database_name.clone_from(&remote.database_name);
         local.database_name_changed = remote.database_name_changed;
     }
-    if later_wins(
+    if later_or_greater_wins(
         local.database_description_changed,
+        local.database_description.as_str(),
         remote.database_description_changed,
+        remote.database_description.as_str(),
     ) {
         crate::events::emit(&crate::MergeEvent::VaultMetaFieldLww {
             field: "DatabaseDescription",
@@ -108,9 +115,11 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
             .clone_from(&remote.database_description);
         local.database_description_changed = remote.database_description_changed;
     }
-    if later_wins(
+    if later_or_greater_wins(
         local.default_username_changed,
+        local.default_username.as_str(),
         remote.default_username_changed,
+        remote.default_username.as_str(),
     ) {
         crate::events::emit(&crate::MergeEvent::VaultMetaFieldLww {
             field: "DefaultUserName",
@@ -124,9 +133,19 @@ pub fn merge_meta_scalars(local: &mut Meta, remote: &Meta) {
     // --- Recycle bin: enable flag + UUID arbitrated by
     // `recycle_bin_changed`. Treated as a unit so the flag and the
     // pointer move together; otherwise we'd risk
-    // `enabled=true, uuid=None` from a partial LWW.
-    let recycle_changed_winner_remote =
-        later_wins(local.recycle_bin_changed, remote.recycle_bin_changed);
+    // `enabled=true, uuid=None` from a partial LWW. A timestamp tie
+    // breaks on the (flag, pointer) pair, so two peers that each point
+    // the bin at a different group without advancing the timestamp
+    // still settle on the same one. That order prefers an enabled bin,
+    // and a designated group over none, on purpose: of the arbitrary
+    // choices, it's the one that keeps deletes recoverable.
+    let bin = |m: &Meta| (m.recycle_bin_enabled, m.recycle_bin_uuid.map(|g| g.0));
+    let recycle_changed_winner_remote = later_or_greater_wins(
+        local.recycle_bin_changed,
+        &bin(local),
+        remote.recycle_bin_changed,
+        &bin(remote),
+    );
     if recycle_changed_winner_remote {
         local.recycle_bin_enabled = remote.recycle_bin_enabled;
         local.recycle_bin_uuid = remote.recycle_bin_uuid;
@@ -386,6 +405,95 @@ mod tests {
             Some(GroupId(Uuid::from_u128(0x00c0_ffee)))
         );
         assert_eq!(l.recycle_bin_changed, Some(at(2026, 5, 1)));
+    }
+
+    /// Merging in either direction must give the same result — the
+    /// property a timestamp tie used to break.
+    fn converges(l: &Meta, r: &Meta) -> (Meta, Meta) {
+        let mut at_l = l.clone();
+        merge_meta_scalars(&mut at_l, r);
+        let mut at_r = r.clone();
+        merge_meta_scalars(&mut at_r, l);
+        (at_l, at_r)
+    }
+
+    #[test]
+    fn recycle_bin_pointer_tie_converges_on_both_sides() {
+        use keepass_core::model::GroupId;
+        use uuid::Uuid;
+        let mut l = fresh();
+        l.recycle_bin_enabled = true;
+        l.recycle_bin_uuid = Some(GroupId(Uuid::from_u128(0xa)));
+        l.recycle_bin_changed = Some(at(2026, 4, 1));
+        let mut r = l.clone();
+        r.recycle_bin_uuid = Some(GroupId(Uuid::from_u128(0xb)));
+        let (at_l, at_r) = converges(&l, &r);
+        assert_eq!(at_l.recycle_bin_uuid, at_r.recycle_bin_uuid);
+        assert_eq!(at_l.recycle_bin_uuid, Some(GroupId(Uuid::from_u128(0xb))));
+    }
+
+    #[test]
+    fn recycle_bin_tie_prefers_a_designated_bin_over_none() {
+        use keepass_core::model::GroupId;
+        use uuid::Uuid;
+        let mut l = fresh();
+        l.recycle_bin_enabled = true;
+        l.recycle_bin_uuid = None;
+        l.recycle_bin_changed = Some(at(2026, 4, 1));
+        let mut r = l.clone();
+        r.recycle_bin_uuid = Some(GroupId(Uuid::from_u128(0xb)));
+        let (at_l, at_r) = converges(&l, &r);
+        assert_eq!(at_l.recycle_bin_uuid, Some(GroupId(Uuid::from_u128(0xb))));
+        assert_eq!(at_r.recycle_bin_uuid, Some(GroupId(Uuid::from_u128(0xb))));
+    }
+
+    #[test]
+    fn recycle_bin_strictly_newer_side_still_wins_over_a_greater_pointer() {
+        use keepass_core::model::GroupId;
+        use uuid::Uuid;
+        let mut l = fresh();
+        l.recycle_bin_enabled = true;
+        l.recycle_bin_uuid = Some(GroupId(Uuid::from_u128(0xa)));
+        l.recycle_bin_changed = Some(at(2026, 5, 1));
+        let mut r = l.clone();
+        r.recycle_bin_uuid = Some(GroupId(Uuid::from_u128(0xb)));
+        r.recycle_bin_changed = Some(at(2026, 4, 1));
+        let (at_l, at_r) = converges(&l, &r);
+        assert_eq!(at_l.recycle_bin_uuid, Some(GroupId(Uuid::from_u128(0xa))));
+        assert_eq!(at_r.recycle_bin_uuid, Some(GroupId(Uuid::from_u128(0xa))));
+    }
+
+    #[test]
+    fn stamped_local_edit_beats_a_stale_remote_that_sorts_higher() {
+        // The tie-break must only decide ties: a freshly stamped edit
+        // wins even when the stale value it replaced is the "greater".
+        let mut l = fresh();
+        l.database_name = "Alpha".into();
+        l.database_name_changed = Some(at(2026, 5, 1));
+        let mut r = fresh();
+        r.database_name = "Zeta".into();
+        r.database_name_changed = Some(at(2026, 4, 1));
+        let (at_l, at_r) = converges(&l, &r);
+        assert_eq!(at_l.database_name, "Alpha");
+        assert_eq!(at_r.database_name, "Alpha");
+    }
+
+    #[test]
+    fn user_edited_scalar_ties_converge_on_both_sides() {
+        let mut l = fresh();
+        l.database_name = "Alpha".into();
+        l.database_description = "one".into();
+        l.default_username = "a".into();
+        l.database_name_changed = Some(at(2026, 4, 1));
+        l.database_description_changed = Some(at(2026, 4, 1));
+        l.default_username_changed = Some(at(2026, 4, 1));
+        let mut r = l.clone();
+        r.database_name = "Beta".into();
+        r.database_description = "two".into();
+        r.default_username = "b".into();
+        let (at_l, at_r) = converges(&l, &r);
+        assert_eq!(at_l, at_r);
+        assert_eq!(at_l.database_name, "Beta");
     }
 
     #[test]
