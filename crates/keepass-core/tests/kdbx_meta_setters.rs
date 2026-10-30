@@ -1,7 +1,8 @@
 //! Slice 8 — `Kdbx<Unlocked>` Meta setters.
 //!
 //! Per the design notes §"Slicing plan" slice 8. Every setter writes its
-//! Meta field and stamps `Meta::settings_changed = clock.now()`.
+//! Meta field and stamps `Meta::settings_changed = clock.now()`; the
+//! fields with their own `*Changed` timestamp stamp that as well.
 //!
 //! The integration test runs every setter through the round-trip
 //! gauntlet: open a fixture, mutate every Meta field via its public
@@ -75,8 +76,13 @@ fn every_meta_setter_round_trips_and_stamps_settings_changed() {
     kdbx.set_master_key_change_rec(180);
     kdbx.set_master_key_change_force(365);
 
-    // In-memory: every setter stamped settings_changed.
+    // In-memory: every setter stamped settings_changed, and the fields
+    // the meta merge arbitrates on their own timestamp stamped theirs.
     assert_eq!(kdbx.vault().meta.settings_changed, Some(at));
+    assert_eq!(kdbx.vault().meta.database_name_changed, Some(at));
+    assert_eq!(kdbx.vault().meta.database_description_changed, Some(at));
+    assert_eq!(kdbx.vault().meta.default_username_changed, Some(at));
+    assert_eq!(kdbx.vault().meta.recycle_bin_changed, Some(at));
 
     let bytes = kdbx.save_to_bytes().unwrap();
     let reopened = Kdbx::<Sealed>::open_from_bytes(bytes)
@@ -99,4 +105,8 @@ fn every_meta_setter_round_trips_and_stamps_settings_changed() {
     assert_eq!(m.master_key_change_rec, 180);
     assert_eq!(m.master_key_change_force, 365);
     assert_eq!(m.settings_changed, Some(at));
+    assert_eq!(m.database_name_changed, Some(at));
+    assert_eq!(m.database_description_changed, Some(at));
+    assert_eq!(m.default_username_changed, Some(at));
+    assert_eq!(m.recycle_bin_changed, Some(at));
 }
