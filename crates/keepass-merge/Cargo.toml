@@ -30,5 +30,5 @@ uuid = "1"
 
 [dev-dependencies]
 proptest = "1"
-rand = { version = "0.9", default-features = false, features = ["std", "std_rng"] }
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng"] }
 rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
