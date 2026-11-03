@@ -34,6 +34,10 @@ fn kdbx4_basic() -> PathBuf {
     fixtures_root().join("kdbxweb/kdbx4-basic.kdbx")
 }
 
+fn kdbx3_fixture() -> PathBuf {
+    fixtures_root().join("keepassxc/kdbx3-basic.kdbx")
+}
+
 fn password_from_sidecar(path: &Path) -> String {
     let sidecar = path.with_extension("json");
     let text = fs::read_to_string(sidecar).unwrap();
@@ -109,4 +113,159 @@ fn rekey_rotates_seeds_so_old_key_no_longer_unlocks_the_saved_bytes() {
         matches!(err, Error::Crypto(_)),
         "expected Error::Crypto, got {err:?}"
     );
+}
+
+// --- rekey_with_kdf -----------------------------------------------------
+
+use keepass_core::format::{Argon2Variant, Argon2Version, KdfParams};
+
+fn open_unlocked(path: &Path, key: &CompositeKey) -> Kdbx<keepass_core::kdbx::Unlocked> {
+    Kdbx::<Sealed>::open(path)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock(key)
+        .unwrap()
+}
+
+fn kdf_of_bytes(bytes: &[u8]) -> KdfParams {
+    Kdbx::<Sealed>::open_from_bytes(bytes.to_vec())
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .header()
+        .decode_kdf_params()
+        .unwrap()
+}
+
+#[test]
+fn rekey_with_kdf_installs_the_new_parameters_under_a_fresh_salt() {
+    let path = kdbx4_basic();
+    let key = CompositeKey::from_password(password_from_sidecar(&path).as_bytes());
+    let mut kdbx = open_unlocked(&path, &key);
+    let passed_salt = vec![7u8; 32];
+    let wanted = KdfParams::Argon2 {
+        variant: Argon2Variant::Argon2id,
+        salt: passed_salt.clone(),
+        iterations: 3,
+        memory_bytes: 8 * 1024 * 1024,
+        parallelism: 1,
+        version: Argon2Version::V13,
+    };
+
+    kdbx.rekey_with_kdf(&key, &wanted).unwrap();
+    let saved = kdbx.save_to_bytes().unwrap();
+
+    // The saved header names the new parameters, salt aside: the salt is
+    // fresh, of the length passed in.
+    let KdfParams::Argon2 {
+        variant,
+        salt,
+        iterations,
+        memory_bytes,
+        parallelism,
+        version,
+    } = kdf_of_bytes(&saved)
+    else {
+        panic!("expected Argon2 parameters");
+    };
+    assert_eq!(
+        (variant, iterations, memory_bytes, parallelism, version),
+        (
+            Argon2Variant::Argon2id,
+            3,
+            8 * 1024 * 1024,
+            1,
+            Argon2Version::V13
+        )
+    );
+    assert_eq!(salt.len(), passed_salt.len());
+    assert_ne!(
+        salt, passed_salt,
+        "the salt must be fresh, not the one passed"
+    );
+
+    // The same key opens it — the transformed key was re-derived under the
+    // new parameters — and the entries survive.
+    let reopened = Kdbx::<Sealed>::open_from_bytes(saved)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock(&key)
+        .expect("the key must unlock the file under its new KDF parameters");
+    assert_eq!(
+        reopened.vault().iter_entries().count(),
+        open_unlocked(&path, &key).vault().iter_entries().count()
+    );
+}
+
+#[test]
+fn rekey_with_kdf_switches_a_kdbx4_file_between_kdf_families() {
+    let path = kdbx4_basic();
+    let key = CompositeKey::from_password(password_from_sidecar(&path).as_bytes());
+    let mut kdbx = open_unlocked(&path, &key);
+
+    kdbx.rekey_with_kdf(
+        &key,
+        &KdfParams::AesKdf {
+            seed: [0; 32],
+            rounds: 1_000,
+        },
+    )
+    .unwrap();
+    let saved = kdbx.save_to_bytes().unwrap();
+
+    assert!(matches!(
+        kdf_of_bytes(&saved),
+        KdfParams::AesKdf { rounds: 1_000, .. }
+    ));
+    Kdbx::<Sealed>::open_from_bytes(saved)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock(&key)
+        .expect("the key must unlock the file under AES-KDF");
+}
+
+#[test]
+fn rekey_with_kdf_changes_kdbx3_rounds_and_refuses_argon2() {
+    let path = kdbx3_fixture();
+    let key = CompositeKey::from_password(password_from_sidecar(&path).as_bytes());
+    let mut kdbx = open_unlocked(&path, &key);
+
+    kdbx.rekey_with_kdf(
+        &key,
+        &KdfParams::AesKdf {
+            seed: [0; 32],
+            rounds: 1_234,
+        },
+    )
+    .unwrap();
+    let saved = kdbx.save_to_bytes().unwrap();
+    assert!(matches!(
+        kdf_of_bytes(&saved),
+        KdfParams::AesKdf { rounds: 1_234, .. }
+    ));
+    Kdbx::<Sealed>::open_from_bytes(saved)
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .unlock(&key)
+        .expect("the key must unlock the KDBX3 file under its new rounds");
+
+    let mut kdbx = open_unlocked(&path, &key);
+    let err = kdbx
+        .rekey_with_kdf(
+            &key,
+            &KdfParams::Argon2 {
+                variant: Argon2Variant::Argon2id,
+                salt: vec![0; 32],
+                iterations: 2,
+                memory_bytes: 8 * 1024 * 1024,
+                parallelism: 1,
+                version: Argon2Version::V13,
+            },
+        )
+        .expect_err("a KDBX3 header can't carry Argon2 parameters");
+    assert!(matches!(err, Error::Format(_)), "got {err:?}");
 }

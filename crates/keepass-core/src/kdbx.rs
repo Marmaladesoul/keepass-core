@@ -1834,6 +1834,69 @@ impl Kdbx<Unlocked> {
     ///   malformed beyond what `parse` already accepts (effectively
     ///   unreachable from a successfully unlocked file).
     pub fn rekey(&mut self, new_key: &CompositeKey) -> Result<(), Error> {
+        self.rekey_inner(new_key, None)
+    }
+
+    /// Replace the master key **and** the KDF parameters.
+    ///
+    /// Exactly [`Self::rekey`], except that the envelope's KDF parameters
+    /// become `kdf` before the transformed key is re-derived — the way a
+    /// client changes a vault's KDF settings (algorithm, Argon2 memory /
+    /// passes / lanes, AES-KDF rounds). Pass the current composite key as
+    /// `new_key` to change only the KDF settings.
+    ///
+    /// The salt / transform seed in `kdf` is not used verbatim: like every
+    /// re-key it is replaced with fresh `getrandom` bytes of the same
+    /// length, so pass the length the file should carry (32 bytes is what
+    /// writers commonly emit; Argon2 requires at least 8).
+    ///
+    /// This runs the KDF at whatever cost `kdf` names — the caller owns
+    /// any bound on that cost.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Format`] if `kdf` can't be expressed in this file's
+    ///   format: a KDBX3 outer header carries AES-KDF rounds only, so any
+    ///   other KDF needs a KDBX4 file.
+    /// - Otherwise as [`Self::rekey`]; a `kdf` the KDF rejects (e.g. an
+    ///   Argon2 salt shorter than 8 bytes) is [`Error::Crypto`]. On any
+    ///   error the handle's outer header may already carry the new seeds
+    ///   and parameters, so discard it rather than saving it.
+    pub fn rekey_with_kdf(&mut self, new_key: &CompositeKey, kdf: &KdfParams) -> Result<(), Error> {
+        self.rekey_inner(new_key, Some(kdf))
+    }
+
+    /// Shared body of [`Self::rekey`] and [`Self::rekey_with_kdf`]:
+    /// install `kdf` (when given), rotate every seed, re-derive.
+    fn rekey_inner(
+        &mut self,
+        new_key: &CompositeKey,
+        kdf: Option<&KdfParams>,
+    ) -> Result<(), Error> {
+        // --- Replacement KDF parameters ------------------------------
+        if let Some(kdf) = kdf {
+            match (&mut self.state.outer_header.version_fields, kdf) {
+                (
+                    VersionFields::V3 {
+                        transform_rounds, ..
+                    },
+                    KdfParams::AesKdf { rounds, .. },
+                ) => {
+                    *transform_rounds = *rounds;
+                }
+                (VersionFields::V3 { .. }, _) => {
+                    return Err(Error::Format(FormatError::MalformedHeader(
+                        "a KDBX3 header carries AES-KDF parameters only",
+                    )));
+                }
+                (VersionFields::V4 { kdf_parameters, .. }, kdf) => {
+                    *kdf_parameters = kdf.to_var_dictionary_blob().map_err(|_| {
+                        FormatError::MalformedHeader("failed to encode KDF parameters")
+                    })?;
+                }
+            }
+        }
+
         // --- Fresh seeds ---------------------------------------------
         let mut new_master_seed = [0u8; 32];
         getrandom::fill(&mut new_master_seed).map_err(|_| Error::Crypto(CryptoError::Decrypt))?;
