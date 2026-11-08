@@ -20,7 +20,7 @@ use crate::conflict::{AttachmentDelta, AttachmentDeltaKind, EntryConflict, Field
 use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::field_access::{copy_field, remove_field};
 use crate::hash::{entry_content_hash, sha256};
-use crate::history_merge::merge_histories;
+use crate::history_merge::{Lineage, merge_histories};
 use crate::resolution::{AttachmentChoice, ConflictSide, DeleteEditChoice};
 use crate::time::{second_resolution, strictly_after};
 use crate::tombstone::{
@@ -569,8 +569,16 @@ pub(super) fn build_resolved_entry(
     let unioned_ts = union_history_tombstones(&local_ts, &remote_ts);
     let ts_set = tombstone_set(&unioned_ts);
     let mut combined = merge_histories(
-        &conflict.local.history,
-        &rebound_remote_history,
+        Lineage {
+            history: &conflict.local.history,
+            current: &conflict.local,
+            current_binaries: local_binaries,
+        },
+        Lineage {
+            history: &rebound_remote_history,
+            current: &conflict.remote,
+            current_binaries: remap.remote_binaries(),
+        },
         local_binaries,
         &ts_set,
     );

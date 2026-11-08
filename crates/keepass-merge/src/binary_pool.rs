@@ -69,6 +69,11 @@ impl<'a> BinaryPoolRemap<'a> {
         self.local_binaries
     }
 
+    /// The remote pool remote-sourced `ref_id`s index (read-only).
+    pub(crate) fn remote_binaries(&self) -> &[Binary] {
+        self.remote_binaries
+    }
+
     /// Rewrite every `ref_id` in `attachments` from a remote-pool index
     /// to the corresponding local-pool index, importing as needed.
     ///

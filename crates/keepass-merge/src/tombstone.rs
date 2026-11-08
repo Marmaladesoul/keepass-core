@@ -360,8 +360,9 @@ pub fn reconcile_history_tombstones(
 /// orthogonally to the field/icon/attachment reconcile, like
 /// [`reconcile_history_tombstones`].
 ///
-/// Returns `true` when `entry` changed — a record was added or pruned, and/or
-/// the tombstone list grew. Callers persist only on `true`; a `false` return
+/// Returns `true` when `entry` changed — a record was added, pruned or
+/// moved (the order is meaningful: see `merge_histories`), and/or the
+/// tombstone list grew. Callers persist only on `true`; a `false` return
 /// is the steady state that makes a sync loop terminate (idempotent once both
 /// sides hold the same union).
 ///
@@ -400,17 +401,27 @@ pub fn fold_entry_history(
     // Lossless union, honouring the unioned tombstone set. `base_binaries` is
     // now grown to cover every record on either side.
     let combined = crate::history_merge::merge_histories(
-        &entry.history,
-        &rebound_peer_history,
+        crate::history_merge::Lineage {
+            history: &entry.history,
+            current: entry,
+            current_binaries: base_binaries,
+        },
+        crate::history_merge::Lineage {
+            history: &rebound_peer_history,
+            current: peer,
+            current_binaries: peer_binaries,
+        },
         base_binaries,
         &ts_set,
     );
 
-    // Changed if the snapshot *set* differs (a record added or pruned) or the
+    // Changed if the snapshot *sequence* differs: a record added or pruned,
+    // or the same records reordered (the order is what tells the LCA matcher
+    // which version came first, so a reorder is a change to persist). Or the
     // tombstone list grew. Comparing coarsened `(second-mtime, hash)` keys —
     // the same resolution `merge_histories` dedups at — makes a re-run after
     // both sides agree report no change, so the sync loop terminates.
-    let key_set = |hist: &[Entry]| -> HashSet<(Option<DateTime<Utc>>, [u8; 32])> {
+    let keys = |hist: &[Entry]| -> Vec<(Option<DateTime<Utc>>, [u8; 32])> {
         hist.iter()
             .map(|h| {
                 (
@@ -420,7 +431,7 @@ pub fn fold_entry_history(
             })
             .collect()
     };
-    let history_changed = key_set(&entry.history) != key_set(&combined);
+    let history_changed = keys(&entry.history) != keys(&combined);
     let local_canonical = union_history_tombstones(&local_ts, &[]);
     let tombstones_changed = unioned_ts != local_canonical;
 
@@ -1095,6 +1106,84 @@ mod tests {
         let mut v: Vec<String> = e.history.iter().map(|h| h.username.clone()).collect();
         v.sort();
         v
+    }
+
+    /// History usernames in list order — the order oracle.
+    fn hist_order(e: &Entry) -> Vec<&str> {
+        e.history.iter().map(|h| h.username.as_str()).collect()
+    }
+
+    fn with_atts(mut e: Entry, atts: &[(&str, u32)]) -> Entry {
+        e.attachments = atts
+            .iter()
+            .map(|(name, ref_id)| keepass_core::model::Attachment::new(*name, *ref_id))
+            .collect();
+        e
+    }
+
+    #[test]
+    fn fold_orders_a_peer_snapshot_before_the_peer_current_it_led_to() {
+        // All in one second. The peer added attachment `b` (P), then merged
+        // that with our `a` into M, which is its current. We hold M as
+        // history and have edited on to L2. P is an ancestor of M, so it
+        // must land before M — though M is the peer's current, not one of
+        // its snapshots. The two pools index the same bytes differently, so
+        // the peer's records only match ours by their bytes.
+        let base_pool_init = vec![
+            Binary::new(b"a-1".to_vec(), false),
+            Binary::new(b"b-1".to_vec(), false),
+        ];
+        let peer_pool = vec![
+            Binary::new(b"b-1".to_vec(), false),
+            Binary::new(b"a-1".to_vec(), false),
+        ];
+        let mut ours = with_atts(snap("l2", 1), &[("a", 0)]);
+        ours.history = vec![
+            snap("base", 1),
+            with_atts(snap("m", 1), &[("a", 0), ("b", 1)]),
+        ];
+        let mut peer = with_atts(snap("m", 1), &[("a", 1), ("b", 0)]);
+        peer.history = vec![snap("base", 1), with_atts(snap("p", 1), &[("b", 0)])];
+
+        let mut base_pool = base_pool_init.clone();
+        let changed = fold_entry_history(&mut ours, &peer, &mut base_pool, &peer_pool).unwrap();
+        assert!(changed);
+        assert_eq!(hist_order(&ours), ["base", "p", "m"]);
+        // The peer's current orders the merge but is not imported: the pool
+        // only gains what the folded-in history references (nothing new here).
+        assert_eq!(base_pool, base_pool_init);
+    }
+
+    #[test]
+    fn fold_reports_a_reorder_as_a_change() {
+        // The same two same-second records, in opposite orders on the two
+        // replicas (as an older local-first fold left them). Nothing orders
+        // the pair, so each fold settles on the one side-independent order;
+        // the replica whose order moved must report it, or its caller never
+        // persists the order and the two replicas rank the pair differently.
+        let replica = |history: Vec<Entry>| {
+            let mut e = snap("live", 9);
+            e.history = history;
+            e
+        };
+        let mut a = replica(vec![snap("x", 1), snap("y", 1)]);
+        let mut b = replica(vec![snap("y", 1), snap("x", 1)]);
+        let (a_before, b_before) = (a.clone(), b.clone());
+        let mut pool: Vec<Binary> = Vec::new();
+        let a_changed = fold_entry_history(&mut a, &b_before, &mut pool, &[]).unwrap();
+        let b_changed = fold_entry_history(&mut b, &a_before, &mut pool, &[]).unwrap();
+        assert_eq!(
+            hist_order(&a),
+            hist_order(&b),
+            "both replicas settle on one order"
+        );
+        assert!(
+            a_changed != b_changed,
+            "exactly the replica whose order moved reports it"
+        );
+        let (a_now, b_now) = (a.clone(), b.clone());
+        assert!(!fold_entry_history(&mut a, &b_now, &mut pool, &[]).unwrap());
+        assert!(!fold_entry_history(&mut b, &a_now, &mut pool, &[]).unwrap());
     }
 
     #[test]

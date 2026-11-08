@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::binary_pool::BinaryPoolRemap;
 use crate::entry_merge::{AttachmentAutoResolution, Side};
 use crate::hash::{entry_content_hash, sha256};
-use crate::history_merge::merge_histories;
+use crate::history_merge::{Lineage, merge_histories};
 use crate::time::{
     advance_only_max, conservative_edit_wins, later_wins, second_resolution, strictly_after,
 };
@@ -391,8 +391,16 @@ pub(super) fn build_merged_entry(
     let unioned_ts = union_history_tombstones(&local_ts, &remote_ts);
     let ts_set = tombstone_set(&unioned_ts);
     let mut combined = merge_histories(
-        &local.history,
-        &rebound_remote_history,
+        Lineage {
+            history: &local.history,
+            current: local,
+            current_binaries: local_binaries,
+        },
+        Lineage {
+            history: &rebound_remote_history,
+            current: remote,
+            current_binaries: remap.remote_binaries(),
+        },
         local_binaries,
         &ts_set,
     );
