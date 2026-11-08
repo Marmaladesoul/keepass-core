@@ -50,7 +50,7 @@
 
 use keepass_core::model::{Binary, Entry};
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConstantTimeEq, ConstantTimeGreater};
 
 use crate::field_access::{STANDARD_FIELDS, standard_value};
 
@@ -164,9 +164,22 @@ pub(crate) fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Constant-time lexicographic `a < b` of two SHA-256 digests — the
+/// ordering twin of [`ct_eq`], for a deterministic tie-break on content
+/// hashes. Visits every byte whatever the inputs.
+pub(crate) fn ct_lt(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut lt = Choice::from(0);
+    let mut decided = Choice::from(0);
+    for (x, y) in a.iter().zip(b) {
+        lt |= !decided & y.ct_gt(x);
+        decided |= !x.ct_eq(y);
+    }
+    lt.into()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ct_eq, entry_content_hash};
+    use super::{ct_eq, ct_lt, entry_content_hash};
     use keepass_core::model::{Attachment, Binary, CustomField, Entry, EntryId};
     use uuid::Uuid;
 
@@ -351,5 +364,23 @@ mod tests {
         b.auto_type.enabled = !a.auto_type.enabled;
         let bins = no_binaries();
         assert_eq!(entry_content_hash(&a, &bins), entry_content_hash(&b, &bins),);
+    }
+
+    #[test]
+    fn ct_lt_matches_lexicographic_order() {
+        let mut lo = [7u8; 32];
+        let mut hi = [7u8; 32];
+        lo[31] = 1;
+        hi[31] = 2;
+        assert!(ct_lt(&lo, &hi));
+        assert!(!ct_lt(&hi, &lo));
+        assert!(!ct_lt(&lo, &lo));
+        // The first differing byte decides, whatever follows it.
+        let mut first = [0u8; 32];
+        let mut second = [255u8; 32];
+        first[0] = 2;
+        second[0] = 1;
+        assert!(ct_lt(&second, &first));
+        assert!(!ct_lt(&first, &second));
     }
 }
