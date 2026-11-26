@@ -86,12 +86,14 @@ pub struct Meta {
     /// clients as the vault-level colour swatch. Empty when the
     /// vault uses the client's default colour.
     pub color: String,
-    /// `<HeaderHash>` — SHA-256 of the outer header, written into
-    /// KDBX3 inner XML as a belt-and-braces integrity check. KDBX4
-    /// moves this to the binary header (`verify_header_hash`) and
-    /// doesn't emit the XML element. Preserved verbatim as the
-    /// base64-encoded string for lossless round-trip — we don't
-    /// re-verify it here.
+    /// `<HeaderHash>` — base64 SHA-256 of the outer header, written by
+    /// KDBX 3.1 writers into the inner XML so the otherwise
+    /// unauthenticated KDBX3 header can be checked. KDBX4 moves this to
+    /// the binary header and doesn't emit the XML element. On a KDBX3
+    /// unlock the value, when present, has already been checked against
+    /// the header (see `Kdbx::unlock`), before any protected value was
+    /// decrypted; this field keeps the stored string as read. A KDBX3
+    /// save writes a fresh hash of the new header in its place.
     pub header_hash: String,
     /// Unknown XML children on `<Meta>` preserved verbatim for
     /// round-trip — see [`super::Entry::unknown_xml`] for the full semantics.
