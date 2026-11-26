@@ -12,8 +12,8 @@ need manual review, and what to do when something fires red.
 
 ## What CI enforces
 
-Every pull request runs three supply-chain checks alongside the usual
-build / test / lint matrix. All three live in
+Every pull request runs four supply-chain checks alongside the usual
+build / test / lint matrix. All four live in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
 - **`cargo audit`** — cross-references `Cargo.lock` against the
@@ -36,11 +36,47 @@ build / test / lint matrix. All three live in
     answer if we ever need TLS.
   - **Wildcards** are denied; **duplicate versions** warn.
 
+- **`cargo vet`** — every crate version in `Cargo.lock` must carry a
+  recorded review (config in [`supply-chain/`](supply-chain/)): one of
+  ours in `audits.toml`, one imported from the published audits of
+  Mozilla, Google, the Bytecode Alliance, ISRG, Zcash or Embark (pinned
+  in `imports.lock`), or an exemption for a crate that was already a
+  dependency when vetting began. A new crate, or a new version of one,
+  with none of those fails CI. See *Reviewing an update* below.
+
 - **`cargo fmt` / `cargo clippy --all-targets -- -D warnings`** —
   baseline hygiene. Not supply-chain per se but bundled into the
   same pre-merge gate.
 
 A CI red is **blocking** — we don't merge PRs that fail any of these.
+
+## Reviewing an update
+
+`cargo audit` catches *known* vulnerabilities. The attack it can't catch
+is a fresh release that is itself malicious, from a compromised
+maintainer account or release pipeline; such releases are usually found
+and yanked within days, and the malicious code is often in the published
+package but not in the project's git history. So every update is
+reviewed as follows, unless an imported audit already covers the new
+version (then `cargo vet` passes on its own and there is nothing of ours
+to record):
+
+1. **Wait.** Don't adopt a release in its first two weeks unless it fixes
+   an advisory that affects us.
+2. **Review what will compile.** Diff the old and new *published*
+   packages (`cargo vet diff <crate> <old> <new>`), not the commit log.
+   Look for: new or changed `build.rs` and proc-macros; new `unsafe`,
+   `asm!` or FFI; network, process, filesystem or environment access the
+   crate didn't have; encoded blobs, binaries or obfuscated code; new
+   dependencies; a published package that doesn't match its git tag; a
+   change of crates.io owners.
+3. **Record it.** `cargo vet certify <crate> <old> <new>` with
+   `safe-to-deploy` (shipped code) or `safe-to-run` (build and test
+   only). The record lives in `supply-chain/audits.toml`, so the review
+   is done once and CI can tell it was done.
+
+Never add an exemption for a new crate or version: exemptions are only
+the starting point recorded when vetting began.
 
 ## Dependabot triage tiers
 
@@ -64,7 +100,8 @@ integrity for every vault we open.
 
 **Process — do not auto-merge.** Per release:
 
-1. Read each crate's published release notes.
+1. Read each crate's published release notes, and review the
+   published diff as in *Reviewing an update*.
 2. Cross-check the new version against the [RustSec advisory
    database](https://rustsec.org/) for any post-release advisories.
 3. Walk our consuming code for behavioural reliance (e.g. relying on
@@ -94,13 +131,13 @@ be treated as routine.
 Everything else — patch versions of unrelated deps (`thiserror`,
 `uuid`, `serde_json`, `chrono`, etc.).
 
-CI-green Dependabot PRs in this tier can be merged after a glance at
-the diff. No release-notes-reading discipline required, beyond a
-sanity check that the diff is what Dependabot's title claims.
+CI-green Dependabot PRs in this tier can be merged once the published
+diff has been reviewed and certified, or an imported audit covers it
+(*Reviewing an update*). No release-notes reading required.
 
 ## When CI fires red
 
-The three CI checks above pre-empt most incidents, but real ones do
+The CI checks above pre-empt most incidents, but real ones do
 happen. Response depends on what triggered:
 
 - **`cargo audit` reports a CVE.** Upgrade the affected crate
@@ -123,6 +160,10 @@ happen. Response depends on what triggered:
   downstream consumer of `keepass-core` and undermine the dual
   MIT-or-Apache redistribution story.
 
+- **`cargo vet` fails.** A crate version in the lockfile has no
+  recorded review. Review it as in *Reviewing an update* and certify
+  it; if the review finds a problem, don't take the update.
+
 - **Banned crate appears transitively.** Trace the dep graph
   (`cargo tree -i openssl-sys` etc.), identify the parent that
   pulled it in, and either swap the parent, upstream a
@@ -133,14 +174,6 @@ happen. Response depends on what triggered:
 
 Not currently in place; recorded here so the next contributor knows
 where the policy ends:
-
-- **`cargo-vet`** — per-version audit attestations, importable from
-  Mozilla / Google / Embark / Zcash / ISRG trust roots. Would shift
-  us from "we read the release notes" to "we (or a trusted third
-  party) have read the code." Bootstrap is ~1 day; ongoing cost is
-  the delta-audit per Dependabot PR. Decided against today on
-  effort-vs-value grounds for a single-consumer library, but it is
-  the natural next step if the audit footprint grows.
 
 - **Reproducible builds** — out of scope for the library itself;
   belongs in the downstream binary build. Out of scope here for
