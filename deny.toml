@@ -26,7 +26,14 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # versions also fail — if a release was yanked from crates.io there's
 # usually a security reason and we shouldn't be depending on it.
 yanked = "deny"
-ignore = []
+ignore = [
+    # chrono unmaintained, no safe upgrade (all versions affected). An
+    # end-of-life notice, not a vulnerability. chrono is the date type
+    # across the KDBX model in both crates, so replacing it (jiff or time)
+    # is a migration of its own, not a lockfile bump. Drop once neither
+    # crate depends on chrono.
+    "RUSTSEC-2026-0543",
+]
 
 # ---------------------------------------------------------------------------
 # Licenses — MIT / Apache-2.0 / BSD family only

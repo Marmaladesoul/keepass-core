@@ -12,6 +12,11 @@ on:
   # Allow manual dispatch from the Actions tab.
   workflow_dispatch:
 
+# Read-only by default: no job here writes to the repository. A job that
+# needs more says so itself.
+permissions:
+  contents: read
+
 # Cancel in-progress runs for the same branch/PR when a new push arrives.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -88,6 +93,10 @@ jobs:
     # Checks Cargo.lock against the RustSec Advisory Database for known
     # CVEs in any transitive dependency. Fast (~5 s) and a no-brainer for
     # a crypto / password-handling library.
+    # audit-check reports its result as a check run.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2.0.0

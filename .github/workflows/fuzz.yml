@@ -22,6 +22,11 @@ on:
         required: false
         default: "300"
 
+# Read-only: fuzzing reads the code and uploads crash artifacts, which go
+# through the Actions artifact service, not the repository token.
+permissions:
+  contents: read
+
 concurrency:
   group: fuzz-${{ github.ref }}
   cancel-in-progress: true
