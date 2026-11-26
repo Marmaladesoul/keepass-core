@@ -409,12 +409,14 @@ impl Kdbx<HeaderRead> {
     /// On KDBX3, every failure from the outer decrypt through
     /// hashed-block-stream verification — padding, the stream-start
     /// sentinel, and a malformed, truncated or hash-mismatched block
-    /// stream — is reported as [`CryptoError::Decrypt`]. KDBX3 carries
-    /// no keyed MAC, so it cannot tell a damaged payload from a wrong
-    /// key without creating an oracle: a distinct variant would reveal
-    /// whether a doctored ciphertext decrypted to valid padding. Only
-    /// once the block stream's per-block SHA-256 has verified do later
-    /// failures (decompression, XML) keep their own variants.
+    /// stream, or one with bytes after its terminator (the stream must
+    /// end exactly there) — is reported as [`CryptoError::Decrypt`].
+    /// KDBX3 carries no keyed MAC, so it cannot tell a damaged payload
+    /// from a wrong key without creating an oracle: a distinct variant
+    /// would reveal whether a doctored ciphertext decrypted to valid
+    /// padding. Only once the block stream's per-block SHA-256 has
+    /// verified do later failures (decompression, XML) keep their own
+    /// variants.
     ///
     /// # Threat-model note: KDBX3 outer headers are unauthenticated
     ///

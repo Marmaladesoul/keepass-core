@@ -26,9 +26,10 @@
 //! * **KDBX3 outer header byte flip** — CBC decrypt of a tampered
 //!   header yields a wrong cipher key (the master seed is in the
 //!   header), so decryption fails.
-//! * **KDBX3 payload byte flip, padding sweep and truncation** — under
-//!   the correct key, padding, the stream-start-bytes sentinel or the
-//!   hashed-block stream catches it. All three surface as
+//! * **KDBX3 payload byte flip, padding sweep, truncation and appended
+//!   blocks** — under the correct key, padding, the stream-start-bytes
+//!   sentinel or the hashed-block stream (which must end exactly at its
+//!   terminator) catches it. All of them surface as
 //!   `CryptoError::Decrypt`: KDBX3 has no keyed MAC, so a distinct
 //!   variant before the block stream verifies would be a padding oracle.
 //!
@@ -493,21 +494,47 @@ fn kdbx3_padding_sweep_under_correct_key_is_always_decrypt() {
     let pos = bytes.len() - AES_BLOCK_LEN - 1;
     let original = bytes[pos];
     let values: Vec<u8> = (0..=u8::MAX).filter(|&v| v != original).collect();
+    assert_byte_sweep_is_always_decrypt(&bytes, pos, &values, "kdbx3 padding sweep");
+}
 
+/// Append two cipher blocks after the real payload and sweep every
+/// value of the last byte of the first appended block, which sets the
+/// final plaintext byte (the PKCS7 pad length) of the new last block.
+/// The real hashed-block stream still ends at its terminator inside the
+/// original ciphertext, so only the appended plaintext follows it. The
+/// stream must end exactly at its terminator: whether the appended
+/// blocks happen to decrypt to valid padding must not decide whether
+/// the file opens, so under the correct key every value is `Decrypt`.
+#[test]
+fn kdbx3_appended_blocks_sweep_under_correct_key_is_always_decrypt() {
+    let mut bytes = kdbx3_aes_cbc_fixture();
+    assert_baseline_unlocks(&bytes);
+
+    bytes.extend_from_slice(&[0u8; 2 * AES_BLOCK_LEN]);
+    let pos = bytes.len() - AES_BLOCK_LEN - 1;
+    let values: Vec<u8> = (0..=u8::MAX).collect();
+    assert_byte_sweep_is_always_decrypt(&bytes, pos, &values, "kdbx3 appended-blocks sweep");
+}
+
+/// Set `bytes[pos]` to each of `values` in turn and assert every
+/// resulting file fails to unlock under the correct key with
+/// `CryptoError::Decrypt`, indistinguishable from a wrong key.
+fn assert_byte_sweep_is_always_decrypt(bytes: &[u8], pos: usize, values: &[u8], context: &str) {
     // Each unlock pays the fixture's full KDF, so spread the sweep over
-    // the available cores rather than running 255 KDFs back to back.
+    // the available cores rather than running one KDF per value back to
+    // back.
     let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     std::thread::scope(|scope| {
         for chunk in values.chunks(values.len().div_ceil(workers)) {
-            let bytes = &bytes;
             scope.spawn(move || {
                 for &value in chunk {
-                    let mut tampered = bytes.clone();
+                    let mut tampered = bytes.to_vec();
                     tampered[pos] = value;
-                    let err = unlock_must_fail(tampered, "kdbx3 padding sweep");
+                    let case = format!("{context} byte {value:#04x}");
+                    let err = unlock_must_fail(tampered, &case);
                     assert!(
                         matches!(err, Error::Crypto(CryptoError::Decrypt)),
-                        "kdbx3 padding sweep byte {value:#04x}: expected CryptoError::Decrypt, got {err:?}"
+                        "{case}: expected CryptoError::Decrypt, got {err:?}"
                     );
                 }
             });
