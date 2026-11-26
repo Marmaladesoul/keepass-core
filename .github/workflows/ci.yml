@@ -121,3 +121,24 @@ jobs:
           # both fail on the same advisory gives belt-and-braces. The
           # interesting additions are `bans` and `sources`.
           arguments: --all-features
+
+  vet:
+    name: cargo vet
+    runs-on: ubuntu-latest
+    # Every crate version in Cargo.lock must carry a recorded review: our
+    # own (supply-chain/audits.toml), an imported one from a trusted
+    # organisation's published audits (supply-chain/imports.lock), or an
+    # exemption for a crate already here before vetting began
+    # (supply-chain/config.toml). A new crate or version with none of those
+    # fails, so no dependency change merges unreviewed. See SUPPLY_CHAIN.md.
+    env:
+      CARGO_VET_VERSION: "0.10.3"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-vet --version "$CARGO_VET_VERSION" --locked
+      # --locked: use the imports already recorded in imports.lock, so a
+      # change in someone else's published audits can't pass or fail a
+      # build without a commit here.
+      - run: cargo vet --locked
