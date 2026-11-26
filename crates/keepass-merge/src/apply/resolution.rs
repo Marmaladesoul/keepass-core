@@ -514,10 +514,10 @@ pub(super) fn build_resolved_entry(
     // (validation allows it to be Local-equivalent) defaults to the
     // local UUID already in place. Only flip when the caller picked
     // remote.
-    if conflict.icon_delta.is_some() {
-        if let Some(ConflictSide::Remote) = icon_choice {
-            merged.custom_icon_uuid = conflict.remote.custom_icon_uuid;
-        }
+    if conflict.icon_delta.is_some()
+        && let Some(ConflictSide::Remote) = icon_choice
+    {
+        merged.custom_icon_uuid = conflict.remote.custom_icon_uuid;
     }
 
     // Apply attachment auto-resolutions per-name. The entry-level

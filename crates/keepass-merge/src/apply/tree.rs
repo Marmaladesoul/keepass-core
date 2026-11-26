@@ -467,14 +467,14 @@ pub(super) fn build_merged_entry(
     // along with whichever side won the entry-level merge per spec
     // rule 4). `custom_icons` pool reconciliation is the FFI / write-
     // back layer's responsibility — out of scope for v0.1 merge.
-    if let Some(side) = icon_resolution {
-        if side != winner_side {
-            let source = match side {
-                Side::Local => local,
-                Side::Remote => remote,
-            };
-            merged.custom_icon_uuid = source.custom_icon_uuid;
-        }
+    if let Some(side) = icon_resolution
+        && side != winner_side
+    {
+        let source = match side {
+            Side::Local => local,
+            Side::Remote => remote,
+        };
+        merged.custom_icon_uuid = source.custom_icon_uuid;
     }
     // Apply per-attachment auto-resolutions on top of the entry-level
     // winner's clone, overriding the ride-along behaviour for the names

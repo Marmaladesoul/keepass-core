@@ -47,14 +47,13 @@ pub(crate) fn recycle_entry(
 
     // Already inside the bin? Walk ancestors from the parent
     // group up to root; any ancestor == bin → no-op.
-    if let Some(bin_id) = vault.meta.recycle_bin_uuid {
-        if vault
+    if let Some(bin_id) = vault.meta.recycle_bin_uuid
+        && vault
             .root
             .group(bin_id)
             .is_some_and(|bin| bin.group(parent).is_some())
-        {
-            return Ok(None);
-        }
+    {
+        return Ok(None);
     }
 
     let bin_id = find_or_create_recycle_bin(vault, clock)?;
@@ -139,14 +138,14 @@ pub(crate) fn find_or_create_recycle_bin(
     vault: &mut Vault,
     clock: &dyn Clock,
 ) -> Result<GroupId, ModelError> {
-    if let Some(bin_id) = vault.meta.recycle_bin_uuid {
-        if vault.root.group(bin_id).is_some() {
-            return Ok(bin_id);
-        }
-        // Dangling — fall through and mint a fresh bin. The
-        // stale `recycle_bin_uuid` is about to be overwritten
-        // below.
+    if let Some(bin_id) = vault.meta.recycle_bin_uuid
+        && vault.root.group(bin_id).is_some()
+    {
+        return Ok(bin_id);
     }
+    // Dangling — fall through and mint a fresh bin. The
+    // stale `recycle_bin_uuid` is about to be overwritten
+    // below.
     let root = vault.root.id;
     let bin_id = add_group(
         vault,

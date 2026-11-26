@@ -137,22 +137,22 @@ pub(crate) fn gc_custom_icons_pool(vault: &mut Vault) {
     // reference.
     let pool: HashSet<uuid::Uuid> = vault.meta.custom_icons.iter().map(|c| c.uuid).collect();
     vault.for_each_group_mut(&mut |g| {
-        if let Some(u) = g.custom_icon_uuid {
-            if !pool.contains(&u) {
-                g.custom_icon_uuid = None;
-            }
+        if let Some(u) = g.custom_icon_uuid
+            && !pool.contains(&u)
+        {
+            g.custom_icon_uuid = None;
         }
         for e in &mut g.entries {
-            if let Some(u) = e.custom_icon_uuid {
-                if !pool.contains(&u) {
-                    e.custom_icon_uuid = None;
-                }
+            if let Some(u) = e.custom_icon_uuid
+                && !pool.contains(&u)
+            {
+                e.custom_icon_uuid = None;
             }
             for snap in &mut e.history {
-                if let Some(u) = snap.custom_icon_uuid {
-                    if !pool.contains(&u) {
-                        snap.custom_icon_uuid = None;
-                    }
+                if let Some(u) = snap.custom_icon_uuid
+                    && !pool.contains(&u)
+                {
+                    snap.custom_icon_uuid = None;
                 }
             }
         }

@@ -53,20 +53,20 @@ fn check_entry_against_sidecar(
     expected: &Value,
     vault: &Vault,
 ) -> Result<(), String> {
-    if let Some(Value::String(u)) = expected.get("username") {
-        if &actual.username != u {
-            return Err(format!("username {:?} ≠ expected {u:?}", actual.username));
-        }
+    if let Some(Value::String(u)) = expected.get("username")
+        && &actual.username != u
+    {
+        return Err(format!("username {:?} ≠ expected {u:?}", actual.username));
     }
-    if let Some(Value::String(url)) = expected.get("url") {
-        if &actual.url != url {
-            return Err(format!("url {:?} ≠ expected {url:?}", actual.url));
-        }
+    if let Some(Value::String(url)) = expected.get("url")
+        && &actual.url != url
+    {
+        return Err(format!("url {:?} ≠ expected {url:?}", actual.url));
     }
-    if let Some(Value::String(notes)) = expected.get("notes") {
-        if &actual.notes != notes {
-            return Err(format!("notes {:?} ≠ expected {notes:?}", actual.notes));
-        }
+    if let Some(Value::String(notes)) = expected.get("notes")
+        && &actual.notes != notes
+    {
+        return Err(format!("notes {:?} ≠ expected {notes:?}", actual.notes));
     }
     if let Some(Value::Array(tags)) = expected.get("tags") {
         let mut expected_tags: Vec<String> = tags
@@ -80,44 +80,44 @@ fn check_entry_against_sidecar(
             return Err(format!("tags {got_tags:?} ≠ expected {expected_tags:?}"));
         }
     }
-    if let Some(Value::Number(n)) = expected.get("password_length") {
-        if let Some(expected_len) = n.as_u64() {
-            let got_len = actual.password.chars().count() as u64;
-            if got_len != expected_len {
-                return Err(format!(
-                    "password length {got_len} ≠ expected {expected_len}"
-                ));
-            }
+    if let Some(Value::Number(n)) = expected.get("password_length")
+        && let Some(expected_len) = n.as_u64()
+    {
+        let got_len = actual.password.chars().count() as u64;
+        if got_len != expected_len {
+            return Err(format!(
+                "password length {got_len} ≠ expected {expected_len}"
+            ));
         }
     }
-    if let Some(Value::Number(n)) = expected.get("custom_field_count") {
-        if let Some(expected_count) = n.as_u64() {
-            let got_count = actual.custom_fields.len() as u64;
-            if got_count != expected_count {
-                return Err(format!(
-                    "custom_field_count {got_count} ≠ expected {expected_count}"
-                ));
-            }
+    if let Some(Value::Number(n)) = expected.get("custom_field_count")
+        && let Some(expected_count) = n.as_u64()
+    {
+        let got_count = actual.custom_fields.len() as u64;
+        if got_count != expected_count {
+            return Err(format!(
+                "custom_field_count {got_count} ≠ expected {expected_count}"
+            ));
         }
     }
-    if let Some(Value::Number(n)) = expected.get("history_count") {
-        if let Some(expected_count) = n.as_u64() {
-            let got_count = actual.history.len() as u64;
-            if got_count != expected_count {
-                return Err(format!(
-                    "history_count {got_count} ≠ expected {expected_count}"
-                ));
-            }
+    if let Some(Value::Number(n)) = expected.get("history_count")
+        && let Some(expected_count) = n.as_u64()
+    {
+        let got_count = actual.history.len() as u64;
+        if got_count != expected_count {
+            return Err(format!(
+                "history_count {got_count} ≠ expected {expected_count}"
+            ));
         }
     }
-    if let Some(Value::Number(n)) = expected.get("attachment_count") {
-        if let Some(expected_count) = n.as_u64() {
-            let got_count = actual.attachments.len() as u64;
-            if got_count != expected_count {
-                return Err(format!(
-                    "attachment_count {got_count} ≠ expected {expected_count}"
-                ));
-            }
+    if let Some(Value::Number(n)) = expected.get("attachment_count")
+        && let Some(expected_count) = n.as_u64()
+    {
+        let got_count = actual.attachments.len() as u64;
+        if got_count != expected_count {
+            return Err(format!(
+                "attachment_count {got_count} ≠ expected {expected_count}"
+            ));
         }
     }
     if let Some(Value::Array(atts)) = expected.get("attachments") {
@@ -225,23 +225,23 @@ fn unlock_one(path: &Path) -> Result<(), String> {
     let vault = unlocked.vault();
 
     // Total-entry count.
-    if let Some(expected) = sidecar.get("entry_count").and_then(Value::as_u64) {
-        if vault.total_entries() as u64 != expected {
-            return Err(format!(
-                "entry_count {} ≠ expected {expected}",
-                vault.total_entries()
-            ));
-        }
+    if let Some(expected) = sidecar.get("entry_count").and_then(Value::as_u64)
+        && vault.total_entries() as u64 != expected
+    {
+        return Err(format!(
+            "entry_count {} ≠ expected {expected}",
+            vault.total_entries()
+        ));
     }
 
     // Generator.
-    if let Some(expected) = sidecar.get("generator").and_then(Value::as_str) {
-        if vault.meta.generator != expected {
-            return Err(format!(
-                "generator {:?} ≠ expected {expected:?}",
-                vault.meta.generator
-            ));
-        }
+    if let Some(expected) = sidecar.get("generator").and_then(Value::as_str)
+        && vault.meta.generator != expected
+    {
+        return Err(format!(
+            "generator {:?} ≠ expected {expected:?}",
+            vault.meta.generator
+        ));
     }
 
     // Recycle bin flag.
