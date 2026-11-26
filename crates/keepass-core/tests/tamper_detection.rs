@@ -25,11 +25,12 @@
 //!   block-stage integrity, never silently parse.
 //! * **KDBX3 outer header byte flip** — CBC decrypt of a tampered
 //!   header yields a wrong cipher key (the master seed is in the
-//!   header), so decryption fails. Surfaces as `CryptoError::Decrypt`.
-//! * **KDBX3 payload byte flip** — CBC IV pollution makes the next
-//!   block unreliable, but the stream-start-bytes sentinel or PKCS7
-//!   padding catches it. Surfaces as `CryptoError::Decrypt` or
-//!   `FormatError::MalformedHeader`.
+//!   header), so decryption fails.
+//! * **KDBX3 payload byte flip, padding sweep and truncation** — under
+//!   the correct key, padding, the stream-start-bytes sentinel or the
+//!   hashed-block stream catches it. All three surface as
+//!   `CryptoError::Decrypt`: KDBX3 has no keyed MAC, so a distinct
+//!   variant before the block stream verifies would be a padding oracle.
 //!
 //! The "what variant exactly" axis is deliberately a loose assertion
 //! (one of a small whitelist) because the threat model only requires
@@ -41,7 +42,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use keepass_core::crypto::CryptoError;
-use keepass_core::format::FormatError;
+use keepass_core::format::{FormatError, KnownCipher};
 use keepass_core::kdbx::{Kdbx, Sealed};
 use keepass_core::{CompositeKey, Error};
 
@@ -384,9 +385,8 @@ fn kdbx4_truncation_fails_integrity() {
 /// Flip one byte inside the KDBX3 outer header. KDBX3 has no
 /// per-header HMAC — the tamper is caught indirectly because the
 /// master seed lives in the header, so the derived cipher key
-/// becomes wrong and CBC decryption produces garbage. The garbage
-/// either fails PKCS7 padding (`CryptoError::Decrypt`) or fails the
-/// stream-start-bytes sentinel (`FormatError::MalformedHeader`).
+/// becomes wrong and CBC decryption produces garbage, which fails
+/// PKCS7 padding or the stream-start-bytes sentinel.
 #[test]
 fn kdbx3_header_byte_flip_fails_integrity() {
     let bytes = fs::read(kdbx3_fixture()).expect("read fixture");
@@ -406,7 +406,8 @@ fn kdbx3_header_byte_flip_fails_integrity() {
 
 /// Flip one byte inside the KDBX3 payload. The CBC decryption garbles
 /// the surrounding block, and either the stream-start-bytes sentinel
-/// or the hashed-block stream's per-block SHA-256 catches it.
+/// or the hashed-block stream's per-block SHA-256 catches it. Either
+/// way it must look like a wrong key (see the padding-sweep section).
 #[test]
 fn kdbx3_payload_byte_flip_fails_integrity() {
     let bytes = fs::read(kdbx3_fixture()).expect("read fixture");
@@ -421,5 +422,113 @@ fn kdbx3_payload_byte_flip_fails_integrity() {
     tampered[pos] ^= 0x80;
 
     let err = unlock_must_fail(tampered, "kdbx3 payload byte flip");
-    assert_integrity_error(&err, "kdbx3 payload byte flip");
+    assert!(
+        matches!(err, Error::Crypto(CryptoError::Decrypt)),
+        "kdbx3 payload byte flip should surface CryptoError::Decrypt, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// KDBX3: no error-variant oracle before the hashed-block stream verifies
+// ---------------------------------------------------------------------------
+//
+// KDBX3 has no header HMAC and no keyed MAC over the ciphertext. Until
+// the hashed-block stream's per-block SHA-256 (computed over plaintext
+// the holder of a copy of the file cannot know) verifies, nothing
+// proves the payload is intact. Every failure up to and including that
+// check must therefore surface as `CryptoError::Decrypt` — the same as
+// a wrong key — or the error variant tells an attacker whether a
+// doctored ciphertext decrypted to valid PKCS7 padding.
+
+/// AES-256-CBC block size, in bytes.
+const AES_BLOCK_LEN: usize = 16;
+
+/// A KDBX3 fixture whose outer cipher is AES-256-CBC, so the payload
+/// after the outer header is raw CBC ciphertext with PKCS7 padding.
+fn kdbx3_aes_cbc_fixture() -> Vec<u8> {
+    let bytes =
+        fs::read(fixtures_root().join("keepassxc").join("kdbx3-basic.kdbx")).expect("read fixture");
+    let header_read = Kdbx::<Sealed>::open_from_bytes(bytes.clone())
+        .unwrap()
+        .read_header()
+        .unwrap();
+    assert_eq!(
+        header_read.header().cipher_id.well_known(),
+        Some(KnownCipher::Aes256Cbc),
+        "premise: fixture must be AES-256-CBC so its payload carries PKCS7 padding"
+    );
+    bytes
+}
+
+fn kdbx3_payload_offset(bytes: &[u8]) -> usize {
+    Kdbx::<Sealed>::open_from_bytes(bytes.to_vec())
+        .unwrap()
+        .read_header()
+        .unwrap()
+        .header_bytes()
+        .len()
+}
+
+/// Sweep every value of the last byte of the second-to-last ciphertext
+/// block. In CBC that byte XORs straight into the final plaintext
+/// byte — the PKCS7 pad length — so at least one non-original value
+/// (the one that makes it `0x01`) produces valid padding. Under the correct key every one of them
+/// must still be indistinguishable from a wrong key.
+#[test]
+fn kdbx3_padding_sweep_under_correct_key_is_always_decrypt() {
+    let bytes = kdbx3_aes_cbc_fixture();
+    assert_baseline_unlocks(&bytes);
+
+    let payload_offset = kdbx3_payload_offset(&bytes);
+    let payload_len = bytes.len() - payload_offset;
+    assert_eq!(
+        payload_len % AES_BLOCK_LEN,
+        0,
+        "premise: CBC ciphertext is a whole number of blocks"
+    );
+    assert!(
+        payload_len >= 2 * AES_BLOCK_LEN,
+        "premise: ciphertext has at least two blocks"
+    );
+    let pos = bytes.len() - AES_BLOCK_LEN - 1;
+    let original = bytes[pos];
+    let values: Vec<u8> = (0..=u8::MAX).filter(|&v| v != original).collect();
+
+    // Each unlock pays the fixture's full KDF, so spread the sweep over
+    // the available cores rather than running 255 KDFs back to back.
+    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    std::thread::scope(|scope| {
+        for chunk in values.chunks(values.len().div_ceil(workers)) {
+            let bytes = &bytes;
+            scope.spawn(move || {
+                for &value in chunk {
+                    let mut tampered = bytes.clone();
+                    tampered[pos] = value;
+                    let err = unlock_must_fail(tampered, "kdbx3 padding sweep");
+                    assert!(
+                        matches!(err, Error::Crypto(CryptoError::Decrypt)),
+                        "kdbx3 padding sweep byte {value:#04x}: expected CryptoError::Decrypt, got {err:?}"
+                    );
+                }
+            });
+        }
+    });
+}
+
+/// Cut a whole cipher block off the end. The remaining ciphertext is
+/// still block-aligned, so the failure is decided by padding or the
+/// hashed-block stream; either way it must look like a wrong key.
+#[test]
+fn kdbx3_whole_block_truncation_under_correct_key_is_decrypt() {
+    let bytes = kdbx3_aes_cbc_fixture();
+    assert_baseline_unlocks(&bytes);
+
+    let mut tampered = bytes.clone();
+    tampered.truncate(bytes.len() - AES_BLOCK_LEN);
+
+    let err = unlock_must_fail(tampered, "kdbx3 whole-block truncation");
+    assert!(
+        matches!(err, Error::Crypto(CryptoError::Decrypt)),
+        "kdbx3 whole-block truncation should surface CryptoError::Decrypt, got {err:?}"
+    );
 }

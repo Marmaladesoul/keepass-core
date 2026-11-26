@@ -389,7 +389,7 @@ impl Kdbx<HeaderRead> {
     /// Returns [`Error::Crypto`] on any key-stage failure (wrong
     /// password, tampered payload, KDBX4 header-HMAC mismatch, bad
     /// padding, inner-stream cipher construction failure). Returns
-    /// [`Error::Format`] on structural failures (malformed block stream,
+    /// [`Error::Format`] on structural failures (malformed KDBX4 block stream,
     /// malformed inner header, unsupported cipher), and with
     /// [`FormatError::HeaderHashMismatch`] when a KDBX4 outer header does
     /// not match its stored SHA-256. Returns [`Error::Xml`] on malformed
@@ -405,6 +405,16 @@ impl Kdbx<HeaderRead> {
     /// naming it reveals nothing about the key, and it tells callers
     /// the file is damaged rather than the credential wrong. The keyed
     /// header HMAC stays collapsed into [`CryptoError::Decrypt`].
+    ///
+    /// On KDBX3, every failure from the outer decrypt through
+    /// hashed-block-stream verification — padding, the stream-start
+    /// sentinel, and a malformed, truncated or hash-mismatched block
+    /// stream — is reported as [`CryptoError::Decrypt`]. KDBX3 carries
+    /// no keyed MAC, so it cannot tell a damaged payload from a wrong
+    /// key without creating an oracle: a distinct variant would reveal
+    /// whether a doctored ciphertext decrypted to valid padding. Only
+    /// once the block stream's per-block SHA-256 has verified do later
+    /// failures (decompression, XML) keep their own variants.
     ///
     /// # Threat-model note: KDBX3 outer headers are unauthenticated
     ///
@@ -2106,7 +2116,19 @@ fn do_unlock(
                 if got_sentinel.ct_eq(&stream_start_bytes.0).unwrap_u8() == 0 {
                     return Err(CryptoError::Decrypt.into());
                 }
-                let framed = read_hashed_block_stream(rest).map_err(FormatError::from)?;
+                // KDBX3 has no keyed MAC: until the hashed-block stream's
+                // per-block SHA-256 verifies (over plaintext a holder of a
+                // copy of the file cannot know), nothing proves the payload
+                // is intact. A distinct error here would tell an attacker
+                // that a doctored ciphertext decrypted to valid PKCS7
+                // padding — a CBC padding oracle that recovers the payload
+                // without the key. So every failure up to this point
+                // collapses into `Decrypt`, the same as a wrong key. (The
+                // guarantee is about the error variant, not timing: an
+                // unpad failure still returns before the sentinel and the
+                // block-stream hashes, a gap the full KDF on every unlock
+                // dwarfs.)
+                let framed = read_hashed_block_stream(rest).map_err(|_| CryptoError::Decrypt)?;
                 let decompressed = decompress(header.compression, &framed)
                     .map_err(|_| FormatError::MalformedHeader("payload failed to decompress"))?;
                 // KDBX3 quirk: the inner-stream key on disk is hashed with
