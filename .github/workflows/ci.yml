@@ -73,19 +73,17 @@ jobs:
       - run: cargo doc --workspace --no-deps --all-features
 
   msrv:
-    # No version in the name: it's a required status check, and the name
-    # must survive MSRV bumps.
+    # No version in the name, and no matrix (GitHub appends matrix values
+    # to the name): it's a required status check, so the name must survive
+    # MSRV bumps.
     name: MSRV build
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # The rust-version declared in Cargo.toml. Bump both in lockstep.
-        rust: ["1.89"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          # The rust-version declared in Cargo.toml. Bump both in lockstep.
+          toolchain: "1.89"
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
