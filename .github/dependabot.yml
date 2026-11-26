@@ -12,6 +12,11 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    # Wait two weeks before proposing a new release: a malicious or broken
+    # one is usually found and yanked within days. Security updates skip
+    # the wait. See SUPPLY_CHAIN.md.
+    cooldown:
+      default-days: 14
     groups:
       rustcrypto:
         patterns:
@@ -68,3 +73,8 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 3
+    # Wait two weeks before proposing a new release: a malicious or broken
+    # one is usually found and yanked within days. Security updates skip
+    # the wait. See SUPPLY_CHAIN.md.
+    cooldown:
+      default-days: 14
