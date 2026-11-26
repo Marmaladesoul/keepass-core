@@ -9,9 +9,14 @@
 //!
 //! Coverage:
 //!
-//! * **KDBX4 outer header byte flip** — must fail header HMAC. Surfaces
-//!   as `CryptoError::Decrypt` per the §4.8.7 error-collapse rule.
-//! * **KDBX4 header-HMAC tag byte flip** — same.
+//! * **KDBX4 outer header byte flip** — must fail the unkeyed header
+//!   SHA-256. Surfaces as `FormatError::HeaderHashMismatch` whatever
+//!   credential is supplied: the hash does not depend on the key, so
+//!   reporting it distinctly from a wrong key leaks nothing.
+//! * **KDBX4 stored header-hash byte flip** — same.
+//! * **KDBX4 header-HMAC tag byte flip** — must fail the keyed header
+//!   HMAC. Surfaces as `CryptoError::Decrypt`, collapsed with a wrong
+//!   key per the §4.8.7 error-collapse rule.
 //! * **KDBX4 payload block byte flip** — must fail per-block HMAC.
 //!   Surfaces as `FormatError::MalformedHeader("HMAC-block tag mismatch")`
 //!   (the block index is preserved internally for debugging but not
@@ -83,6 +88,11 @@ fn assert_baseline_unlocks(bytes: &[u8]) {
 /// or panic if the bytes successfully unlocked — the whole point of
 /// tampering tests is that they DON'T silently succeed.
 fn unlock_must_fail(bytes: Vec<u8>, context: &str) -> Error {
+    unlock_must_fail_with(bytes, &composite(), context)
+}
+
+/// [`unlock_must_fail`] with a caller-chosen credential.
+fn unlock_must_fail_with(bytes: Vec<u8>, key: &CompositeKey, context: &str) -> Error {
     let opened = match Kdbx::<Sealed>::open_from_bytes(bytes) {
         Ok(k) => k,
         Err(e) => return e,
@@ -91,7 +101,7 @@ fn unlock_must_fail(bytes: Vec<u8>, context: &str) -> Error {
         Ok(k) => k,
         Err(e) => return e,
     };
-    match header_read.unlock(&composite()) {
+    match header_read.unlock(key) {
         Ok(_) => panic!("{context}: tampered file silently unlocked — integrity check is broken"),
         Err(e) => e,
     }
@@ -105,6 +115,7 @@ fn is_integrity_error(err: &Error) -> bool {
         Error::Crypto(CryptoError::Decrypt | CryptoError::HmacMismatch { .. } | CryptoError::Kdf)
             | Error::Format(
                 FormatError::MalformedHeader(_)
+                    | FormatError::HeaderHashMismatch
                     | FormatError::Truncated { .. }
                     | FormatError::UnsupportedVersion { .. },
             )
@@ -126,9 +137,9 @@ fn assert_integrity_error(err: &Error, context: &str) {
 /// Flip one byte at a stable position inside the outer header
 /// (between the signature and the end-of-header sentinel). The exact
 /// position is chosen so it lands inside a TLV value rather than on
-/// a tag or length byte — the header HMAC catches either, but a TLV
+/// a tag or length byte — the header hash catches either, but a TLV
 /// length flip would also be caught by the structural decoder before
-/// we ever reach the HMAC, which is a different code path. The
+/// we ever reach the hash, which is a different code path. The
 /// position is verified by re-reading the header after the flip and
 /// asserting it still parses.
 #[test]
@@ -144,13 +155,167 @@ fn kdbx4_header_byte_flip_fails_integrity() {
     let pos = header_end * 3 / 4;
     let mut tampered = bytes.clone();
     tampered[pos] ^= 0x01;
+    Kdbx::<Sealed>::open_from_bytes(tampered.clone())
+        .unwrap()
+        .read_header()
+        .expect("tampered header still parses");
 
     let err = unlock_must_fail(tampered, "kdbx4 header byte flip");
-    assert_integrity_error(&err, "kdbx4 header byte flip");
+    assert!(
+        matches!(err, Error::Format(FormatError::HeaderHashMismatch)),
+        "kdbx4 header byte flip should surface FormatError::HeaderHashMismatch, got {err:?}"
+    );
 }
 
-/// Flip one byte inside the 32-byte header-HMAC tag (the first 32
-/// bytes immediately after the outer header). Even with an
+/// Flip one byte inside the master-seed value of the KDBX4 outer
+/// header. The header still parses (only a field value changed, not a
+/// tag or length), so the first check to fail is the unkeyed header
+/// SHA-256. Unlocking with the *correct* credential must report a
+/// damaged header, never a wrong key — and because the hash is
+/// unkeyed, a wrong credential must get exactly the same answer.
+#[test]
+fn kdbx4_header_field_flip_is_header_hash_mismatch_not_wrong_key() {
+    let bytes = fs::read(kdbx4_fixture()).expect("read fixture");
+    assert_baseline_unlocks(&bytes);
+
+    let kdbx = Kdbx::<Sealed>::open_from_bytes(bytes.clone()).unwrap();
+    let header_read = kdbx.read_header().unwrap();
+    let seed = header_read.header().master_seed.0;
+    let seed_offset = header_read
+        .header_bytes()
+        .windows(seed.len())
+        .position(|w| w == seed)
+        .expect("master seed present in header bytes");
+    let mut tampered = bytes.clone();
+    tampered[seed_offset + seed.len() / 2] ^= 0x01;
+
+    // The flip must leave the header parseable, so the failure under
+    // test is the hash check rather than the structural decoder.
+    Kdbx::<Sealed>::open_from_bytes(tampered.clone())
+        .unwrap()
+        .read_header()
+        .expect("tampered header still parses");
+
+    let err = unlock_must_fail(tampered.clone(), "kdbx4 master-seed flip");
+    assert!(
+        !matches!(err, Error::Crypto(CryptoError::Decrypt)),
+        "kdbx4 master-seed flip with the correct key must not look like a wrong key, got {err:?}"
+    );
+    assert!(
+        matches!(err, Error::Format(FormatError::HeaderHashMismatch)),
+        "kdbx4 master-seed flip should surface FormatError::HeaderHashMismatch, got {err:?}"
+    );
+
+    let wrong = CompositeKey::from_password(b"definitely not the fixture password");
+    let err = unlock_must_fail_with(tampered, &wrong, "kdbx4 master-seed flip, wrong key");
+    assert!(
+        matches!(err, Error::Format(FormatError::HeaderHashMismatch)),
+        "header-hash verdict must not depend on the credential, got {err:?}"
+    );
+}
+
+/// Flip one byte inside the stored 32-byte header SHA-256 (the bytes
+/// immediately after the outer header). The header itself is intact,
+/// but it no longer matches its stored hash: same verdict as a damaged
+/// header.
+#[test]
+fn kdbx4_stored_header_hash_flip_is_header_hash_mismatch() {
+    let bytes = fs::read(kdbx4_fixture()).expect("read fixture");
+    assert_baseline_unlocks(&bytes);
+
+    let kdbx = Kdbx::<Sealed>::open_from_bytes(bytes.clone()).unwrap();
+    let header_end = kdbx.read_header().unwrap().header_bytes().len();
+    let mut tampered = bytes.clone();
+    tampered[header_end + 5] ^= 0x01;
+
+    let err = unlock_must_fail(tampered, "kdbx4 stored header-hash flip");
+    assert!(
+        matches!(err, Error::Format(FormatError::HeaderHashMismatch)),
+        "kdbx4 stored header-hash flip should surface FormatError::HeaderHashMismatch, got {err:?}"
+    );
+}
+
+/// The unkeyed header hash is verified *before* the KDF runs, so an
+/// accidentally damaged header fails without paying for a key
+/// derivation driven by its damaged parameters. (A deliberately crafted
+/// header can recompute the hash; the parse-time KDF ceilings bound
+/// that case, not this check.)
+///
+/// The tamper rewrites the Argon2 memory value to 8 KiB: it passes the
+/// parse-time parameter ceilings, but Argon2 itself rejects it for this
+/// fixture's parallelism (it needs at least 8 KiB per lane). So if the
+/// KDF ran first, unlock would fail with `CryptoError::Kdf`; only a
+/// hash check that runs first can report `HeaderHashMismatch`. The
+/// value is chosen to make the KDF fail cheaply rather than allocate a
+/// huge matrix, so an ordering regression fails this test instead of
+/// exhausting the test host's memory.
+#[test]
+fn kdbx4_header_hash_is_checked_before_kdf() {
+    use keepass_core::crypto::derive_transformed_key;
+    use keepass_core::format::KdfParams;
+
+    const ARGON2_MIN_MEMORY_BYTES: u64 = 8 * 1024;
+    // VarDictionary record for the Argon2 memory parameter: UInt64 type
+    // byte, key length 1, key "M", value length 8.
+    const MEMORY_RECORD_PREFIX: [u8; 10] = [0x05, 1, 0, 0, 0, b'M', 8, 0, 0, 0];
+
+    let bytes = fs::read(kdbx4_fixture()).expect("read fixture");
+    assert_baseline_unlocks(&bytes);
+
+    let kdbx = Kdbx::<Sealed>::open_from_bytes(bytes.clone()).unwrap();
+    let header_bytes = kdbx.read_header().unwrap().header_bytes().to_vec();
+    let value_offset = header_bytes
+        .windows(MEMORY_RECORD_PREFIX.len())
+        .position(|w| w == MEMORY_RECORD_PREFIX)
+        .expect("Argon2 memory record present in header")
+        + MEMORY_RECORD_PREFIX.len();
+    let mut tampered = bytes.clone();
+    tampered[value_offset..value_offset + 8]
+        .copy_from_slice(&ARGON2_MIN_MEMORY_BYTES.to_le_bytes());
+
+    // Premise: the tampered parameters parse, and the KDF rejects them.
+    let tampered_read = Kdbx::<Sealed>::open_from_bytes(tampered.clone())
+        .unwrap()
+        .read_header()
+        .expect("tampered header still parses");
+    let params = tampered_read
+        .header()
+        .decode_kdf_params()
+        .expect("tampered KDF parameters pass the parse-time ceilings");
+    assert!(
+        matches!(params, KdfParams::Argon2 { memory_bytes, .. } if memory_bytes == ARGON2_MIN_MEMORY_BYTES),
+        "tamper did not land on the Argon2 memory value: {params:?}"
+    );
+    assert!(
+        derive_transformed_key(&composite(), &params).is_err(),
+        "premise: the KDF must reject the tampered parameters"
+    );
+
+    let err = unlock_must_fail(tampered, "kdbx4 Argon2 memory tamper");
+    assert!(
+        matches!(err, Error::Format(FormatError::HeaderHashMismatch)),
+        "header hash must be verified before the KDF runs, got {err:?}"
+    );
+}
+
+/// Control: a wrong credential on an intact KDBX4 file is reported as
+/// `CryptoError::Decrypt` (via the keyed header HMAC), not as header
+/// damage.
+#[test]
+fn kdbx4_wrong_key_on_intact_file_is_decrypt() {
+    let bytes = fs::read(kdbx4_fixture()).expect("read fixture");
+    assert_baseline_unlocks(&bytes);
+
+    let wrong = CompositeKey::from_password(b"definitely not the fixture password");
+    let err = unlock_must_fail_with(bytes, &wrong, "kdbx4 wrong key");
+    assert!(
+        matches!(err, Error::Crypto(CryptoError::Decrypt)),
+        "kdbx4 wrong key should surface CryptoError::Decrypt, got {err:?}"
+    );
+}
+
+/// Flip one byte inside the 32-byte header-HMAC tag (the 32 bytes
+/// after the stored header SHA-256). Even with an
 /// untouched header, the verifier must reject the tag.
 #[test]
 fn kdbx4_header_hmac_tag_byte_flip_fails_integrity() {

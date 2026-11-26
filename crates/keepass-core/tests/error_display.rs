@@ -95,6 +95,7 @@ fn format_error_all_variants_display() {
             got: 4,
         },
         FormatError::MalformedHeader("test message"),
+        FormatError::HeaderHashMismatch,
     ];
 
     for err in &cases {
