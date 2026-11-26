@@ -44,6 +44,13 @@ build / test / lint matrix. All four live in
   dependency when vetting began. A new crate, or a new version of one,
   with none of those fails CI. See *Reviewing an update* below.
 
+- **Locked, pinned builds** — every cargo step runs `--locked`, so CI
+  builds exactly what `Cargo.lock` records; every GitHub Action is pinned
+  to a commit SHA (with its version in a comment, which Dependabot
+  updates), and CI-installed tools are pinned to a version and installed
+  `--locked`. A moved tag or a new release can't change what CI runs
+  without a reviewed commit here.
+
 - **`cargo fmt` / `cargo clippy --all-targets -- -D warnings`** —
   baseline hygiene. Not supply-chain per se but bundled into the
   same pre-merge gate.
