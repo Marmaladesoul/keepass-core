@@ -10,10 +10,10 @@
 
 use aes::Aes256;
 use aes::cipher::{Array, BlockCipherEncrypt, KeyInit};
-use argon2::{Algorithm, Argon2, Params, Version as Argon2LibVersion};
+use argon2::{Algorithm, Argon2, Block, Params, Version as Argon2LibVersion};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::format::{Argon2Variant, Argon2Version, KdfParams};
 use crate::secret::{CompositeKey, TransformedKey};
@@ -117,11 +117,13 @@ fn aes_kdf(
     }
 
     // Final SHA-256 of the 32 post-AES bytes is the transformed key.
+    let mut digest = Sha256::digest(work);
     let mut out = [0u8; 32];
-    out.copy_from_slice(&Sha256::digest(work));
+    out.copy_from_slice(&digest);
 
-    // Wipe the intermediate work buffer — it held key-derived material.
+    // Wipe the intermediates — both held key-derived material.
     work.zeroize();
+    digest.zeroize();
 
     Ok(TransformedKey::from_raw_bytes(out))
 }
@@ -156,10 +158,16 @@ fn argon2_kdf(
     let params = Params::new(memory_kib, iterations_u32, parallelism, Some(32))
         .map_err(|e| KdfError::Argon2(format!("{e}")))?;
 
+    // Supply the memory matrix ourselves so it is wiped on drop: the
+    // crate's own allocation (`hash_password_into`) is freed unwiped, and
+    // the matrix's final blocks are enough to recompute the output.
+    let mut memory = Zeroizing::new(vec![Block::default(); params.block_count()]);
     let argon2 = Argon2::new(alg, lib_version, params);
 
     let mut out = [0u8; 32];
-    if let Err(e) = argon2.hash_password_into(composite.as_bytes(), salt, &mut out) {
+    if let Err(e) =
+        argon2.hash_password_into_with_memory(composite.as_bytes(), salt, &mut out, &mut *memory)
+    {
         // Wipe any partial output before returning — `out` is on the stack
         // and would otherwise drop without being zeroed.
         out.zeroize();

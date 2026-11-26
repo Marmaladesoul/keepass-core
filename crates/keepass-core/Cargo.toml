@@ -28,15 +28,18 @@ subtle = "2"                       # constant-time comparison
 uuid   = { version = "1", features = ["v4"] }
 base64 = "0.22"                     # KeePass UUIDs + protected-value payloads are base64
 
-# Crypto primitives — RustCrypto family, no unsafe.
-sha2   = "0.11"                     # SHA-256, SHA-512
-aes    = "0.9"                      # AES-256 block cipher (used ECB-style by AES-KDF)
-cbc    = { version = "0.2", features = ["block-padding"] }  # AES-256-CBC with PKCS7
-argon2 = "0.5"                      # Argon2d / Argon2id KDFs
-hmac   = "0.13"                     # HMAC-SHA-256 for KDBX4 block verification
-chacha20 = "0.10"                    # inner-stream cipher for KDBX4 protected XML
-salsa20  = "0.11"                   # inner-stream cipher for KDBX3 protected XML
-aes-gcm = "0.11"                    # in-memory protected-field wrap (FieldProtector)
+# Crypto primitives — RustCrypto family, no unsafe. `zeroize` on each wipes
+# its internal key material and state (round keys, keystream state, HMAC
+# and hash state) when dropped. Argon2's memory matrix is not covered by
+# its feature; `crypto::kdf` supplies that memory itself and wipes it.
+sha2   = { version = "0.11", features = ["zeroize"] }  # SHA-256, SHA-512
+aes    = { version = "0.9", features = ["zeroize"] }   # AES-256 block cipher (used ECB-style by AES-KDF)
+cbc    = { version = "0.2", features = ["block-padding", "zeroize"] }  # AES-256-CBC with PKCS7
+argon2 = { version = "0.5", features = ["zeroize"] }  # Argon2d / Argon2id KDFs
+hmac   = { version = "0.13", features = ["zeroize"] }  # HMAC-SHA-256 for KDBX4 block verification
+chacha20 = { version = "0.10", features = ["zeroize"] }  # inner-stream cipher for KDBX4 protected XML
+salsa20  = { version = "0.11", features = ["zeroize"] }  # inner-stream cipher for KDBX3 protected XML
+aes-gcm = { version = "0.11", features = ["zeroize"] }  # in-memory protected-field wrap (FieldProtector)
 # blake2      = "0.10"
 
 # Compression.
