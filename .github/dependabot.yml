@@ -7,7 +7,9 @@
 version: 2
 updates:
   - package-ecosystem: cargo
-    directory: "/"
+    # /fuzz is the fuzz crate's own workspace and lockfile, which also
+    # carries keepass-core's dependencies; the same options apply to both.
+    directories: ["/", "/fuzz"]
     schedule:
       interval: weekly
       day: monday
@@ -64,53 +66,6 @@ updates:
       - dependency-name: "rand_chacha"
       # uuid past 1.23 needs a newer Rust than this crate's minimum
       # (rust-version in Cargo.toml). Release this with a minimum-Rust bump.
-      - dependency-name: "uuid"
-        versions: ["> 1.23"]
-
-  # The fuzz crate is its own workspace with its own lockfile, which also
-  # carries keepass-core's dependencies. Same cadence, groups and holds as
-  # the root entry above (reasons there); keep the two in sync.
-  - package-ecosystem: cargo
-    directory: "/fuzz"
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    # Wait two weeks before proposing a new release: a malicious or broken
-    # one is usually found and yanked within days. Security updates skip
-    # the wait. See SUPPLY_CHAIN.md.
-    cooldown:
-      default-days: 14
-    groups:
-      rustcrypto:
-        patterns:
-          - "aes*"
-          - "cbc"
-          - "ctr"
-          - "chacha20"
-          - "salsa20"
-          - "hmac"
-          - "sha2"
-          - "blake2"
-          - "argon2"
-          - "cipher"
-      secret-hygiene:
-        patterns:
-          - "zeroize"
-          - "secrecy"
-          - "subtle"
-      parsers:
-        patterns:
-          - "quick-xml"
-          - "winnow"
-          - "flate2"
-          - "base64"
-    ignore:
-      - dependency-name: "argon2"
-      - dependency-name: "base64"
-      - dependency-name: "quick-xml"
-      - dependency-name: "rand"
-      - dependency-name: "rand_chacha"
       - dependency-name: "uuid"
         versions: ["> 1.23"]
 

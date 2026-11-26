@@ -90,23 +90,24 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
-    # Checks Cargo.lock against the RustSec Advisory Database for known
-    # CVEs in any transitive dependency. Fast (~5 s) and a no-brainer for
-    # a crypto / password-handling library.
-    # audit-check reports its result as a check run.
-    permissions:
-      contents: read
-      checks: write
+    # Checks each lockfile against the RustSec Advisory Database for known
+    # vulnerabilities in any transitive dependency; fails on a vulnerability
+    # advisory. Unmaintained, unsound and yanked crates are warnings here and
+    # are enforced by cargo deny. See SUPPLY_CHAIN.md.
+    env:
+      CARGO_AUDIT_VERSION: "0.23.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      # The fuzz crate is its own workspace with its own lockfile.
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: fuzz
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+      - name: Audit Cargo.lock
+        run: cargo audit --file Cargo.lock
+      # The fuzz crate is its own workspace with its own lockfile. Runs even
+      # if the root audit failed, so both results show.
+      - name: Audit fuzz/Cargo.lock
+        if: success() || failure()
+        run: cargo audit --file fuzz/Cargo.lock
 
   deny:
     name: cargo deny
@@ -127,8 +128,9 @@ jobs:
           # interesting additions are `bans` and `sources`.
           arguments: --all-features --locked
       # The fuzz crate is its own workspace with its own lockfile; the
-      # same deny.toml applies.
+      # same deny.toml applies. Runs even if the root check failed.
       - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        if: success() || failure()
         with:
           command: check
           manifest-path: ./fuzz/Cargo.toml
@@ -156,4 +158,6 @@ jobs:
       - run: cargo vet --locked
       # The fuzz crate is its own workspace, vetted against its own store
       # (fuzz/supply-chain/) at safe-to-run: it is build and test only.
-      - run: cargo vet --locked --manifest-path fuzz/Cargo.toml
+      # Runs even if the root check failed.
+      - if: success() || failure()
+        run: cargo vet --locked --manifest-path fuzz/Cargo.toml
