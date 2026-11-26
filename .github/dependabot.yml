@@ -39,6 +39,28 @@ updates:
           - "winnow"
           - "flate2"
           - "base64"
+    ignore:
+      # Each of these lines' next release is a breaking change, and a
+      # 0.x crate's breaking jump is a *minor* bump, which a semver-major
+      # ignore would miss. Proposed weekly, they fail CI and, inside a
+      # group, block the routine bumps beside them. Hold the whole line and
+      # move it by hand, as a reviewed migration. cargo audit still gates
+      # every pull request, so an advisory in any of them still surfaces.
+      #
+      # argon2 0.6 needs a newer Rust than this crate's minimum.
+      - dependency-name: "argon2"
+      # base64 0.23: breaking, and turns on unsafe SIMD decoders by
+      # default; adopt it with that feature decision made explicitly.
+      - dependency-name: "base64"
+      # quick-xml 0.42: breaking reader API.
+      - dependency-name: "quick-xml"
+      # rand 0.10 (keepass-merge's test RNG): breaking API.
+      - dependency-name: "rand"
+      - dependency-name: "rand_chacha"
+      # uuid past 1.23 needs a newer Rust than this crate's minimum
+      # (rust-version in Cargo.toml). Release this with a minimum-Rust bump.
+      - dependency-name: "uuid"
+        versions: ["> 1.23"]
 
   - package-ecosystem: github-actions
     directory: "/"
