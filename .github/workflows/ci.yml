@@ -102,6 +102,11 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # The fuzz crate is its own workspace with its own lockfile.
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: fuzz
 
   deny:
     name: cargo deny
@@ -120,7 +125,14 @@ jobs:
           # `advisories` and `licenses` overlap with audit but having
           # both fail on the same advisory gives belt-and-braces. The
           # interesting additions are `bans` and `sources`.
-          arguments: --all-features
+          arguments: --all-features --locked
+      # The fuzz crate is its own workspace with its own lockfile; the
+      # same deny.toml applies.
+      - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        with:
+          command: check
+          manifest-path: ./fuzz/Cargo.toml
+          arguments: --all-features --locked
 
   vet:
     name: cargo vet
@@ -142,3 +154,6 @@ jobs:
       # change in someone else's published audits can't pass or fail a
       # build without a commit here.
       - run: cargo vet --locked
+      # The fuzz crate is its own workspace, vetted against its own store
+      # (fuzz/supply-chain/) at safe-to-run: it is build and test only.
+      - run: cargo vet --locked --manifest-path fuzz/Cargo.toml

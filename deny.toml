@@ -61,6 +61,13 @@ allow = [
 # those would force keepass-core itself into a copyleft posture, which
 # would propagate to every downstream consumer.
 confidence-threshold = 0.93
+# Per-crate allowances, narrower than widening `allow` for everyone.
+exceptions = [
+    # libfuzzer-sys bundles LLVM's libFuzzer, which is under NCSA (a
+    # permissive, BSD-style licence). Only the fuzz crate (fuzz/, never
+    # published or shipped) depends on it.
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 
 # ---------------------------------------------------------------------------
 # Bans — explicit deny-list + duplicate detection
@@ -68,6 +75,13 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The fuzz crate (fuzz/, publish = false) depends on keepass-core by path
+# alone. That isn't a wildcard on a registry crate: it can't be published,
+# and the path pins it to this repository's own source. This also passes
+# path dev-dependencies of the published crates; git sources stay blocked
+# by [sources] below, and path/git normal dependencies of the published
+# crates are still denied.
+allow-wildcard-paths = true
 highlight = "all"
 # Crates we never want pulled in transitively, with rationale.
 deny = [

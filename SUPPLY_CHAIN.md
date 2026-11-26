@@ -57,6 +57,16 @@ build / test / lint matrix. All four live in
 
 A CI red is **blocking** — we don't merge PRs that fail any of these.
 
+### The fuzz workspace
+
+`fuzz/` is a separate cargo workspace (cargo-fuzz needs it outside the main one) with its own `fuzz/Cargo.lock`. The same gates cover that lockfile: the `cargo audit`, `cargo deny` and `cargo vet` jobs each run a second step against it, and Dependabot scans `/fuzz` on the same schedule, cooldown and groups as the root.
+
+`cargo deny` applies the same `deny.toml` to both lockfiles. The fuzz crate's path dependency on keepass-core is allowed (it is unpublished, so `allow-wildcard-paths`), and `libfuzzer-sys`, which bundles LLVM's NCSA-licensed libFuzzer, has a crate-specific licence exception.
+
+`cargo vet` checks the fuzz lockfile against its own store, [`fuzz/supply-chain/`](fuzz/supply-chain/), with the policy `safe-to-run` for the whole fuzz dependency tree: fuzz binaries are built and run in CI and never shipped. It can't share `supply-chain/`, because a policy entry for the fuzz crate makes the root check fail (the crate isn't in the root graph). The store imports the same organisations' audits; its exemptions are the starting point recorded when the fuzz lockfile was brought under vetting, at its versions then, and the same rule applies: no new exemptions.
+
+A crate in both lockfiles is vetted in both stores. When an update reaches the fuzz lockfile too, certify it there as well, at `safe-to-run`: run `cargo vet certify` from `fuzz/`, where it finds its own store.
+
 ## Reviewing an update
 
 `cargo audit` catches *known* vulnerabilities. The attack it can't catch
