@@ -73,12 +73,14 @@ jobs:
       - run: cargo doc --workspace --no-deps --all-features
 
   msrv:
-    name: MSRV build (rust ${{ matrix.rust }})
+    # No version in the name: it's a required status check, and the name
+    # must survive MSRV bumps.
+    name: MSRV build
     runs-on: ubuntu-latest
     strategy:
       matrix:
         # The rust-version declared in Cargo.toml. Bump both in lockstep.
-        rust: ["1.87"]
+        rust: ["1.89"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
