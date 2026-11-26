@@ -383,7 +383,14 @@ fn unlock_every_valid_fixture() {
     let root = fixtures_root();
     let mut checked = 0;
     let mut failures = Vec::new();
-    for group in ["kdbxweb", "keepassxc", "pykeepass"] {
+    for group in [
+        "kdbxweb",
+        "keepassxc",
+        "pykeepass",
+        "keepassium",
+        "macpass",
+        "strongbox",
+    ] {
         let dir = root.join(group);
         if !dir.is_dir() {
             continue;

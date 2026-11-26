@@ -18,11 +18,14 @@
 //! The hash in each block is SHA-256 over `data`. This module verifies
 //! every block's hash and returns the concatenation of the `data`
 //! segments. The end marker carries a size of zero and an all-zero hash;
-//! any mismatch on the sentinel is itself a hard error.
+//! any mismatch on the sentinel is itself a hard error. The stream must
+//! end exactly at the end marker: trailing bytes after it are an error,
+//! not silently dropped.
 //!
 //! The `block_index` field is expected to count up sequentially from
-//! zero. In practice KeePass clients always emit this correctly; we
-//! verify it rather than silently accept out-of-order blocks.
+//! zero, the end marker included. In practice KeePass clients always
+//! emit this correctly; we verify it rather than silently accept
+//! out-of-order blocks.
 //!
 //! KDBX4 has a different (HMAC-based) block stream and lives in the
 //! sibling module `hmac_block_stream`.
@@ -54,20 +57,23 @@ pub const MAX_BLOCK_BYTES: usize = 64 * 1024 * 1024;
 /// `data` segments.
 ///
 /// The input is the bytes of the stream (starting with the first block,
-/// i.e. *after* the 32-byte StreamStartBytes sentinel). On success,
-/// returns the reassembled payload; trailing bytes after the end marker
-/// are ignored.
+/// i.e. *after* the 32-byte StreamStartBytes sentinel) and must end
+/// exactly at the end marker. On success, returns the reassembled
+/// payload.
 ///
 /// # Errors
 ///
 /// - [`HashedBlockError::Truncated`] if a block header or data segment
 ///   runs off the end of the input.
 /// - [`HashedBlockError::BlockIndexOutOfOrder`] if the `block_index`
-///   fields do not count up sequentially from zero.
+///   fields, the end marker's included, do not count up sequentially
+///   from zero.
 /// - [`HashedBlockError::HashMismatch`] if a non-empty block's declared
 ///   hash does not match SHA-256 of its data. Compared in constant time.
 /// - [`HashedBlockError::MalformedEndMarker`] if the end marker's hash
 ///   is not all zeros.
+/// - [`HashedBlockError::TrailingBytes`] if any bytes follow the end
+///   marker.
 pub fn read_hashed_block_stream(input: &[u8]) -> Result<Vec<u8>, HashedBlockError> {
     let mut cursor = input;
     let mut output = Vec::new();
@@ -78,20 +84,25 @@ pub fn read_hashed_block_stream(input: &[u8]) -> Result<Vec<u8>, HashedBlockErro
         let declared_hash = read_bytes(&mut cursor, 32)?;
         let size = read_u32_le(&mut cursor)?;
 
-        if size == 0 {
-            // End marker. The hash must be all zeros; anything else is a
-            // malformed stream.
-            if !declared_hash.iter().all(|&b| b == 0) {
-                return Err(HashedBlockError::MalformedEndMarker);
-            }
-            return Ok(output);
-        }
-
+        // Every block, the end marker included, carries the next index.
         if block_index != expected_index {
             return Err(HashedBlockError::BlockIndexOutOfOrder {
                 expected: expected_index,
                 got: block_index,
             });
+        }
+
+        if size == 0 {
+            // End marker. The hash must be all zeros, and the stream
+            // must end here: bytes after the end marker are rejected,
+            // never silently dropped.
+            if !declared_hash.iter().all(|&b| b == 0) {
+                return Err(HashedBlockError::MalformedEndMarker);
+            }
+            if !cursor.is_empty() {
+                return Err(HashedBlockError::TrailingBytes);
+            }
+            return Ok(output);
         }
 
         // Bound the declared per-block size before we hand it to the
@@ -240,6 +251,11 @@ pub enum HashedBlockError {
     #[error("hashed-block end marker has non-zero hash")]
     MalformedEndMarker,
 
+    /// Bytes followed the end marker. The stream must end exactly at
+    /// its end marker.
+    #[error("hashed-block stream has trailing bytes after its end marker")]
+    TrailingBytes,
+
     /// [`write_hashed_block_stream`] was called with a zero block size.
     #[error("hashed-block stream writer requires a non-zero block size")]
     BlockSizeZero,
@@ -267,6 +283,7 @@ impl From<HashedBlockError> for FormatError {
             HashedBlockError::BlockIndexOutOfOrder { .. } => "hashed-block index out of order",
             HashedBlockError::HashMismatch { .. } => "hashed-block hash mismatch",
             HashedBlockError::MalformedEndMarker => "hashed-block end marker malformed",
+            HashedBlockError::TrailingBytes => "hashed-block stream has trailing bytes",
             HashedBlockError::BlockSizeZero => "hashed-block writer given zero block size",
             HashedBlockError::BlockTooLarge { .. } => "hashed-block declared size too large",
         })
@@ -331,11 +348,37 @@ mod tests {
     }
 
     #[test]
-    fn trailing_bytes_after_end_marker_are_ignored() {
+    fn rejects_trailing_bytes_after_end_marker() {
+        // The stream must end exactly at its end marker: one stray byte,
+        // a whole cipher block, or a whole extra block header after it
+        // are all rejected rather than silently dropped.
+        for trailing in [1, 16, 40] {
+            let mut stream = encode(&[b"x"]);
+            stream.extend(std::iter::repeat_n(0xA5, trailing));
+            assert!(
+                matches!(
+                    read_hashed_block_stream(&stream).unwrap_err(),
+                    HashedBlockError::TrailingBytes
+                ),
+                "{trailing} trailing byte(s) must be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_order_end_marker_index() {
         let mut stream = encode(&[b"x"]);
-        stream.extend_from_slice(b"trailing garbage that should be ignored");
-        let decoded = read_hashed_block_stream(&stream).unwrap();
-        assert_eq!(decoded, b"x");
+        // The end marker follows the 40-byte header and 1 byte of data,
+        // so its index lives at offset 41. It must carry the next index.
+        let pos = 4 + 32 + 4 + 1;
+        stream[pos..pos + 4].copy_from_slice(&5u32.to_le_bytes());
+        assert!(matches!(
+            read_hashed_block_stream(&stream).unwrap_err(),
+            HashedBlockError::BlockIndexOutOfOrder {
+                expected: 1,
+                got: 5
+            }
+        ));
     }
 
     #[test]
@@ -424,10 +467,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_zero_size_intermediate_block() {
-        // The first block with size=0 terminates. But what if a client
-        // emits what looks like an early end marker? Spec says size=0
-        // always ends the stream. Verify that's what we do.
+    fn rejects_early_end_marker_followed_by_more_blocks() {
+        // A size-0 block always ends the stream, so an early end marker
+        // leaves the blocks after it as trailing bytes, which are
+        // rejected rather than silently dropped.
         let mut stream = encode(&[b"x"]);
         // Overwrite the first block's size field (at offset 36) with 0
         // and its hash field (offset 4..36) with zeros.
@@ -435,9 +478,10 @@ mod tests {
             *b = 0;
         }
         stream[36..40].copy_from_slice(&0u32.to_le_bytes());
-        let decoded = read_hashed_block_stream(&stream).unwrap();
-        // We terminated at the (now-zeroed) block-0; output is empty.
-        assert_eq!(decoded.len(), 0);
+        assert!(matches!(
+            read_hashed_block_stream(&stream).unwrap_err(),
+            HashedBlockError::TrailingBytes
+        ));
     }
 
     #[test]
