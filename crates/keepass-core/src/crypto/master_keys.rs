@@ -18,6 +18,7 @@
 //! merely truncations of one another.
 
 use sha2::{Digest, Sha256, Sha512};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::format::MasterSeed;
 use crate::secret::{CipherKey, HmacBaseKey, TransformedKey};
@@ -31,10 +32,11 @@ pub fn derive_cipher_key(master_seed: &MasterSeed, transformed_key: &Transformed
     let mut hasher = Sha256::new();
     hasher.update(master_seed.0);
     hasher.update(transformed_key.as_bytes());
-    let digest = hasher.finalize();
+    let mut digest = hasher.finalize();
 
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
+    digest.zeroize();
     CipherKey::from_raw_bytes(out)
 }
 
@@ -54,10 +56,11 @@ pub fn derive_hmac_base_key(
     hasher.update(transformed_key.as_bytes());
     // Domain-separation marker per KDBX4 spec.
     hasher.update([0x01u8]);
-    let digest = hasher.finalize();
+    let mut digest = hasher.finalize();
 
     let mut out = [0u8; 64];
     out.copy_from_slice(&digest);
+    digest.zeroize();
     HmacBaseKey::from_raw_bytes(out)
 }
 
@@ -67,15 +70,19 @@ pub fn derive_hmac_base_key(
 ///
 /// The block index is the zero-based 64-bit counter; the header's HMAC
 /// uses the sentinel index `u64::MAX` (i.e. `0xFFFFFFFF_FFFFFFFF`).
+///
+/// The key is returned in a [`Zeroizing`] wrapper, so it is wiped when the
+/// caller drops it.
 #[must_use]
-pub fn per_block_hmac_key(base: &HmacBaseKey, block_index: u64) -> [u8; 64] {
+pub fn per_block_hmac_key(base: &HmacBaseKey, block_index: u64) -> Zeroizing<[u8; 64]> {
     let mut hasher = Sha512::new();
     hasher.update(block_index.to_le_bytes());
     hasher.update(base.as_bytes());
-    let digest = hasher.finalize();
+    let mut digest = hasher.finalize();
 
-    let mut out = [0u8; 64];
+    let mut out = Zeroizing::new([0u8; 64]);
     out.copy_from_slice(&digest);
+    digest.zeroize();
     out
 }
 
@@ -184,6 +191,6 @@ mod tests {
         let expected = sha512(&concat);
 
         let k = per_block_hmac_key(&base, index);
-        assert_eq!(k, expected);
+        assert_eq!(*k, expected);
     }
 }

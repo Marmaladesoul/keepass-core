@@ -82,8 +82,8 @@ pub fn compute_header_hash(header_bytes: &[u8]) -> [u8; 32] {
 #[must_use]
 pub fn compute_header_hmac(header_bytes: &[u8], hmac_base: &HmacBaseKey) -> [u8; 32] {
     let key = per_block_hmac_key(hmac_base, HEADER_HMAC_BLOCK_INDEX);
-    let mut mac =
-        <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(key.as_slice())
+        .expect("HMAC-SHA-256 accepts any key length");
     mac.update(header_bytes);
     let digest = mac.finalize().into_bytes();
     let mut out = [0u8; 32];
@@ -146,8 +146,8 @@ pub fn verify_header_hmac(
     hmac_base: &HmacBaseKey,
 ) -> Result<(), HeaderAuthError> {
     let key = per_block_hmac_key(hmac_base, HEADER_HMAC_BLOCK_INDEX);
-    let mut mac =
-        <HmacSha256 as KeyInit>::new_from_slice(&key).expect("HMAC-SHA-256 accepts any key length");
+    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(key.as_slice())
+        .expect("HMAC-SHA-256 accepts any key length");
     mac.update(header_bytes);
     let computed = mac.finalize().into_bytes();
 
@@ -239,7 +239,7 @@ mod tests {
         let header = b"pretend header";
         let base = fixed_base();
         let key = per_block_hmac_key(&base, HEADER_HMAC_BLOCK_INDEX);
-        let tag = hmac_tag(&key, header);
+        let tag = hmac_tag(key.as_slice(), header);
         assert!(verify_header_hmac(header, &tag, &base).is_ok());
     }
 
@@ -260,7 +260,7 @@ mod tests {
         let base_a = HmacBaseKey::from_raw_bytes([0x11; 64]);
         let base_b = HmacBaseKey::from_raw_bytes([0x22; 64]);
         let key_a = per_block_hmac_key(&base_a, HEADER_HMAC_BLOCK_INDEX);
-        let tag = hmac_tag(&key_a, header);
+        let tag = hmac_tag(key_a.as_slice(), header);
         // Verify with the wrong base — should fail.
         assert!(matches!(
             verify_header_hmac(header, &tag, &base_b).unwrap_err(),
@@ -275,7 +275,7 @@ mod tests {
         let base = fixed_base();
         let key = per_block_hmac_key(&base, HEADER_HMAC_BLOCK_INDEX);
         let mut header = b"original header".to_vec();
-        let tag = hmac_tag(&key, &header);
+        let tag = hmac_tag(key.as_slice(), &header);
         header[0] ^= 0x01;
         assert!(matches!(
             verify_header_hmac(&header, &tag, &base).unwrap_err(),
@@ -288,7 +288,7 @@ mod tests {
         let base = fixed_base();
         let key = per_block_hmac_key(&base, HEADER_HMAC_BLOCK_INDEX);
         let header = b"header".to_vec();
-        let mut tag = hmac_tag(&key, &header);
+        let mut tag = hmac_tag(key.as_slice(), &header);
         tag[0] ^= 0x01;
         assert!(matches!(
             verify_header_hmac(&header, &tag, &base).unwrap_err(),
@@ -304,7 +304,7 @@ mod tests {
         let hash = sha256(&[]);
         assert!(verify_header_hash(&[], &hash).is_ok());
         let key = per_block_hmac_key(&base, HEADER_HMAC_BLOCK_INDEX);
-        let tag = hmac_tag(&key, &[]);
+        let tag = hmac_tag(key.as_slice(), &[]);
         assert!(verify_header_hmac(&[], &tag, &base).is_ok());
     }
 
