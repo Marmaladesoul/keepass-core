@@ -140,6 +140,21 @@ pub enum FormatError {
     /// A header field had an unexpected shape.
     #[error("malformed header field: {0}")]
     MalformedHeader(&'static str),
+
+    /// The KDBX4 outer header does not match the unkeyed SHA-256 stored
+    /// immediately after it: the header bytes (or the stored hash) are
+    /// damaged or have been altered. Converted from
+    /// [`HeaderAuthError::HeaderHashMismatch`], whose message it shares.
+    ///
+    /// The hash is computed without the composite key, so this check
+    /// passes or fails identically for every credential and reporting it
+    /// reveals nothing about the key. It is deliberately distinct from
+    /// [`crate::crypto::CryptoError::Decrypt`] so callers can tell a
+    /// damaged file apart from a wrong credential. The keyed header HMAC
+    /// that follows is *not* reported here: its mismatch stays collapsed
+    /// with a wrong key as `CryptoError::Decrypt`.
+    #[error("{}", HeaderAuthError::HeaderHashMismatch)]
+    HeaderHashMismatch,
 }
 
 // ---------------------------------------------------------------------------

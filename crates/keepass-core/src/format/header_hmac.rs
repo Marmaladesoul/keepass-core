@@ -28,6 +28,11 @@
 //! authentication check on a KDBX4 open.
 //!
 //! This module verifies both. Compared in constant time.
+//!
+//! The two failures are classified differently at the crate's top level
+//! (`From<HeaderAuthError> for crate::Error`): a hash mismatch needs no
+//! key, so it is reported as header damage; an HMAC mismatch is keyed, so
+//! it is indistinguishable from a wrong key.
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};

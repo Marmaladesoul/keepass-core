@@ -43,3 +43,25 @@ pub enum Error {
     #[error(transparent)]
     Protector(#[from] crate::protector::ProtectorError),
 }
+
+/// Route a KDBX4 header-verification failure to the variant that keeps
+/// the error-collapse rule honest.
+///
+/// The header SHA-256 is unkeyed, so its mismatch reveals nothing about
+/// the key and is reported as
+/// [`FormatError::HeaderHashMismatch`](crate::format::FormatError::HeaderHashMismatch).
+/// The header HMAC is keyed, so its mismatch collapses with a wrong key
+/// as [`CryptoError::Decrypt`](crate::crypto::CryptoError::Decrypt).
+impl From<crate::format::HeaderAuthError> for Error {
+    fn from(err: crate::format::HeaderAuthError) -> Self {
+        use crate::format::HeaderAuthError;
+        match err {
+            HeaderAuthError::HeaderHashMismatch => {
+                Self::Format(crate::format::FormatError::HeaderHashMismatch)
+            }
+            HeaderAuthError::HeaderHmacMismatch => {
+                Self::Crypto(crate::crypto::CryptoError::Decrypt)
+            }
+        }
+    }
+}

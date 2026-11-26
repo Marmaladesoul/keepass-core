@@ -55,8 +55,13 @@ message before committing; when in doubt, leave it out.
 - **Constant-time compare every hash / HMAC / keystream byte.**
   The `subtle` crate is the default.
 - **Error-collapse discipline (§4.8.7).** "Wrong key" and "corrupt
-  ciphertext" surface as the *same* error variant. Distinguishing
-  them leaks an oracle to an attacker.
+  ciphertext" surface as the *same* error variant wherever the check
+  is keyed (header HMAC, decryption, padding, stream sentinel).
+  Distinguishing them there leaks an oracle to an attacker. An
+  *unkeyed* integrity check (the KDBX4 header SHA-256) may be
+  reported distinctly, because its verdict is the same for every
+  key; doing so tells callers the file is damaged rather than the
+  credential wrong.
 - **`#[non_exhaustive]` on every public enum and every public
   struct whose field set might grow.** Adding a field is then a
   minor version, not a breaking change.

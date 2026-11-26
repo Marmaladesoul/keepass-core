@@ -360,11 +360,16 @@ impl Kdbx<HeaderRead> {
     ///
     /// Runs the full KDBX decryption pipeline:
     ///
-    /// 1. Derive the transformed key via the KDF (AES-KDF on KDBX3,
+    /// 1. KDBX4 only: verify the unkeyed header SHA-256, before any
+    ///    header field drives key derivation. This catches accidental
+    ///    damage cheaply; a deliberately crafted header can carry a
+    ///    recomputed hash, so the KDF parameter ceilings are what bound
+    ///    its cost, and the keyed HMAC in step 3 is what rejects it.
+    /// 2. Derive the transformed key via the KDF (AES-KDF on KDBX3,
     ///    Argon2d/Argon2id on KDBX4).
-    /// 2. Derive the cipher key (and, on KDBX4, the HMAC base key).
-    /// 3. KDBX4 only: verify the header SHA-256 and HMAC-SHA-256 tags
-    ///    against the caller's key.
+    /// 3. Derive the cipher key (and, on KDBX4, the HMAC base key).
+    ///    KDBX4 only: verify the header HMAC-SHA-256 tag against the
+    ///    caller's key.
     /// 4. Assemble the ciphertext — from the HMAC-block stream (KDBX4)
     ///    or directly from the raw payload (KDBX3).
     /// 5. Decrypt with the outer cipher (AES-256-CBC and ChaCha20 are
@@ -382,17 +387,24 @@ impl Kdbx<HeaderRead> {
     /// # Errors
     ///
     /// Returns [`Error::Crypto`] on any key-stage failure (wrong
-    /// password, tampered payload, HMAC mismatch, bad padding, inner-
-    /// stream cipher construction failure). Returns [`Error::Format`]
-    /// on structural failures (malformed block stream, malformed inner
-    /// header, unsupported cipher). Returns [`Error::Xml`] on
-    /// malformed inner XML.
+    /// password, tampered payload, KDBX4 header-HMAC mismatch, bad
+    /// padding, inner-stream cipher construction failure). Returns
+    /// [`Error::Format`] on structural failures (malformed block stream,
+    /// malformed inner header, unsupported cipher), and with
+    /// [`FormatError::HeaderHashMismatch`] when a KDBX4 outer header does
+    /// not match its stored SHA-256. Returns [`Error::Xml`] on malformed
+    /// inner XML.
     ///
     /// The crypto vs format split follows the error-collapse discipline
     /// from §4.8.7 of the design doc: we deliberately do **not**
     /// distinguish "wrong key" from "corrupt ciphertext" — both surface
     /// as a generic decryption failure, so an attacker cannot learn
-    /// anything about the key from the error variant alone.
+    /// anything about the key from the error variant alone. The KDBX4
+    /// header SHA-256 is reported separately because it is computed
+    /// without the key: it fails identically for every credential, so
+    /// naming it reveals nothing about the key, and it tells callers
+    /// the file is damaged rather than the credential wrong. The keyed
+    /// header HMAC stays collapsed into [`CryptoError::Decrypt`].
     ///
     /// # Threat-model note: KDBX3 outer headers are unauthenticated
     ///
@@ -1965,6 +1977,13 @@ impl Kdbx<Unlocked> {
 // Unlock pipeline — all the crypto wiring lives here, off the public impl.
 // ---------------------------------------------------------------------------
 
+/// Length of the unkeyed SHA-256 stored straight after a KDBX4 outer header.
+const KDBX4_HEADER_HASH_LEN: usize = 32;
+/// Length of the keyed header HMAC-SHA-256 tag that follows the hash.
+const KDBX4_HEADER_HMAC_LEN: usize = 32;
+/// The hash plus the HMAC tag: the minimum KDBX4 payload before the block stream.
+const KDBX4_HEADER_TRAILER_LEN: usize = KDBX4_HEADER_HASH_LEN + KDBX4_HEADER_HMAC_LEN;
+
 // The pipeline is intentionally a single linear function: breaking it up by
 // version or stage tends to spread error-handling across helpers that each
 // know only a slice of the context, which makes error-collapse discipline
@@ -1977,6 +1996,38 @@ fn do_unlock(
     composite: &CompositeKey,
 ) -> Result<Unlocked, Error> {
     let header = &header_state.header;
+    let header_bytes = &bytes[..header_state.header_end];
+    let payload = &bytes[header_state.header_end..];
+
+    // --- KDBX4: verify the unkeyed header hash before any key work --------
+    // Layout: [32-byte header SHA-256][32-byte header HMAC][HMAC blocks].
+    // The hash needs no key, so it runs before anything interprets the
+    // header's fields — in particular before the KDF, so accidental
+    // damage (including to the KDF parameters) fails cheaply. It is no
+    // defence against deliberate tampering: anyone can recompute an
+    // unkeyed hash. The parse-time KDF parameter ceilings are what bound
+    // the cost of a crafted header; the keyed HMAC below rejects it.
+    // Its verdict is the same for every credential, so a mismatch is
+    // reported as header damage rather than collapsed with a wrong key
+    // (see `From<HeaderAuthError> for Error`).
+    let kdbx4_framing = match header.version() {
+        Version::V4 => {
+            if payload.len() < KDBX4_HEADER_TRAILER_LEN {
+                return Err(FormatError::Truncated {
+                    needed: KDBX4_HEADER_TRAILER_LEN,
+                    got: payload.len(),
+                }
+                .into());
+            }
+            let (header_hash, rest) = payload.split_at(KDBX4_HEADER_HASH_LEN);
+            verify_header_hash(
+                header_bytes,
+                header_hash.try_into().expect("split_at guarantees 32"),
+            )?;
+            Some(rest.split_at(KDBX4_HEADER_HMAC_LEN))
+        }
+        Version::V3 => None,
+    };
 
     // Twofish-CBC is deliberately deferred — no fixture in the current
     // corpus uses it and the RustCrypto ecosystem's Twofish crate is less
@@ -2004,39 +2055,20 @@ fn do_unlock(
         derive_transformed_key(composite, &kdf_params).map_err(|_| CryptoError::Kdf)?;
     let cipher_key = derive_cipher_key(&header.master_seed, &transformed);
 
-    // --- Assemble ciphertext + verify integrity ---------------------------
-    let header_bytes = &bytes[..header_state.header_end];
-    let payload = &bytes[header_state.header_end..];
-
-    let ciphertext: Vec<u8> = match header.version() {
-        Version::V4 => {
-            // Layout: [32-byte header SHA-256][32-byte header HMAC][HMAC blocks].
-            if payload.len() < 64 {
-                return Err(FormatError::Truncated {
-                    needed: 64,
-                    got: payload.len(),
-                }
-                .into());
-            }
-            let (header_hash, rest) = payload.split_at(32);
-            let (header_hmac, blocks) = rest.split_at(32);
-
+    // --- Assemble ciphertext + verify keyed integrity ---------------------
+    let ciphertext: Vec<u8> = match kdbx4_framing {
+        Some((header_hmac, blocks)) => {
+            // Keyed: a mismatch collapses with a wrong key.
             let hmac_base = derive_hmac_base_key(&header.master_seed, &transformed);
-            verify_header_hash(
-                header_bytes,
-                header_hash.try_into().expect("split_at guarantees 32"),
-            )
-            .map_err(|_| CryptoError::Decrypt)?;
             verify_header_hmac(
                 header_bytes,
                 header_hmac.try_into().expect("split_at guarantees 32"),
                 &hmac_base,
-            )
-            .map_err(|_| CryptoError::Decrypt)?;
+            )?;
 
             read_hmac_block_stream(blocks, &hmac_base).map_err(FormatError::from)?
         }
-        Version::V3 => payload.to_vec(),
+        None => payload.to_vec(),
     };
 
     // --- Outer-cipher decrypt ---------------------------------------------
