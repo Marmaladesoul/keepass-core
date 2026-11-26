@@ -209,9 +209,9 @@ fn remap_entry_refs(
             a.ref_id = new;
         }
     }
-    if let Some(u) = entry.custom_icon_uuid {
-        if let Some(&new) = icon_remap.get(&u) {
-            entry.custom_icon_uuid = Some(new);
-        }
+    if let Some(u) = entry.custom_icon_uuid
+        && let Some(&new) = icon_remap.get(&u)
+    {
+        entry.custom_icon_uuid = Some(new);
     }
 }

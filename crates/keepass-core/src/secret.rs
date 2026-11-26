@@ -149,7 +149,7 @@ pub fn keyfile_hash(bytes: &[u8]) -> Result<[u8; 32], KeyFileError> {
     // Case 2: exactly 64 bytes, all hex digits.
     if bytes.len() == 64 && bytes.iter().all(u8::is_ascii_hexdigit) {
         let mut out = [0u8; 32];
-        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+        for (i, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
             let hi = hex_digit_value(pair[0]);
             let lo = hex_digit_value(pair[1]);
             out[i] = (hi << 4) | lo;

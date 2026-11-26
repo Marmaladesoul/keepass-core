@@ -2197,10 +2197,10 @@ pub(crate) fn wrap_entry_with_key(
         ..ProtectedFields::default()
     };
     for cf in &mut entry.custom_fields {
-        if cf.protected {
-            if let Some(b) = wrap_string_in_place_with_key(&mut cf.value, key)? {
-                out.custom_fields.insert(cf.key.clone(), b);
-            }
+        if cf.protected
+            && let Some(b) = wrap_string_in_place_with_key(&mut cf.value, key)?
+        {
+            out.custom_fields.insert(cf.key.clone(), b);
         }
     }
     for snap in &mut entry.history {
@@ -2263,10 +2263,10 @@ pub(crate) fn unwrap_entry_with_key(
         entry.password = decode_wrapped_with_key(b, key)?;
     }
     for cf in &mut entry.custom_fields {
-        if cf.protected {
-            if let Some(b) = record.custom_fields.get(&cf.key) {
-                cf.value = decode_wrapped_with_key(b, key)?;
-            }
+        if cf.protected
+            && let Some(b) = record.custom_fields.get(&cf.key)
+        {
+            cf.value = decode_wrapped_with_key(b, key)?;
         }
     }
     // History snapshots align by position with the record's history.

@@ -67,17 +67,16 @@ pub fn merge(local: &Vault, remote: &Vault) -> Result<MergeOutcome, MergeError> 
     if let (Some(local_at), Some(remote_at)) = (
         local.meta.master_key_changed,
         remote.meta.master_key_changed,
-    ) {
-        if local_at != remote_at {
-            crate::events::emit(&crate::MergeEvent::MasterKeyDisagreement {
-                local_changed_at: local_at,
-                remote_changed_at: remote_at,
-            });
-            return Err(MergeError::MasterKeyDisagreement {
-                local_changed_at: local_at,
-                remote_changed_at: remote_at,
-            });
-        }
+    ) && local_at != remote_at
+    {
+        crate::events::emit(&crate::MergeEvent::MasterKeyDisagreement {
+            local_changed_at: local_at,
+            remote_changed_at: remote_at,
+        });
+        return Err(MergeError::MasterKeyDisagreement {
+            local_changed_at: local_at,
+            remote_changed_at: remote_at,
+        });
     }
 
     let local_entries: HashMap<EntryId, &Entry> =
