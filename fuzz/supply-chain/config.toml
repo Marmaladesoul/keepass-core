@@ -30,11 +30,11 @@ version = "0.6.1"
 criteria = "safe-to-run"
 
 [[exemptions.aes]]
-version = "0.9.4"
+version = "0.9.1"
 criteria = "safe-to-run"
 
 [[exemptions.aes-gcm]]
-version = "0.11.1"
+version = "0.11.0"
 criteria = "safe-to-run"
 
 [[exemptions.argon2]]
@@ -198,7 +198,7 @@ version = "0.10.3"
 criteria = "safe-to-run"
 
 [[exemptions.sha2]]
-version = "0.11.1"
+version = "0.11.0"
 criteria = "safe-to-run"
 
 [[exemptions.simd-adler32]]
