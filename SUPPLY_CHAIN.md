@@ -57,7 +57,9 @@ is a fresh release that is itself malicious, from a compromised
 maintainer account or release pipeline; such releases are usually found
 and yanked within days, and the malicious code is often in the published
 package but not in the project's git history. So every update is
-reviewed as follows:
+reviewed as follows, unless an imported audit already covers the new
+version (then `cargo vet` passes on its own and there is nothing of ours
+to record):
 
 1. **Wait.** Don't adopt a release in its first two weeks unless it fixes
    an advisory that affects us.
@@ -130,8 +132,8 @@ Everything else — patch versions of unrelated deps (`thiserror`,
 `uuid`, `serde_json`, `chrono`, etc.).
 
 CI-green Dependabot PRs in this tier can be merged once the published
-diff has been reviewed and certified (*Reviewing an update*). No
-release-notes reading required.
+diff has been reviewed and certified, or an imported audit covers it
+(*Reviewing an update*). No release-notes reading required.
 
 ## When CI fires red
 
