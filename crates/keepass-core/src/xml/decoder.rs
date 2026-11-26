@@ -99,6 +99,26 @@ pub fn decode_vault_with_cipher(
     xml: &[u8],
     cipher: &mut InnerStreamCipher,
 ) -> Result<Vault, XmlError> {
+    decode_vault_checking_meta(xml, cipher, |_| Ok::<(), XmlError>(()))
+}
+
+/// [`decode_vault_with_cipher`], running `check_meta` on each top-level
+/// `<Meta>` as soon as it has been read.
+///
+/// The decoder is a single streaming pass that decrypts protected
+/// values as it meets them, and `<Meta>` carries none, so `check_meta`
+/// runs before any protected value that follows its `<Meta>` in
+/// document order is decrypted. An `Err` from it aborts the decode
+/// there and is returned unchanged.
+///
+/// Every known writer emits `<Meta>` before `<Root>`. In a document
+/// that put `<Root>` first, `check_meta` would run only after the
+/// protected values in `<Root>` had been decrypted.
+pub(crate) fn decode_vault_checking_meta<E: From<XmlError>>(
+    xml: &[u8],
+    cipher: &mut InnerStreamCipher,
+    mut check_meta: impl FnMut(&Meta) -> Result<(), E>,
+) -> Result<Vault, E> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
 
@@ -115,7 +135,7 @@ pub fn decode_vault_with_cipher(
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Err(e) => return Err(XmlError::Malformed(e.to_string())),
+            Err(e) => return Err(XmlError::Malformed(e.to_string()).into()),
             Ok(Event::Start(e)) => {
                 let name = tag_name(&e)?;
                 stack.push(name.clone());
@@ -126,6 +146,7 @@ pub fn decode_vault_with_cipher(
                 //   KeePassFile/Root/DeletedObjects → read_deleted_objects
                 if stack == ["KeePassFile", "Meta"] {
                     meta = read_meta(&mut reader, &mut buf, &mut binaries)?;
+                    check_meta(&meta)?;
                     stack.pop();
                 } else if stack == ["KeePassFile", "Root", "Group"] && root.is_none() {
                     root = Some(read_group(&mut reader, &mut buf, cipher, MAX_GROUP_DEPTH)?);
@@ -746,18 +767,31 @@ fn parse_ref_attribute(e: &BytesStart<'_>) -> Result<Option<u32>, XmlError> {
     Ok(None)
 }
 
+/// Error detail for a protected `<Value>` whose payload is not base64.
+const PROTECTED_VALUE_NOT_BASE64: &str = "protected payload is not valid base64";
+
+/// Error detail for a protected `<Value>` that decrypts to bytes that
+/// are not UTF-8.
+const PROTECTED_VALUE_NOT_UTF8: &str = "decrypted protected payload is not valid UTF-8";
+
 /// Base64-decode a protected `<Value>` payload, XOR it in place against
 /// the cipher's keystream, and interpret the result as UTF-8.
+///
+/// Both failures carry a fixed detail string. The underlying errors
+/// would name a byte offset (and, for UTF-8, a sequence length) — for
+/// the UTF-8 case, a position inside decrypted secret material — and
+/// nothing about where a protected value went wrong belongs in an error
+/// that callers may log or display.
 fn decrypt_protected_value(raw: &str, cipher: &mut InnerStreamCipher) -> Result<String, XmlError> {
     let trimmed = raw.trim();
-    let mut bytes = BASE64.decode(trimmed).map_err(|e| XmlError::InvalidValue {
+    let mut bytes = BASE64.decode(trimmed).map_err(|_| XmlError::InvalidValue {
         element: "Value",
-        detail: format!("protected payload is not valid base64: {e}"),
+        detail: PROTECTED_VALUE_NOT_BASE64.to_owned(),
     })?;
     cipher.process(&mut bytes);
-    String::from_utf8(bytes).map_err(|e| XmlError::InvalidValue {
+    String::from_utf8(bytes).map_err(|_| XmlError::InvalidValue {
         element: "Value",
-        detail: format!("decrypted protected payload is not valid UTF-8: {e}"),
+        detail: PROTECTED_VALUE_NOT_UTF8.to_owned(),
     })
 }
 
@@ -1751,7 +1785,9 @@ fn parse_binary_attributes(e: &BytesStart<'_>) -> Result<(u32, bool), XmlError> 
                 // we haven't built — so reject loudly rather than
                 // silently store ciphertext as `Binary::data` with
                 // `protected: false`. Loud-reject mirrors the
-                // Twofish-CBC stance.
+                // Twofish-CBC stance. Lifting this must keep the KDBX3
+                // `<Meta><HeaderHash>` check ahead of any keystream use:
+                // `<Meta>` decrypts nothing today, and the check relies on it.
                 let s = std::str::from_utf8(&a.value)
                     .map_err(|err| XmlError::Malformed(err.to_string()))?;
                 if s.eq_ignore_ascii_case("true") {
@@ -2140,6 +2176,46 @@ fn parse_uuid(text: &str) -> Result<Uuid, XmlError> {
 mod tests {
     use super::*;
 
+    /// A failing `check_meta` stops the decode before a protected value
+    /// later in the document is decrypted: here that value is not valid
+    /// UTF-8 under the `None` cipher, so reaching it would have produced
+    /// `InvalidValue` instead of the check's own error.
+    #[test]
+    fn check_meta_runs_before_later_protected_values_are_decrypted() {
+        #[derive(Debug, PartialEq)]
+        enum Outcome {
+            Refused(String),
+            Xml,
+        }
+        impl From<XmlError> for Outcome {
+            fn from(_: XmlError) -> Self {
+                Self::Xml
+            }
+        }
+
+        let xml = br#"<KeePassFile>
+  <Meta><HeaderHash>Zm9vYmFy</HeaderHash></Meta>
+  <Root><Group><UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>R</Name>
+    <Entry><UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+      <String><Key>Password</Key><Value Protected="True">/w==</Value></String>
+    </Entry>
+  </Group></Root>
+</KeePassFile>"#;
+        let mut cipher = InnerStreamCipher::None;
+        let err = decode_vault_checking_meta(xml, &mut cipher, |meta| {
+            Err(Outcome::Refused(meta.header_hash.clone()))
+        })
+        .unwrap_err();
+        assert_eq!(err, Outcome::Refused("Zm9vYmFy".to_owned()));
+
+        // Control: with the check passing, the decoder does reach the
+        // protected value and rejects it.
+        let mut cipher = InnerStreamCipher::None;
+        let err =
+            decode_vault_checking_meta(xml, &mut cipher, |_| Ok::<(), Outcome>(())).unwrap_err();
+        assert_eq!(err, Outcome::Xml);
+    }
+
     /// A minimal, well-formed KeePass XML document we can embed in tests.
     ///
     /// Uses hand-crafted base64 UUIDs: `AAAAAAAAAAAAAAAAAAAAAA==` → all
@@ -2522,25 +2598,30 @@ mod tests {
 </KeePassFile>"#;
         let mut cipher = InnerStreamCipher::None;
         let err = decode_vault_with_cipher(xml, &mut cipher).unwrap_err();
-        assert!(matches!(
-            err,
-            XmlError::InvalidValue {
-                element: "Value",
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                &err,
+                XmlError::InvalidValue {
+                    element: "Value",
+                    detail,
+                } if detail == PROTECTED_VALUE_NOT_BASE64
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
     fn non_utf8_plaintext_is_rejected() {
-        // A Salsa20 keystream over an arbitrary 8-byte ciphertext will
-        // almost never yield valid UTF-8; engineer that directly by
-        // XOR-ing valid base64-decoded bytes that result in 0xFF bytes
-        // under the None cipher.
-        // 0xFF 0xFE 0xFD is never valid UTF-8 as a standalone sequence.
-        let payload = BASE64.encode([0xFF_u8, 0xFE, 0xFD]);
-        let xml = format!(
-            r#"<KeePassFile>
+        // Under the None cipher the base64-decoded bytes are the
+        // "plaintext", so invalid UTF-8 can be placed directly. The
+        // invalid sequence sits at different offsets, with different
+        // lengths, and the error must be identical for all of them: the
+        // detail names no position or length within the decrypted value.
+        let payloads: [&[u8]; 3] = [&[0xFF, 0xFE, 0xFD], b"abcdefg\xFF", b"pass\xE2\x82word"];
+        for plaintext in payloads {
+            let payload = BASE64.encode(plaintext);
+            let xml = format!(
+                r#"<KeePassFile>
   <Meta><Generator>T</Generator></Meta>
   <Root>
     <Group>
@@ -2553,16 +2634,20 @@ mod tests {
     </Group>
   </Root>
 </KeePassFile>"#
-        );
-        let mut cipher = InnerStreamCipher::None;
-        let err = decode_vault_with_cipher(xml.as_bytes(), &mut cipher).unwrap_err();
-        assert!(matches!(
-            err,
-            XmlError::InvalidValue {
-                element: "Value",
-                ..
-            }
-        ));
+            );
+            let mut cipher = InnerStreamCipher::None;
+            let err = decode_vault_with_cipher(xml.as_bytes(), &mut cipher).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    XmlError::InvalidValue {
+                        element: "Value",
+                        detail,
+                    } if detail == PROTECTED_VALUE_NOT_UTF8
+                ),
+                "{plaintext:?}: {err:?}"
+            );
+        }
     }
 
     #[test]

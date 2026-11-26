@@ -56,6 +56,7 @@ use crate::model::{
 };
 use crate::protector::{FieldProtector, ProtectorError, SessionKey, open_with_key, seal_with_key};
 use crate::secret::{CompositeKey, TransformedKey};
+use crate::xml::decoder::decode_vault_checking_meta;
 use crate::xml::{
     decode_vault_with_cipher, encode_vault_kdbx3_with_cipher_and_header_hash,
     encode_vault_with_cipher,
@@ -383,6 +384,9 @@ impl Kdbx<HeaderRead> {
     /// 9. Decode the inner XML into a typed [`Vault`], decrypting
     ///    protected values against the inner-stream cipher in document
     ///    order.
+    ///    KDBX3: as soon as `<Meta>` has been read, and so before any
+    ///    protected value is decrypted, check its `<HeaderHash>` (when
+    ///    present) against the SHA-256 of the outer header.
     ///
     /// # Errors
     ///
@@ -393,7 +397,10 @@ impl Kdbx<HeaderRead> {
     /// malformed inner header, unsupported cipher), and with
     /// [`FormatError::HeaderHashMismatch`] when a KDBX4 outer header does
     /// not match its stored SHA-256. Returns [`Error::Xml`] on malformed
-    /// inner XML.
+    /// inner XML. On KDBX3, a `<Meta><HeaderHash>` that does not match
+    /// the outer header is reported as [`CryptoError::Decrypt`], like a
+    /// wrong key: its verdict exists only once the key has decrypted the
+    /// payload, so a distinct variant would confirm the key was right.
     ///
     /// The crypto vs format split follows the error-collapse discipline
     /// from §4.8.7 of the design doc: we deliberately do **not**
@@ -427,13 +434,21 @@ impl Kdbx<HeaderRead> {
     /// a file in place can mount a chosen-IV / chosen-seed attack
     /// against the AES-256-CBC ciphertext, and only the encrypted
     /// stream-start-bytes sentinel detects tampering after a successful
-    /// decrypt. The KDF-parameter caps applied here (AES-KDF rounds,
-    /// Argon2 memory / iterations / parallelism) blunt the DoS shape of
-    /// a hostile header, but the format itself cannot be made
-    /// confidentiality-secure against an adversary with file-substitute
-    /// power. Prefer **KDBX4** for any threat model that includes
-    /// adversarially-crafted files; KDBX4's `HeaderHmac` is verified
-    /// before any payload decryption begins.
+    /// decrypt. KDBX 3.1 writers also store the header's SHA-256 inside
+    /// the encrypted payload as `<Meta><HeaderHash>`; it is verified
+    /// before any protected value is decrypted, so a header altered in a
+    /// way that still decrypts (the inner-stream key or algorithm, say)
+    /// is refused as [`CryptoError::Decrypt`]. KDBX 3.0 has no such
+    /// element, and a file without it is accepted, as KeePass 2.x
+    /// accepts it: there the inner-stream key and algorithm stay
+    /// unauthenticated, and protected values are decrypted against
+    /// whatever the header says. The KDF-parameter caps applied here
+    /// (AES-KDF rounds, Argon2 memory / iterations / parallelism) blunt
+    /// the DoS shape of a hostile header, but the format itself cannot
+    /// be made confidentiality-secure against an adversary with
+    /// file-substitute power. Prefer **KDBX4** for any threat model that
+    /// includes adversarially-crafted files; KDBX4's `HeaderHmac` is
+    /// verified before any payload decryption begins.
     pub fn unlock(self, composite: &CompositeKey) -> Result<Kdbx<Unlocked>, Error> {
         self.unlock_with_clock(composite, Box::new(SystemClock))
     }
@@ -1996,6 +2011,43 @@ const KDBX4_HEADER_HMAC_LEN: usize = 32;
 /// The hash plus the HMAC tag: the minimum KDBX4 payload before the block stream.
 const KDBX4_HEADER_TRAILER_LEN: usize = KDBX4_HEADER_HASH_LEN + KDBX4_HEADER_HMAC_LEN;
 
+/// Check a KDBX3 `<Meta><HeaderHash>` (base64 of the SHA-256 of the
+/// outer header, as written by KDBX 3.1 writers) against the header
+/// actually read.
+///
+/// An absent or empty element passes: KDBX 3.0 has no such element and
+/// KeePass 2.x skips the check when it is missing, so this does too. A
+/// present one must decode to exactly the header's SHA-256 (compared in
+/// constant time); anything else — a different digest, bad base64, the
+/// wrong length — fails.
+///
+/// A failure is reported as [`CryptoError::Decrypt`], collapsed with a
+/// wrong key, rather than as a header-damage variant like the KDBX4
+/// header hash. The KDBX4 hash is checked before any key work and gives
+/// the same verdict for every credential. This one lives inside the
+/// encrypted payload, so its verdict is reachable only after the key
+/// has decrypted the payload and the block stream has verified: a
+/// distinct variant would tell whoever sees the error that the key was
+/// right and the header altered, which is the wrong-key distinction the
+/// collapse rule withholds. Its verdict depends only on the header
+/// bytes, never on any protected value, so it cannot itself become a
+/// plaintext oracle whichever variant it used; collapsing is about the
+/// key.
+fn verify_kdbx3_xml_header_hash(header_bytes: &[u8], stored_b64: &str) -> Result<(), Error> {
+    let stored_b64 = stored_b64.trim();
+    if stored_b64.is_empty() {
+        return Ok(());
+    }
+    let declared: Option<[u8; 32]> = BASE64
+        .decode(stored_b64)
+        .ok()
+        .and_then(|digest| digest.try_into().ok());
+    match declared {
+        Some(digest) if verify_header_hash(header_bytes, &digest).is_ok() => Ok(()),
+        _ => Err(CryptoError::Decrypt.into()),
+    }
+}
+
 // The pipeline is intentionally a single linear function: breaking it up by
 // version or stage tends to spread error-handling across helpers that each
 // know only a slice of the context, which makes error-collapse discipline
@@ -2185,9 +2237,20 @@ fn do_unlock(
         };
 
     // --- Inner-stream cipher + XML decode (KDBX3) --------------------------
+    // The outer header is unauthenticated, and it supplies the inner-stream
+    // key and algorithm. KDBX 3.1 vouches for it from inside the payload
+    // with `<Meta><HeaderHash>`, checked the moment `<Meta>` has been read
+    // and so before any protected value in `<Root>` is decrypted. Checking
+    // later would let the outcome depend on protected plaintext decrypted
+    // under an unverified inner-stream key. The document order is the writer's —
+    // the XML sits inside the verified hashed-block stream, so it cannot be
+    // rearranged without the key — and every known writer puts `<Meta>`
+    // first.
     let mut cipher = InnerStreamCipher::new(inner_stream_algorithm, &inner_stream_key)
         .map_err(|_| CryptoError::Decrypt)?;
-    let vault = decode_vault_with_cipher(&xml_bytes, &mut cipher)?;
+    let vault = decode_vault_checking_meta(&xml_bytes, &mut cipher, |meta| {
+        verify_kdbx3_xml_header_hash(header_bytes, &meta.header_hash)
+    })?;
     // `vault.binaries` is already populated from `<Meta><Binaries>` by the
     // decoder. The KDBX4 arm above assigned the inner-header binaries to
     // its own short-circuited return; on this V3 path the local `binaries`
@@ -2651,6 +2714,30 @@ fn do_save_v3(signature: FileSignature, state: &Unlocked, vault: &Vault) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kdbx3_xml_header_hash_accepts_absent_or_matching_and_refuses_the_rest() {
+        let header = b"a KDBX3 outer header";
+        let good = BASE64.encode(compute_header_hash(header));
+        let other = BASE64.encode(compute_header_hash(b"a different header"));
+        let short = BASE64.encode(&compute_header_hash(header)[..31]);
+
+        for accepted in ["", "  \n", good.as_str(), &format!(" {good}\n")] {
+            assert!(
+                verify_kdbx3_xml_header_hash(header, accepted).is_ok(),
+                "{accepted:?} should pass"
+            );
+        }
+        for refused in [other.as_str(), short.as_str(), "not base64!"] {
+            assert!(
+                matches!(
+                    verify_kdbx3_xml_header_hash(header, refused),
+                    Err(Error::Crypto(CryptoError::Decrypt))
+                ),
+                "{refused:?} should be refused as Decrypt"
+            );
+        }
+    }
 
     /// Build a minimal "just signature, no header fields" byte sequence that
     /// is enough to pass [`Kdbx::open_from_bytes`] but would fail
