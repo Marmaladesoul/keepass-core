@@ -1,0 +1,20 @@
+
+# cargo-vet audits file
+
+[[audits.aes]]
+who = "Marmalade Soul"
+criteria = "safe-to-deploy"
+delta = "0.9.1 -> 0.9.4"
+notes = "Published package diff reviewed by three independent reviewers. Package is byte-identical to upstream tag aes-v0.9.4 and was published via crates.io trusted publishing from RustCrypto/block-ciphers. Backends restructured; key schedules, round counts and constants verified genuine; fixslice rewrite checked against FIPS-197 vectors with an independent model. No build script, I/O, statics or new dependencies."
+
+[[audits.aes-gcm]]
+who = "Marmalade Soul"
+criteria = "safe-to-deploy"
+delta = "0.11.0 -> 0.11.1"
+notes = "Published package diff reviewed by two independent reviewers; matches upstream RustCrypto/AEADs at the release commit, trusted publishing. Tag comparison moves from subtle to ctutils and stays constant-time over equal-length slices; adds an opt-in zeroize feature. No unsafe, I/O or new crates in the tree."
+
+[[audits.sha2]]
+who = "Marmalade Soul"
+criteria = "safe-to-deploy"
+delta = "0.11.0 -> 0.11.1"
+notes = "Published package diff reviewed by two independent reviewers; matches upstream RustCrypto/hashes at the release commit, trusted publishing. Backends refactored to safe target_feature fns with bounds-checked loads; round constants and IVs unchanged; runtime feature detection unchanged. No build script, I/O or new dependencies."

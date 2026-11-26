@@ -3,6 +3,7 @@ name = "keepass-core-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 # Standalone crate — see comment below. Empty [workspace] table tells
 # cargo this is its own root, not a member of the parent workspace.

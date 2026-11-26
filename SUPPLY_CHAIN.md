@@ -16,10 +16,7 @@ Every pull request runs four supply-chain checks alongside the usual
 build / test / lint matrix. All four live in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
-- **`cargo audit`** — cross-references `Cargo.lock` against the
-  [RustSec advisory database](https://rustsec.org/). Fails on any
-  known CVE, yanked release, or formally unmaintained crate in the
-  transitive graph.
+- **`cargo audit`** — cross-references `Cargo.lock` against the [RustSec advisory database](https://rustsec.org/). It fails only on vulnerability advisories, anywhere in the transitive graph; unmaintained, unsound and yanked crates are reported as warnings but don't fail the job. Those cases are enforced by `cargo deny` (below).
 
 - **`cargo deny`** — config-driven policy enforcement, see
   [`deny.toml`](deny.toml). Specifically:
@@ -35,6 +32,7 @@ build / test / lint matrix. All four live in
     in-tree) covers every primitive we need, and rustls is the
     answer if we ever need TLS.
   - **Wildcards** are denied; **duplicate versions** warn.
+  - **Advisories**: fails on any vulnerability or yanked crate anywhere in the graph, and on unmaintained or unsound advisories for direct dependencies (cargo-deny's default `workspace` scope); unmaintained or unsound transitive crates surface only as `cargo audit` warnings.
 
 - **`cargo vet`** — every crate version in `Cargo.lock` must carry a
   recorded review (config in [`supply-chain/`](supply-chain/)): one of
@@ -44,18 +42,25 @@ build / test / lint matrix. All four live in
   dependency when vetting began. A new crate, or a new version of one,
   with none of those fails CI. See *Reviewing an update* below.
 
-- **Locked, pinned builds** — every cargo step runs `--locked`, so CI
-  builds exactly what `Cargo.lock` records; every GitHub Action is pinned
-  to a commit SHA (with its version in a comment, which Dependabot
-  updates), and CI-installed tools are pinned to a version and installed
-  `--locked`. A moved tag or a new release can't change what CI runs
-  without a reviewed commit here.
+- **Locked, pinned builds** — every cargo step runs `--locked`, so CI builds exactly what `Cargo.lock` records (except `cargo fuzz`, which has no such flag; see *The fuzz workspace*); every GitHub Action is pinned to a commit SHA (with its version in a comment, which Dependabot updates), and CI-installed tools are pinned to a version and installed `--locked`. A moved tag or a new release can't change what CI runs without a reviewed commit here.
 
 - **`cargo fmt` / `cargo clippy --all-targets -- -D warnings`** —
   baseline hygiene. Not supply-chain per se but bundled into the
   same pre-merge gate.
 
 A CI red is **blocking** — we don't merge PRs that fail any of these.
+
+### The fuzz workspace
+
+`fuzz/` is a separate cargo workspace (cargo-fuzz needs it outside the main one) with its own `fuzz/Cargo.lock`. The same gates cover that lockfile: the `cargo audit`, `cargo deny` and `cargo vet` jobs each run a second step against it (which runs even when the root step fails), and the Dependabot cargo entry scans `/fuzz` alongside `/` with the same schedule, cooldown, groups and holds.
+
+`cargo deny` applies the same `deny.toml` to both lockfiles. The fuzz crate's path dependency on keepass-core is allowed (it is unpublished, so `allow-wildcard-paths`), and `libfuzzer-sys`, which bundles LLVM's NCSA-licensed libFuzzer, has a crate-specific licence exception.
+
+`cargo vet` checks the fuzz lockfile against its own store, [`fuzz/supply-chain/`](fuzz/supply-chain/), with the policy `safe-to-run` for the whole fuzz dependency tree: fuzz binaries are built and run in CI and never shipped. It can't share `supply-chain/`, because a policy entry for the fuzz crate makes the root check fail (the crate isn't in the root graph). The store is a bootstrap baseline only: it imports the same organisations' audits, carries copies of our own audits from `supply-chain/audits.toml`, and its exemptions mirror the root store's (same crates, same versions), plus `libfuzzer-sys` and `jobserver`, the fuzz-only crates no import covers, at their versions when the fuzz lockfile was brought under vetting. The same rule applies: no new exemptions.
+
+`cargo fuzz` has no `--locked` flag, so the nightly fuzz job can't enforce the lockfile itself. The PR-time `cargo deny` and `cargo vet` steps run `--locked` against `fuzz/Cargo.lock`, so a lockfile that no longer matches the manifests fails there first.
+
+A crate in both lockfiles is vetted in both stores. When an update reaches the fuzz lockfile too, certify it there as well, at `safe-to-run`: run `cargo vet certify` from `fuzz/`, where it finds its own store.
 
 ## Reviewing an update
 

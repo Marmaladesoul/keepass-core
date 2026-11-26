@@ -22,9 +22,12 @@ all-features = true
 [advisories]
 version = 2
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# Fail the build on any vulnerability or unmaintained crate. Yanked
-# versions also fail — if a release was yanked from crates.io there's
-# usually a security reason and we shouldn't be depending on it.
+# Fail the build on any vulnerability anywhere in the graph, and on an
+# unmaintained or unsound crate that is a direct dependency of ours
+# (cargo-deny's default `workspace` scope; transitive ones are left to
+# cargo audit's warnings). Yanked versions also fail — if a release was
+# yanked from crates.io there's usually a security reason and we
+# shouldn't be depending on it.
 yanked = "deny"
 ignore = [
     # chrono unmaintained, no safe upgrade (all versions affected). An
@@ -61,6 +64,16 @@ allow = [
 # those would force keepass-core itself into a copyleft posture, which
 # would propagate to every downstream consumer.
 confidence-threshold = 0.93
+# The libfuzzer-sys exception only applies to the fuzz lockfile, so the
+# root run would otherwise warn that it went unused.
+unused-license-exception = "allow"
+# Per-crate allowances, narrower than widening `allow` for everyone.
+exceptions = [
+    # libfuzzer-sys bundles LLVM's libFuzzer, which is under NCSA (a
+    # permissive, BSD-style licence). Only the fuzz crate (fuzz/, never
+    # published or shipped) depends on it.
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 
 # ---------------------------------------------------------------------------
 # Bans — explicit deny-list + duplicate detection
@@ -68,6 +81,13 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The fuzz crate (fuzz/, publish = false) depends on keepass-core by path
+# alone. That isn't a wildcard on a registry crate: it can't be published,
+# and the path pins it to this repository's own source. This also passes
+# path dev-dependencies of the published crates; git sources stay blocked
+# by [sources] below, and path/git normal dependencies of the published
+# crates are still denied.
+allow-wildcard-paths = true
 highlight = "all"
 # Crates we never want pulled in transitively, with rationale.
 deny = [
